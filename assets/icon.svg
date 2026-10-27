@@ -1,0 +1,18 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none"
+     xmlns="http://www.w3.org/2000/svg" role="img" aria-label="DevSweep">
+  <!-- 底板：与界面背景同色 #0F172A -->
+  <rect width="512" height="512" rx="116" fill="#0F172A"/>
+
+  <!-- 文件夹：白色实体，单一轮廓（无内切，小尺寸不发虚） -->
+  <path d="M112 240 q0-32 32-32 h108 q14 0 23 9 l15 15 q9 8 23 8 h55
+           q32 0 32 32 v104 q0 32-32 32 H144 q-32 0-32-32 Z"
+        fill="#F8FAFC"/>
+
+  <!-- 扫地弧：绿色，宽 44，端点收圆，横跨文件夹上方 -->
+  <path d="M72 206 C 148 96 364 96 440 206"
+        stroke="#22C55E" stroke-width="44" stroke-linecap="round"/>
+
+  <!-- 被扫出去的两粒碎屑：体积递减，暗示"释放空间" -->
+  <circle cx="458" cy="286" r="13" fill="#22C55E"/>
+  <circle cx="484" cy="240" r="8" fill="#22C55E" opacity="0.55"/>
+</svg>

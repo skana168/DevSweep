@@ -5,6 +5,9 @@ edition = "2024"
 description = "Find and clean development caches"
 license = "MIT"
 
+[build-dependencies]
+embed-resource = "3"
+
 [dependencies]
 directories = "6.0.0"
 eframe = "0.37"
