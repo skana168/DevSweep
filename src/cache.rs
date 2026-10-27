@@ -412,7 +412,12 @@ mod tests {
             "Gradle stays under the user profile"
         );
         assert_eq!(
-            resolve(find("xcode.derived_data"), Platform::Windows, home, Some(local)),
+            resolve(
+                find("xcode.derived_data"),
+                Platform::Windows,
+                home,
+                Some(local)
+            ),
             None
         );
         assert_eq!(

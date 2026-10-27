@@ -6,15 +6,16 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use devsweep::cache::{self, CacheGroup, CacheRule};
+use devsweep::config::{self, Config, LanguageChoice, ThemeChoice};
 use devsweep::delete::{self, DeleteEvent, DeleteMode, Failure};
 use devsweep::plan::{self, DeletePlan, LARGE_TARGET_BYTES, PlanProject};
-use devsweep::rules::{self, Target};
+use devsweep::rules::{self, Rule, Target};
 use devsweep::scan::{self, Project, Stack};
 use devsweep::size::{self, SizeEvent, SizeRequest};
 use eframe::CreationContext;
 use eframe::egui::{
-    self, Align, Button, Checkbox, Color32, CornerRadius, Frame, Key, KeyboardShortcut, Label, Layout,
-    Modifiers, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit, Ui, UiBuilder,
+    self, Align, Button, Checkbox, Color32, CornerRadius, Frame, Key, KeyboardShortcut, Label,
+    Layout, Modifiers, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit, Ui, UiBuilder,
 };
 
 use crate::i18n::{Lang, Strings};
@@ -29,8 +30,14 @@ fn search_id() -> egui::Id {
 
 pub struct DevSweepApp {
     lang: Lang,
+    config: Config,
+    /// Built-in rules with the `rules.toml` overrides applied.
+    rules: Vec<Rule>,
+    /// Parse error from `rules.toml`; the app runs on built-ins meanwhile.
+    rules_error: Option<String>,
+    /// One-shot message under the roots list, e.g. a duplicate add.
+    root_notice: Option<&'static str>,
     view: View,
-    roots: Vec<PathBuf>,
     projects: Vec<Project>,
     /// Expanded targets and per-row UI state, keyed by the project's canonical path.
     entries: HashMap<PathBuf, ProjectEntry>,
@@ -60,6 +67,7 @@ pub struct DevSweepApp {
 enum View {
     Projects,
     Caches,
+    Settings,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -112,12 +120,17 @@ struct Flash {
 }
 
 impl DevSweepApp {
-    pub fn new(cc: &CreationContext<'_>) -> Self {
+    pub fn new(cc: &CreationContext<'_>, config: Config) -> Self {
         theme::install(&cc.egui_ctx);
+        theme::apply(&cc.egui_ctx, config.theme);
+        let loaded = rules::load(config::rules_path().as_deref());
         let mut app = Self {
-            lang: Lang::from_system(),
+            lang: Lang::from_choice(config.language),
+            config,
+            rules: loaded.rules,
+            rules_error: loaded.error,
+            root_notice: None,
             view: View::Projects,
-            roots: Vec::new(),
             projects: Vec::new(),
             entries: HashMap::new(),
             caches: cache::entries()
@@ -145,8 +158,18 @@ impl DevSweepApp {
             failures_open: false,
             failures: Vec::new(),
         };
+        app.projects = scan::scan(&app.active_roots());
+        app.sync_entries();
         app.measure_missing(&cc.egui_ctx);
         app
+    }
+
+    fn active_roots(&self) -> Vec<PathBuf> {
+        scan::active_roots(&self.config.roots)
+    }
+
+    fn persist(&self) {
+        config::save(&self.config);
     }
 
     fn strings(&self) -> &'static Strings {
@@ -154,21 +177,26 @@ impl DevSweepApp {
     }
 
     fn add_directory(&mut self, ctx: &egui::Context) {
-        if let Some(path) = rfd::FileDialog::new().pick_folder() {
-            let path = std::fs::canonicalize(&path).unwrap_or(path);
-            if !self.roots.contains(&path) {
-                // Only the new subtree is walked; existing projects keep their sizes.
-                scan::merge_scan(&mut self.projects, scan::scan(std::slice::from_ref(&path)));
-                self.roots.push(path);
-                self.sync_entries();
-                self.measure_missing(ctx);
-                self.last_scan = Instant::now();
-            }
+        let Some(path) = rfd::FileDialog::new().pick_folder() else {
+            return;
+        };
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        if self.config.roots.contains(&path) {
+            self.root_notice = Some(self.strings().root_duplicate);
+            return;
         }
+        // Only the new subtree is walked; existing projects keep their sizes.
+        scan::merge_scan(&mut self.projects, scan::scan(std::slice::from_ref(&path)));
+        self.config.roots.push(path);
+        self.root_notice = None;
+        self.sync_entries();
+        self.measure_missing(ctx);
+        self.persist();
+        self.last_scan = Instant::now();
     }
 
     fn rescan(&mut self, ctx: &egui::Context) {
-        self.projects = scan::scan(&self.roots);
+        self.projects = scan::scan(&self.active_roots());
         self.sync_entries();
         // A cache recreated since the last scan becomes measurable again.
         for row in &mut self.caches {
@@ -185,13 +213,15 @@ impl DevSweepApp {
     /// projects and their selection drop out.
     fn sync_entries(&mut self) {
         scan::retain_scanned(&mut self.entries, &self.projects);
-        let rules = rules::builtin_rules();
+        let rules = &self.rules;
         for project in &self.projects {
-            self.entries.entry(project.path.clone()).or_insert_with(|| ProjectEntry {
-                targets: rules::expand_targets(project, rules),
-                expanded: false,
-                selected: false,
-            });
+            self.entries
+                .entry(project.path.clone())
+                .or_insert_with(|| ProjectEntry {
+                    targets: rules::expand_targets(project, rules),
+                    expanded: false,
+                    selected: false,
+                });
         }
     }
 
@@ -278,11 +308,7 @@ impl DevSweepApp {
         let total = requests.len();
         let (tx, rx) = std::sync::mpsc::channel();
         size::measure(requests, tx);
-        self.measurement = Some(Measurement {
-            done: 0,
-            total,
-            rx,
-        });
+        self.measurement = Some(Measurement { done: 0, total, rx });
         ctx.request_repaint();
     }
 
@@ -429,7 +455,7 @@ impl DevSweepApp {
                 })
             })
             .collect();
-        plan::plan(&projects, &self.roots, rules::builtin_rules())
+        plan::plan(&projects, &self.config.roots, &self.rules)
     }
 
     /// Plan for the cleanup the confirm dialog will run.
@@ -468,9 +494,9 @@ impl DevSweepApp {
         let (tx, rx) = std::sync::mpsc::channel();
         let abort = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&abort);
-        // `DeleteMode::Trash` is the default; ticket 08 reads the mode from config.
+        let mode = self.config.delete_mode;
         std::thread::spawn(move || {
-            delete::execute(plan, DeleteMode::Trash, &flag, tx);
+            delete::execute(plan, mode, &flag, tx);
         });
 
         self.execution = Some(Execution {
@@ -512,16 +538,14 @@ impl DevSweepApp {
                 Ok(DeleteEvent::ProjectDone { project, deleted }) => {
                     if let Some(entry) = self.entries.get_mut(&project) {
                         // Only the targets that actually left the disk go away.
-                        entry.targets.retain(|target| !deleted.contains(&target.path));
+                        entry
+                            .targets
+                            .retain(|target| !deleted.contains(&target.path));
                         entry.selected = false;
                         entry.expanded = false;
                     }
                     for row in &mut self.caches {
-                        if row
-                            .path
-                            .as_ref()
-                            .is_some_and(|path| deleted.contains(path))
-                        {
+                        if row.path.as_ref().is_some_and(|path| deleted.contains(path)) {
                             row.size = Some(0);
                             row.cleaned = true;
                             row.checked = false;
@@ -648,9 +672,7 @@ impl DevSweepApp {
 
                         if !plan.skipped.is_empty() {
                             ui.add_space(16.0);
-                            ui.label(
-                                RichText::new(s.skipped).size(13.0).strong().color(t.danger),
-                            );
+                            ui.label(RichText::new(s.skipped).size(13.0).strong().color(t.danger));
                             for skip in &plan.skipped {
                                 let label = Label::new(
                                     RichText::new(skip.path.display().to_string())
@@ -659,8 +681,7 @@ impl DevSweepApp {
                                         .color(t.text_muted),
                                 )
                                 .truncate();
-                                ui.add(label)
-                                    .on_hover_text(skip.path.display().to_string());
+                                ui.add(label).on_hover_text(skip.path.display().to_string());
                                 ui.label(
                                     RichText::new(s.skip_reason(skip.reason))
                                         .size(11.0)
@@ -904,58 +925,22 @@ impl DevSweepApp {
     fn sidebar(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings) {
         ui.label(RichText::new("DevSweep").size(20.0).strong().color(t.text));
         ui.add_space(16.0);
-        ui.label(RichText::new(s.roots.to_uppercase()).size(11.0).color(t.text_muted));
+        ui.label(
+            RichText::new(s.roots.to_uppercase())
+                .size(11.0)
+                .color(t.text_muted),
+        );
         ui.add_space(4.0);
 
-        let mut remove = None;
-        for (index, root) in self.roots.iter().enumerate() {
-            ui.horizontal(|ui| {
-                let name = root
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| root.display().to_string());
-                let name_width = (ui.available_width() - 24.0).max(40.0);
-                let label = Label::new(RichText::new(name).size(14.0).color(t.text)).truncate();
-                ui.add_sized([name_width, 18.0], label)
-                    .on_hover_text(root.display().to_string());
-                let response =
-                    ui.add(Button::new(RichText::new("×").color(t.text_muted)).frame(false));
-                if response.on_hover_text(s.remove).clicked() {
-                    remove = Some(index);
-                }
-            });
-        }
-        if let Some(index) = remove {
-            let removed = self.roots.remove(index);
-            // Projects covered by another root stay. Roots below the removed one get
-            // re-walked, since their projects may have been merged into its parent.
-            self.projects
-                .retain(|project| self.roots.iter().any(|root| project.path.starts_with(root)));
-            let nested: Vec<PathBuf> = self
-                .roots
-                .iter()
-                .filter(|root| root.starts_with(&removed))
-                .cloned()
-                .collect();
-            for root in nested {
-                scan::merge_scan(&mut self.projects, scan::scan(std::slice::from_ref(&root)));
-            }
-            self.sync_entries();
-            self.last_scan = Instant::now();
-        }
-
-        ui.add_space(8.0);
-        let width = ui.available_width();
-        let button = Button::new(RichText::new(format!("+ {}", s.add_directory)).size(14.0))
-            .fill(t.bg)
-            .stroke(Stroke::new(1.0, t.border))
-            .corner_radius(8);
-        if ui.add_sized([width, 34.0], button).clicked() {
-            self.add_directory(ui.ctx());
-        }
+        self.roots_editor(ui, t, s);
 
         ui.add_space(20.0);
-        ui.label(RichText::new(s.type_filter.to_uppercase()).size(11.0).color(t.text_muted));
+        let width = ui.available_width();
+        ui.label(
+            RichText::new(s.type_filter.to_uppercase())
+                .size(11.0)
+                .color(t.text_muted),
+        );
         ui.add_space(4.0);
         let filters = std::iter::once((None, s.all)).chain(
             [Stack::Flutter, Stack::Android, Stack::Ios, Stack::Node]
@@ -998,6 +983,237 @@ impl DevSweepApp {
         {
             self.view = View::Caches;
         }
+
+        ui.add_space(8.0);
+        if ui
+            .add_sized(
+                [width, 32.0],
+                Button::selectable(
+                    self.view == View::Settings,
+                    RichText::new(s.settings).size(14.0),
+                ),
+            )
+            .clicked()
+        {
+            self.view = View::Settings;
+        }
+    }
+
+    /// The scan-root list, shared by the sidebar and the settings page.
+    fn roots_editor(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings) {
+        let covering = scan::covering_roots(&self.config.roots);
+        let mut remove = None;
+        for (index, root) in self.config.roots.iter().enumerate() {
+            let covered = covering[index].is_some();
+            ui.horizontal(|ui| {
+                let name = root
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| root.display().to_string());
+                let color = if covered { t.text_muted } else { t.text };
+                let name_width = (ui.available_width() - 24.0).max(40.0);
+                let label = Label::new(RichText::new(name).size(14.0).color(color)).truncate();
+                let hover = match &covering[index] {
+                    Some(parent) => format!("{}\n{}", s.root_covered, parent.display()),
+                    None => root.display().to_string(),
+                };
+                ui.add_sized([name_width, 18.0], label).on_hover_text(hover);
+                let response =
+                    ui.add(Button::new(RichText::new("×").color(t.text_muted)).frame(false));
+                if response.on_hover_text(s.remove).clicked() {
+                    remove = Some(index);
+                }
+            });
+            if let Some(parent) = &covering[index] {
+                ui.label(
+                    RichText::new(format!("{} · {}", s.root_covered, project_name(parent)))
+                        .size(11.0)
+                        .color(t.text_muted),
+                )
+                .on_hover_text(parent.display().to_string());
+            }
+        }
+        if let Some(index) = remove {
+            self.remove_root(index, ui.ctx());
+        }
+
+        ui.add_space(8.0);
+        let width = ui.available_width();
+        let button = Button::new(RichText::new(format!("+ {}", s.add_directory)).size(14.0))
+            .fill(t.bg)
+            .stroke(Stroke::new(1.0, t.border))
+            .corner_radius(8);
+        if ui.add_sized([width, 34.0], button).clicked() {
+            self.add_directory(ui.ctx());
+        }
+        if let Some(notice) = self.root_notice {
+            ui.add_space(4.0);
+            ui.label(RichText::new(notice).size(11.0).color(t.danger));
+        }
+    }
+
+    fn remove_root(&mut self, index: usize, ctx: &egui::Context) {
+        self.config.roots.remove(index);
+        self.root_notice = None;
+        // Projects under a remaining root stay. Roots that are no longer covered get
+        // re-walked, since the removed parent's scan may have supplied their projects.
+        self.projects.retain(|project| {
+            self.config
+                .roots
+                .iter()
+                .any(|root| project.path.starts_with(root))
+        });
+        for root in self.active_roots() {
+            scan::merge_scan(&mut self.projects, scan::scan(std::slice::from_ref(&root)));
+        }
+        self.sync_entries();
+        self.measure_missing(ctx);
+        self.persist();
+        self.last_scan = Instant::now();
+    }
+
+    fn open_rules(&mut self) {
+        let Some(path) = config::rules_path() else {
+            return;
+        };
+        if !path.exists() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&path, rules::TEMPLATE);
+        }
+        let _ = opener::open(&path);
+    }
+
+    fn settings_content(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings) {
+        ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.label(RichText::new(s.settings).size(18.0).strong().color(t.text));
+                ui.add_space(16.0);
+
+                ui.label(
+                    RichText::new(s.language.to_uppercase())
+                        .size(11.0)
+                        .color(t.text_muted),
+                );
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    for (choice, label) in [
+                        (LanguageChoice::System, s.system),
+                        (LanguageChoice::Zh, s.lang_zh),
+                        (LanguageChoice::En, s.lang_en),
+                    ] {
+                        if ui
+                            .selectable_label(
+                                self.config.language == choice,
+                                RichText::new(label).size(14.0),
+                            )
+                            .clicked()
+                        {
+                            self.config.language = choice;
+                            self.lang = Lang::from_choice(choice);
+                            self.persist();
+                        }
+                    }
+                });
+                ui.add_space(20.0);
+
+                ui.label(
+                    RichText::new(s.theme.to_uppercase())
+                        .size(11.0)
+                        .color(t.text_muted),
+                );
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    for (choice, label) in [
+                        (ThemeChoice::System, s.system),
+                        (ThemeChoice::Dark, s.dark),
+                        (ThemeChoice::Light, s.light),
+                    ] {
+                        if ui
+                            .selectable_label(
+                                self.config.theme == choice,
+                                RichText::new(label).size(14.0),
+                            )
+                            .clicked()
+                        {
+                            self.config.theme = choice;
+                            theme::apply(ui.ctx(), choice);
+                            self.persist();
+                        }
+                    }
+                });
+                ui.add_space(20.0);
+
+                ui.label(
+                    RichText::new(s.delete_mode.to_uppercase())
+                        .size(11.0)
+                        .color(t.text_muted),
+                );
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    for (mode, label) in [
+                        (DeleteMode::Trash, s.delete_trash),
+                        (DeleteMode::Direct, s.delete_direct),
+                    ] {
+                        if ui
+                            .selectable_label(
+                                self.config.delete_mode == mode,
+                                RichText::new(label).size(14.0),
+                            )
+                            .clicked()
+                        {
+                            self.config.delete_mode = mode;
+                            self.persist();
+                        }
+                    }
+                });
+                ui.add_space(20.0);
+
+                ui.label(
+                    RichText::new(s.roots.to_uppercase())
+                        .size(11.0)
+                        .color(t.text_muted),
+                );
+                ui.add_space(4.0);
+                self.roots_editor(ui, t, s);
+                ui.add_space(20.0);
+
+                ui.label(
+                    RichText::new(s.rules_file.to_uppercase())
+                        .size(11.0)
+                        .color(t.text_muted),
+                );
+                ui.add_space(4.0);
+                if let Some(path) = config::rules_path() {
+                    ui.label(
+                        RichText::new(path.display().to_string())
+                            .size(11.0)
+                            .monospace()
+                            .color(t.text_muted),
+                    );
+                }
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if secondary_button(ui, s.open_rules, t) {
+                        self.open_rules();
+                    }
+                    ui.label(
+                        RichText::new(s.rules_restart)
+                            .size(11.0)
+                            .color(t.text_muted),
+                    );
+                });
+                if let Some(error) = &self.rules_error {
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(format!("{} {error}", s.rules_error))
+                            .size(12.0)
+                            .color(t.danger),
+                    );
+                }
+            });
     }
 
     fn content(
@@ -1008,7 +1224,7 @@ impl DevSweepApp {
         plan: &DeletePlan,
         visible: &[usize],
     ) {
-        if self.roots.is_empty() {
+        if self.config.roots.is_empty() {
             if self.card(ui, t, s.empty_title, s.empty_body, Some(s.add_directory)) {
                 self.add_directory(ui.ctx());
             }
@@ -1071,7 +1287,13 @@ impl DevSweepApp {
             return;
         }
         if visible.is_empty() {
-            if self.card(ui, t, s.no_match_title, s.no_match_body, Some(s.clear_filters)) {
+            if self.card(
+                ui,
+                t,
+                s.no_match_title,
+                s.no_match_body,
+                Some(s.clear_filters),
+            ) {
                 self.search.clear();
                 self.filter = None;
             }
@@ -1147,7 +1369,11 @@ impl DevSweepApp {
             });
         });
         ui.add_space(4.0);
-        ui.label(RichText::new(s.cache_redownload).size(12.0).color(t.text_muted));
+        ui.label(
+            RichText::new(s.cache_redownload)
+                .size(12.0)
+                .color(t.text_muted),
+        );
         ui.add_space(12.0);
 
         let mut clean = None;
@@ -1187,14 +1413,7 @@ impl DevSweepApp {
         }
     }
 
-    fn card(
-        &self,
-        ui: &mut Ui,
-        t: &Tokens,
-        title: &str,
-        body: &str,
-        action: Option<&str>,
-    ) -> bool {
+    fn card(&self, ui: &mut Ui, t: &Tokens, title: &str, body: &str, action: Option<&str>) -> bool {
         let mut clicked = false;
         ui.vertical_centered(|ui| {
             ui.add_space((ui.available_height() * 0.18).clamp(24.0, 140.0));
@@ -1225,6 +1444,14 @@ impl eframe::App for DevSweepApp {
         self.poll_measurement(ctx);
         self.poll_execution(ctx);
 
+        // Remember the window size; `on_exit` writes it out with the rest of the config.
+        if let Some(rect) = ctx.input(|input| input.viewport().inner_rect) {
+            self.config.window = Some(config::Window {
+                width: rect.width(),
+                height: rect.height(),
+            });
+        }
+
         // Refresh stale data when the window comes back, but only after the grace period.
         let focused = ctx.input(|input| input.viewport().focused);
         if focused == Some(true)
@@ -1246,7 +1473,11 @@ impl eframe::App for DevSweepApp {
             .exact_size(24.0)
             .resizable(false)
             .show_separator_line(false)
-            .frame(Frame::new().fill(t.surface).inner_margin(egui::Margin::symmetric(16, 4)))
+            .frame(
+                Frame::new()
+                    .fill(t.surface)
+                    .inner_margin(egui::Margin::symmetric(16, 4)),
+            )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if let Some(measurement) = &self.measurement {
@@ -1326,6 +1557,7 @@ impl eframe::App for DevSweepApp {
             .show(ui, |ui| match self.view {
                 View::Projects => self.content(ui, t, s, &plan, &visible),
                 View::Caches => self.caches_content(ui, t, s),
+                View::Settings => self.settings_content(ui, t, s),
             });
 
         if let Some(cleanup) = self.pending {
@@ -1337,6 +1569,10 @@ impl eframe::App for DevSweepApp {
             self.confirm_dialog(ui.ctx(), t, s, &pending_plan, known, cleanup);
         }
         self.failures_dialog(ui.ctx(), t, s);
+    }
+
+    fn on_exit(&mut self) {
+        self.persist();
     }
 }
 
@@ -1417,7 +1653,12 @@ fn project_row(
 
     row.vertical(|ui| {
         ui.set_max_width((ui.available_width() - 200.0).max(120.0));
-        ui.label(RichText::new(&project.name).size(15.0).strong().color(t.text));
+        ui.label(
+            RichText::new(&project.name)
+                .size(15.0)
+                .strong()
+                .color(t.text),
+        );
         let path = Label::new(
             RichText::new(project.path.display().to_string())
                 .size(12.0)
@@ -1472,14 +1713,15 @@ fn target_row(ui: &mut Ui, project: &Project, target: &mut Target, t: &Tokens, s
     // Risky entries stay visually weak until the user checks them on purpose.
     let dimmed = target.dangerous && !target.checked;
     let color = if dimmed { t.text_muted } else { t.text };
-    let rel = target.path.strip_prefix(&project.path).unwrap_or(&target.path);
-    let label = Label::new(
-        RichText::new(rel.display().to_string())
-            .size(13.0)
-            .monospace()
-            .color(color),
-    )
-    .truncate();
+    let rel = target
+        .path
+        .strip_prefix(&project.path)
+        .unwrap_or(&target.path);
+    let text = target
+        .label
+        .clone()
+        .unwrap_or_else(|| rel.display().to_string());
+    let label = Label::new(RichText::new(text).size(13.0).monospace().color(color)).truncate();
     row.add(label)
         .on_hover_text(target.path.display().to_string());
 
@@ -1529,11 +1771,7 @@ fn cache_row(
                         );
                         // Only the cargo registry carries a risk note today.
                         if row.rule.id == "cargo.registry" {
-                            ui.label(
-                                RichText::new(s.cache_cargo_note)
-                                    .size(11.0)
-                                    .color(t.danger),
-                            );
+                            ui.label(RichText::new(s.cache_cargo_note).size(11.0).color(t.danger));
                         }
                     });
                     if let Some(path) = &row.path {

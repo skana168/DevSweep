@@ -163,7 +163,7 @@ fn check_target(
     if home.is_some_and(|home| canonical == home) {
         return Err(SkipReason::Home);
     }
-    if roots.iter().any(|root| canonical == *root) {
+    if roots.contains(&canonical) {
         return Err(SkipReason::ScanRoot);
     }
     if canonical == project_root || target.path == project.path {
@@ -187,7 +187,7 @@ fn check_target(
         .find(|rule| rule.id == target.rule_id)
         .ok_or(SkipReason::OutsideRules)?;
     let stack_applies = rule.stack.is_none_or(|stack| stack == project.stack);
-    if !stack_applies || !matches_rule(rel, rule.rel) {
+    if !stack_applies || !matches_rule(rel, &rule.rel) {
         return Err(SkipReason::OutsideRules);
     }
 
@@ -218,21 +218,23 @@ fn home_dir() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    fn target(rule_id: &'static str, path: PathBuf) -> Target {
+    fn target(rule_id: &str, path: PathBuf) -> Target {
         Target {
-            rule_id,
+            rule_id: rule_id.to_string(),
             path,
             size: Some(1_000),
             checked: true,
             dangerous: false,
+            label: None,
         }
     }
 
-    fn rule(id: &'static str, rel: &'static str) -> Rule {
+    fn rule(id: &str, rel: &str) -> Rule {
         Rule {
-            id,
+            id: id.to_string(),
             stack: None,
-            rel,
+            rel: rel.to_string(),
+            label: None,
             default_checked: true,
             dangerous: false,
         }
@@ -279,7 +281,7 @@ mod tests {
                 stack: Stack::Node,
                 targets: &targets,
             }],
-            &[root.clone()],
+            std::slice::from_ref(&root),
             &rules,
         );
 
@@ -288,10 +290,7 @@ mod tests {
             reasons(&plan),
             vec![
                 (root.display().to_string(), SkipReason::ScanRoot),
-                (
-                    root.join(".git").display().to_string(),
-                    SkipReason::Git
-                ),
+                (root.join(".git").display().to_string(), SkipReason::Git),
                 (
                     root.join("package.json").display().to_string(),
                     SkipReason::NotADirectory
@@ -319,7 +318,7 @@ mod tests {
                 targets: &targets,
             }],
             &[dir.path().to_path_buf()],
-            crate::rules::builtin_rules(),
+            &crate::rules::builtin_rules(),
         );
 
         assert_eq!(plan.items.len(), 1);
@@ -368,7 +367,10 @@ mod tests {
         assert_eq!(
             reasons(&plan),
             vec![
-                (project.join("other").display().to_string(), SkipReason::OutsideRules),
+                (
+                    project.join("other").display().to_string(),
+                    SkipReason::OutsideRules
+                ),
                 (
                     project.join("sub/deep").display().to_string(),
                     SkipReason::Overlap

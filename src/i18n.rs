@@ -1,3 +1,4 @@
+use devsweep::config::LanguageChoice;
 use devsweep::delete::FailureReason;
 use devsweep::plan::SkipReason;
 use devsweep::scan::Stack;
@@ -15,6 +16,14 @@ impl Lang {
             Self::Zh
         } else {
             Self::En
+        }
+    }
+
+    pub fn from_choice(choice: LanguageChoice) -> Self {
+        match choice {
+            LanguageChoice::System => Self::from_system(),
+            LanguageChoice::Zh => Self::Zh,
+            LanguageChoice::En => Self::En,
         }
     }
 
@@ -85,6 +94,23 @@ pub struct Strings {
     pub no_match_title: &'static str,
     pub no_match_body: &'static str,
     pub clear_filters: &'static str,
+    pub settings: &'static str,
+    pub language: &'static str,
+    pub theme: &'static str,
+    pub system: &'static str,
+    pub dark: &'static str,
+    pub light: &'static str,
+    pub lang_zh: &'static str,
+    pub lang_en: &'static str,
+    pub delete_mode: &'static str,
+    pub delete_trash: &'static str,
+    pub delete_direct: &'static str,
+    pub rules_file: &'static str,
+    pub open_rules: &'static str,
+    pub rules_error: &'static str,
+    pub rules_restart: &'static str,
+    pub root_covered: &'static str,
+    pub root_duplicate: &'static str,
 }
 
 impl Strings {
@@ -180,6 +206,23 @@ static ZH: Strings = Strings {
     no_match_title: "没有匹配的项目",
     no_match_body: "换一个关键词或类型过滤再试一次。",
     clear_filters: "清空筛选",
+    settings: "设置",
+    language: "语言",
+    theme: "主题",
+    system: "跟随系统",
+    dark: "深色",
+    light: "浅色",
+    lang_zh: "中文",
+    lang_en: "English",
+    delete_mode: "删除方式",
+    delete_trash: "移入废纸篓（可恢复）",
+    delete_direct: "直接删除（不可恢复）",
+    rules_file: "规则文件",
+    open_rules: "打开规则文件",
+    rules_error: "规则文件有误：",
+    rules_restart: "修改规则后需重启生效",
+    root_covered: "已被父根覆盖",
+    root_duplicate: "这个目录已在列表中",
 };
 
 static EN: Strings = Strings {
@@ -241,4 +284,21 @@ static EN: Strings = Strings {
     no_match_title: "No matching projects",
     no_match_body: "Try another keyword or type filter.",
     clear_filters: "Clear filters",
+    settings: "Settings",
+    language: "Language",
+    theme: "Theme",
+    system: "System",
+    dark: "Dark",
+    light: "Light",
+    lang_zh: "中文",
+    lang_en: "English",
+    delete_mode: "Delete method",
+    delete_trash: "Move to Trash (recoverable)",
+    delete_direct: "Delete permanently (cannot undo)",
+    rules_file: "Rules file",
+    open_rules: "Open rules file",
+    rules_error: "Rules file has problems:",
+    rules_restart: "Restart to apply rule changes",
+    root_covered: "Covered by a parent root",
+    root_duplicate: "This directory is already listed",
 };

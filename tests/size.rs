@@ -19,17 +19,21 @@ fn sizes_format_by_magnitude() {
     assert_eq!(format_size(MB - 1), "—");
     assert_eq!(format_size(MB), "1 MB");
     assert_eq!(format_size(380 * MB), "380 MB");
-    assert_eq!(format_size((1.2 * 1024.0 * 1024.0 * 1024.0) as u64), "1.2 GB");
+    assert_eq!(
+        format_size((1.2 * 1024.0 * 1024.0 * 1024.0) as u64),
+        "1.2 GB"
+    );
 }
 
 #[test]
 fn checked_size_sums_only_checked_targets_and_waits_for_their_sizes() {
     let target = |id: &'static str, size: Option<u64>, checked: bool| Target {
-        rule_id: id,
+        rule_id: id.to_string(),
         path: PathBuf::from(id),
         size,
         checked,
         dangerous: false,
+        label: None,
     };
 
     // A risky target that is off contributes nothing, even though it is measured.

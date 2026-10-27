@@ -1,213 +1,290 @@
+use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::io;
+use std::path::{Component, Path, PathBuf};
+
+use serde::Deserialize;
 
 use crate::scan::{Project, Stack};
 
 #[derive(Clone)]
 pub struct Rule {
-    pub id: &'static str,
+    pub id: String,
     /// `None` applies to every stack.
     pub stack: Option<Stack>,
     /// Literal relative path, with one `*` allowed inside a segment.
-    pub rel: &'static str,
+    pub rel: String,
+    /// Display name for user-added rules; built-ins show their path instead.
+    pub label: Option<String>,
     pub default_checked: bool,
     pub dangerous: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
-    pub rule_id: &'static str,
+    pub rule_id: String,
     pub path: PathBuf,
     pub size: Option<u64>,
     pub checked: bool,
     pub dangerous: bool,
+    pub label: Option<String>,
 }
 
-pub fn builtin_rules() -> &'static [Rule] {
-    &[
-        Rule {
-            id: "flutter.build",
-            stack: Some(Stack::Flutter),
-            rel: "build",
-            default_checked: true,
-            dangerous: false,
-        },
-        Rule {
-            id: "flutter.dart_tool",
-            stack: Some(Stack::Flutter),
-            rel: ".dart_tool",
-            default_checked: true,
-            dangerous: false,
-        },
-        Rule {
-            id: "flutter.ios_pods",
-            stack: Some(Stack::Flutter),
-            rel: "ios/Pods",
-            default_checked: true,
-            dangerous: false,
-        },
-        Rule {
-            id: "flutter.ios_ephemeral",
-            stack: Some(Stack::Flutter),
-            rel: "ios/Flutter/ephemeral",
-            default_checked: true,
-            dangerous: false,
-        },
-        Rule {
-            id: "flutter.android_gradle",
-            stack: Some(Stack::Flutter),
-            rel: "android/.gradle",
-            default_checked: true,
-            dangerous: false,
-        },
-        Rule {
-            id: "flutter.android_build",
-            stack: Some(Stack::Flutter),
-            rel: "android/build",
-            default_checked: true,
-            dangerous: false,
-        },
-        Rule {
-            id: "flutter.macos_pods",
-            stack: Some(Stack::Flutter),
-            rel: "macos/Pods",
-            default_checked: true,
-            dangerous: false,
-        },
-        Rule {
-            id: "flutter.plugins_dependencies",
-            stack: Some(Stack::Flutter),
-            rel: ".flutter-plugins-dependencies",
-            default_checked: true,
-            dangerous: false,
-        },
-        Rule {
-            id: "android.build",
-            stack: Some(Stack::Android),
-            rel: "build",
-            default_checked: true,
-            dangerous: false,
-        },
-        Rule {
-            id: "android.module_build",
-            stack: Some(Stack::Android),
-            rel: "*/build",
-            default_checked: true,
-            dangerous: false,
-        },
-        Rule {
-            id: "android.gradle",
-            stack: Some(Stack::Android),
-            rel: ".gradle",
-            default_checked: true,
-            dangerous: false,
-        },
-        Rule {
-            id: "android.cxx",
-            stack: Some(Stack::Android),
-            rel: ".cxx",
-            default_checked: true,
-            dangerous: false,
-        },
-        Rule {
-            id: "android.captures",
-            stack: Some(Stack::Android),
-            rel: "captures",
-            default_checked: true,
-            dangerous: false,
-        },
-        Rule {
-            id: "ios.pods",
-            stack: Some(Stack::Ios),
-            rel: "Pods",
-            default_checked: true,
-            dangerous: false,
-        },
-        Rule {
-            id: "ios.build",
-            stack: Some(Stack::Ios),
-            rel: "build",
-            default_checked: true,
-            dangerous: false,
-        },
-        Rule {
-            id: "ios.xcuserdata",
-            stack: Some(Stack::Ios),
-            rel: "*.xcodeproj/xcuserdata",
-            default_checked: true,
-            dangerous: false,
-        },
-        Rule {
-            id: "node.node_modules",
-            stack: Some(Stack::Node),
-            rel: "node_modules",
-            default_checked: true,
-            dangerous: false,
-        },
-        Rule {
-            id: "node.next",
-            stack: Some(Stack::Node),
-            rel: ".next",
-            default_checked: true,
-            dangerous: false,
-        },
-        Rule {
-            id: "node.out",
-            stack: Some(Stack::Node),
-            rel: "out",
-            default_checked: true,
-            dangerous: false,
-        },
-        Rule {
-            id: "node.nuxt",
-            stack: Some(Stack::Node),
-            rel: ".nuxt",
-            default_checked: true,
-            dangerous: false,
-        },
-        Rule {
-            id: "node.svelte_kit",
-            stack: Some(Stack::Node),
-            rel: ".svelte-kit",
-            default_checked: true,
-            dangerous: false,
-        },
-        Rule {
-            id: "node.turbo",
-            stack: Some(Stack::Node),
-            rel: ".turbo",
-            default_checked: true,
-            dangerous: false,
-        },
-        Rule {
-            id: "node.parcel_cache",
-            stack: Some(Stack::Node),
-            rel: ".parcel-cache",
-            default_checked: true,
-            dangerous: false,
-        },
-        Rule {
-            id: "node.vite",
-            stack: Some(Stack::Node),
-            rel: ".vite",
-            default_checked: true,
-            dangerous: false,
-        },
-        Rule {
-            id: "node.coverage",
-            stack: Some(Stack::Node),
-            rel: "coverage",
-            default_checked: true,
-            dangerous: false,
-        },
-        Rule {
-            id: "node.dist",
-            stack: Some(Stack::Node),
-            rel: "dist",
-            default_checked: false,
-            dangerous: true,
-        },
+fn rule(id: &str, stack: Option<Stack>, rel: &str, default_checked: bool, dangerous: bool) -> Rule {
+    Rule {
+        id: id.to_string(),
+        stack,
+        rel: rel.to_string(),
+        label: None,
+        default_checked,
+        dangerous,
+    }
+}
+
+/// The built-in table. `id`s are stable once released: users' `rules.toml` refers to them.
+pub fn builtin_rules() -> Vec<Rule> {
+    vec![
+        rule("flutter.build", Some(Stack::Flutter), "build", true, false),
+        rule(
+            "flutter.dart_tool",
+            Some(Stack::Flutter),
+            ".dart_tool",
+            true,
+            false,
+        ),
+        rule(
+            "flutter.ios_pods",
+            Some(Stack::Flutter),
+            "ios/Pods",
+            true,
+            false,
+        ),
+        rule(
+            "flutter.ios_ephemeral",
+            Some(Stack::Flutter),
+            "ios/Flutter/ephemeral",
+            true,
+            false,
+        ),
+        rule(
+            "flutter.android_gradle",
+            Some(Stack::Flutter),
+            "android/.gradle",
+            true,
+            false,
+        ),
+        rule(
+            "flutter.android_build",
+            Some(Stack::Flutter),
+            "android/build",
+            true,
+            false,
+        ),
+        rule(
+            "flutter.macos_pods",
+            Some(Stack::Flutter),
+            "macos/Pods",
+            true,
+            false,
+        ),
+        rule(
+            "flutter.plugins_dependencies",
+            Some(Stack::Flutter),
+            ".flutter-plugins-dependencies",
+            true,
+            false,
+        ),
+        rule("android.build", Some(Stack::Android), "build", true, false),
+        rule(
+            "android.module_build",
+            Some(Stack::Android),
+            "*/build",
+            true,
+            false,
+        ),
+        rule(
+            "android.gradle",
+            Some(Stack::Android),
+            ".gradle",
+            true,
+            false,
+        ),
+        rule("android.cxx", Some(Stack::Android), ".cxx", true, false),
+        rule(
+            "android.captures",
+            Some(Stack::Android),
+            "captures",
+            true,
+            false,
+        ),
+        rule("ios.pods", Some(Stack::Ios), "Pods", true, false),
+        rule("ios.build", Some(Stack::Ios), "build", true, false),
+        rule(
+            "ios.xcuserdata",
+            Some(Stack::Ios),
+            "*.xcodeproj/xcuserdata",
+            true,
+            false,
+        ),
+        rule(
+            "node.node_modules",
+            Some(Stack::Node),
+            "node_modules",
+            true,
+            false,
+        ),
+        rule("node.next", Some(Stack::Node), ".next", true, false),
+        rule("node.out", Some(Stack::Node), "out", true, false),
+        rule("node.nuxt", Some(Stack::Node), ".nuxt", true, false),
+        rule(
+            "node.svelte_kit",
+            Some(Stack::Node),
+            ".svelte-kit",
+            true,
+            false,
+        ),
+        rule("node.turbo", Some(Stack::Node), ".turbo", true, false),
+        rule(
+            "node.parcel_cache",
+            Some(Stack::Node),
+            ".parcel-cache",
+            true,
+            false,
+        ),
+        rule("node.vite", Some(Stack::Node), ".vite", true, false),
+        rule("node.coverage", Some(Stack::Node), "coverage", true, false),
+        rule("node.dist", Some(Stack::Node), "dist", false, true),
     ]
+}
+
+/// Generated by "Open rules file" when no `rules.toml` exists yet.
+pub const TEMPLATE: &str = r#"# DevSweep rule overrides.
+# Rule ids are the built-in names (for example "node.dist" or "ios.pods").
+#
+# Turn built-in rules off:
+# disable = ["node.dist", "ios.pods"]
+#
+# Change whether a rule is checked by default:
+# [defaults]
+# "node.dist" = true
+#
+# Add a directory of your own. stack is "flutter", "android", "ios", "node",
+# or "*" for every project type. label is optional.
+# [[extra]]
+# stack = "*"
+# path = ".cache"
+# label = "Cache"
+"#;
+
+pub struct LoadedRules {
+    pub rules: Vec<Rule>,
+    /// Set when `rules.toml` could not be read or parsed; `rules` is then built-in.
+    pub error: Option<String>,
+}
+
+/// Built-in rules with the user's `rules.toml` overrides applied.
+pub fn load(path: Option<&Path>) -> LoadedRules {
+    let Some(path) = path else {
+        return builtin(None);
+    };
+    match fs::read_to_string(path) {
+        Ok(text) => parse(&text),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => builtin(None),
+        Err(err) => builtin(Some(err.to_string())),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct Overrides {
+    disable: Vec<String>,
+    defaults: HashMap<String, bool>,
+    extra: Vec<Extra>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Extra {
+    stack: String,
+    path: String,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+fn builtin(error: Option<String>) -> LoadedRules {
+    LoadedRules {
+        rules: builtin_rules(),
+        error,
+    }
+}
+
+fn parse(text: &str) -> LoadedRules {
+    match toml::from_str::<Overrides>(text) {
+        Ok(overrides) => {
+            let (rules, error) = apply(overrides);
+            LoadedRules { rules, error }
+        }
+        // A typo must not take the app down: report it and keep the built-ins.
+        Err(err) => builtin(Some(err.to_string())),
+    }
+}
+
+fn apply(overrides: Overrides) -> (Vec<Rule>, Option<String>) {
+    let mut rules = builtin_rules();
+    rules.retain(|rule| !overrides.disable.contains(&rule.id));
+    for rule in &mut rules {
+        if let Some(checked) = overrides.defaults.get(&rule.id) {
+            rule.default_checked = *checked;
+        }
+    }
+    let mut problems = Vec::new();
+    for (index, extra) in overrides.extra.into_iter().enumerate() {
+        let Some(stack) = parse_stack(&extra.stack) else {
+            problems.push(format!(
+                "extra {}: unknown stack \"{}\"",
+                index + 1,
+                extra.stack
+            ));
+            continue;
+        };
+        if !is_plain_rel(&extra.path) {
+            problems.push(format!(
+                "extra {}: path \"{}\" must stay inside the project",
+                index + 1,
+                extra.path
+            ));
+            continue;
+        }
+        rules.push(Rule {
+            id: format!("extra.{index}"),
+            stack,
+            rel: extra.path,
+            label: extra.label,
+            default_checked: true,
+            dangerous: false,
+        });
+    }
+    let error = (!problems.is_empty()).then(|| problems.join("\n"));
+    (rules, error)
+}
+
+/// `Some(None)` for `"*"`, `None` for an unknown stack name.
+fn parse_stack(stack: &str) -> Option<Option<Stack>> {
+    match stack.trim().to_ascii_lowercase().as_str() {
+        "*" => Some(None),
+        "flutter" => Some(Some(Stack::Flutter)),
+        "android" => Some(Some(Stack::Android)),
+        "ios" => Some(Some(Stack::Ios)),
+        "node" => Some(Some(Stack::Node)),
+        _ => None,
+    }
+}
+
+/// Extras may not leave the project: no absolute paths, `..`, or `.`.
+fn is_plain_rel(rel: &str) -> bool {
+    !rel.is_empty()
+        && Path::new(rel)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
 }
 
 /// Resolve the rules that apply to `project` into existing paths.
@@ -217,13 +294,14 @@ pub fn expand_targets(project: &Project, rules: &[Rule]) -> Vec<Target> {
         if rule.stack.is_some_and(|stack| stack != project.stack) {
             continue;
         }
-        for path in resolve(&project.path, rule.rel) {
+        for path in resolve(&project.path, &rule.rel) {
             targets.push(Target {
-                rule_id: rule.id,
+                rule_id: rule.id.clone(),
                 path,
                 size: None,
                 checked: rule.default_checked,
                 dangerous: rule.dangerous,
+                label: rule.label.clone(),
             });
         }
     }
@@ -282,6 +360,13 @@ mod tests {
         }
     }
 
+    fn find<'a>(rules: &'a [Rule], id: &str) -> &'a Rule {
+        rules
+            .iter()
+            .find(|rule| rule.id == id)
+            .unwrap_or_else(|| panic!("{id} is missing"))
+    }
+
     #[test]
     fn wildcard_matches_one_level_only() {
         let dir = tempfile::tempdir().unwrap();
@@ -310,7 +395,7 @@ mod tests {
         node.stack = Stack::Node;
         fs::create_dir_all(root.join("node_modules")).unwrap();
 
-        let targets = expand_targets(&node, builtin_rules());
+        let targets = expand_targets(&node, &builtin_rules());
 
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].rule_id, "node.node_modules");
@@ -327,7 +412,7 @@ mod tests {
         let mut node = project(root);
         node.stack = Stack::Node;
 
-        let targets = expand_targets(&node, builtin_rules());
+        let targets = expand_targets(&node, &builtin_rules());
         let find = |id: &str| targets.iter().find(|target| target.rule_id == id).unwrap();
 
         assert!(find("node.node_modules").checked);
@@ -348,7 +433,7 @@ mod tests {
         let mut ios = project(root);
         ios.stack = Stack::Ios;
 
-        let paths: Vec<PathBuf> = expand_targets(&ios, builtin_rules())
+        let paths: Vec<PathBuf> = expand_targets(&ios, &builtin_rules())
             .into_iter()
             .filter(|target| target.rule_id == "ios.xcuserdata")
             .map(|target| target.path)
@@ -361,6 +446,115 @@ mod tests {
                 root.join("App.xcodeproj/xcuserdata"),
                 root.join("Other.xcodeproj/xcuserdata")
             ]
+        );
+    }
+
+    #[test]
+    fn disable_removes_a_builtin_rule() {
+        let loaded = parse("disable = [\"node.dist\", \"ios.pods\"]");
+
+        assert!(loaded.error.is_none());
+        assert_eq!(loaded.rules.len(), builtin_rules().len() - 2);
+        assert!(loaded.rules.iter().all(|rule| rule.id != "node.dist"));
+        assert!(loaded.rules.iter().all(|rule| rule.id != "ios.pods"));
+    }
+
+    #[test]
+    fn defaults_override_the_initial_checked_state() {
+        let loaded = parse("[defaults]\n\"node.dist\" = true\n\"ios.pods\" = false");
+
+        assert!(loaded.error.is_none());
+        assert!(find(&loaded.rules, "node.dist").default_checked);
+        assert!(!find(&loaded.rules, "ios.pods").default_checked);
+    }
+
+    #[test]
+    fn unknown_ids_are_ignored() {
+        let loaded = parse("disable = [\"nope\"]\n[defaults]\n\"nope\" = false\n\"gone\" = true");
+
+        assert!(loaded.error.is_none());
+        assert_eq!(loaded.rules.len(), builtin_rules().len());
+        assert!(find(&loaded.rules, "node.node_modules").default_checked);
+    }
+
+    #[test]
+    fn extra_rules_apply_to_one_stack_or_all_of_them() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".cache")).unwrap();
+        fs::create_dir_all(dir.path().join(".output")).unwrap();
+        let loaded = parse(
+            "[[extra]]\nstack = \"node\"\npath = \".cache\"\n\n\
+             [[extra]]\nstack = \"*\"\npath = \".output\"\nlabel = \"Build output\"",
+        );
+
+        let node = expand_targets(
+            &Project {
+                path: dir.path().to_path_buf(),
+                name: "app".into(),
+                stack: Stack::Node,
+            },
+            &loaded.rules,
+        );
+        assert!(
+            node.iter()
+                .any(|target| target.path == dir.path().join(".cache"))
+        );
+        assert!(node.iter().any(|target| {
+            target.path == dir.path().join(".output")
+                && target.label.as_deref() == Some("Build output")
+        }));
+
+        let mut android = project(dir.path());
+        android.stack = Stack::Android;
+        let android = expand_targets(&android, &loaded.rules);
+        assert!(
+            android
+                .iter()
+                .all(|target| target.path != dir.path().join(".cache"))
+        );
+        assert!(
+            android
+                .iter()
+                .any(|target| target.path == dir.path().join(".output"))
+        );
+    }
+
+    #[test]
+    fn extras_with_unsafe_paths_or_unknown_stacks_are_dropped_and_reported() {
+        let loaded = parse(
+            "[[extra]]\nstack = \"node\"\npath = \"../escape\"\n\n\
+             [[extra]]\nstack = \"node\"\npath = \"/etc\"\n\n\
+             [[extra]]\nstack = \"rust\"\npath = \".cache\"\n\n\
+             [[extra]]\nstack = \"node\"\npath = \"\"",
+        );
+
+        let error = loaded.error.expect("invalid extras are reported");
+        assert!(error.contains("unknown stack \"rust\""), "{error}");
+        assert!(error.contains("must stay inside the project"), "{error}");
+        assert_eq!(loaded.rules.len(), builtin_rules().len());
+        assert!(
+            loaded
+                .rules
+                .iter()
+                .all(|rule| !rule.id.starts_with("extra."))
+        );
+    }
+
+    #[test]
+    fn a_syntax_error_reports_a_readable_message_and_keeps_the_builtins() {
+        let loaded = parse("disable = [\"node.dist\"");
+
+        assert!(loaded.error.is_some());
+        assert_eq!(
+            loaded
+                .rules
+                .iter()
+                .map(|rule| rule.id.clone())
+                .collect::<Vec<_>>(),
+            builtin_rules()
+                .iter()
+                .map(|rule| rule.id.clone())
+                .collect::<Vec<_>>()
         );
     }
 }

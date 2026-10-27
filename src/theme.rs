@@ -1,3 +1,4 @@
+use devsweep::config::ThemeChoice;
 use eframe::egui::{self, Color32, Context, Stroke, Theme};
 
 pub struct Tokens {
@@ -37,7 +38,17 @@ pub fn tokens(theme: Theme) -> &'static Tokens {
     }
 }
 
-/// Install the token palette for both themes. The active theme still follows the system.
+/// Apply the saved preference; `ThemeChoice::System` follows the OS.
+pub fn apply(ctx: &Context, choice: ThemeChoice) {
+    let preference = match choice {
+        ThemeChoice::System => egui::ThemePreference::System,
+        ThemeChoice::Dark => egui::ThemePreference::Dark,
+        ThemeChoice::Light => egui::ThemePreference::Light,
+    };
+    ctx.set_theme(preference);
+}
+
+/// Install the token palette for both themes; [`apply`] picks which one is used.
 pub fn install(ctx: &Context) {
     for (theme, tokens) in [(Theme::Dark, &DARK), (Theme::Light, &LIGHT)] {
         ctx.style_mut_of(theme, |style| {

@@ -47,6 +47,31 @@ pub fn scan(roots: &[PathBuf]) -> Vec<Project> {
     projects
 }
 
+/// For each root, the other root that already covers it, if any.
+pub fn covering_roots(roots: &[PathBuf]) -> Vec<Option<PathBuf>> {
+    (0..roots.len())
+        .map(|index| {
+            roots
+                .iter()
+                .enumerate()
+                .find(|&(other, parent)| {
+                    other != index && parent != &roots[index] && roots[index].starts_with(parent)
+                })
+                .map(|(_, parent)| parent.clone())
+        })
+        .collect()
+}
+
+/// Roots not covered by another root: these are the ones worth walking.
+pub fn active_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
+    covering_roots(roots)
+        .into_iter()
+        .zip(roots)
+        .filter(|(covering, _)| covering.is_none())
+        .map(|(_, root)| root.clone())
+        .collect()
+}
+
 /// Fold a fresh scan of one subtree into an existing list: paths stay unique,
 /// and platform subdirectories that now belong to a registered parent disappear.
 pub fn merge_scan(projects: &mut Vec<Project>, found: Vec<Project>) {
@@ -199,15 +224,44 @@ mod tests {
     }
 
     #[test]
+    fn nested_roots_are_covered_by_their_parent() {
+        let roots = vec![
+            PathBuf::from("/work"),
+            PathBuf::from("/work/app"),
+            PathBuf::from("/other"),
+            PathBuf::from("/work/app/packages"),
+        ];
+
+        assert_eq!(
+            covering_roots(&roots),
+            vec![
+                None,
+                Some(PathBuf::from("/work")),
+                None,
+                Some(PathBuf::from("/work")),
+            ]
+        );
+        assert_eq!(
+            active_roots(&roots),
+            vec![PathBuf::from("/work"), PathBuf::from("/other")]
+        );
+    }
+
+    #[test]
+    fn duplicate_roots_do_not_cover_each_other() {
+        let roots = vec![PathBuf::from("/work"), PathBuf::from("/work")];
+
+        assert_eq!(covering_roots(&roots), vec![None, None]);
+        assert_eq!(active_roots(&roots), roots);
+    }
+
+    #[test]
     fn platform_dirs_are_merged_under_a_registered_parent() {
         let parent = PathBuf::from("/work/app");
         let registered = HashSet::from([parent.clone()]);
 
         assert!(is_platform_subdir(&parent.join("android"), &registered));
-        assert!(is_platform_subdir(
-            &parent.join("android/app"),
-            &registered
-        ));
+        assert!(is_platform_subdir(&parent.join("android/app"), &registered));
         assert!(is_platform_subdir(&parent.join("web"), &registered));
         assert!(!is_platform_subdir(
             &parent.join("packages/web"),

@@ -6,12 +6,15 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use serde::{Deserialize, Serialize};
+
 use crate::plan::{DeletePlan, PlanItem};
 
 /// Projects deleted in parallel. Abort only takes effect between projects.
 pub const CONCURRENCY: usize = 4;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum DeleteMode {
     /// Recoverable: move to the system trash.
     #[default]
@@ -47,7 +50,10 @@ pub enum FailureReason {
 #[derive(Debug)]
 pub enum DeleteEvent {
     /// One project begins.
-    Started { project: PathBuf, total: usize },
+    Started {
+        project: PathBuf,
+        total: usize,
+    },
     /// A project finished; `deleted` lists the targets removed from disk.
     ProjectDone {
         project: PathBuf,

@@ -14,9 +14,10 @@ fn write(path: &Path, len: usize) {
 
 fn extra_rule(id: &'static str, rel: &'static str) -> Rule {
     Rule {
-        id,
+        id: id.to_string(),
         stack: None,
-        rel,
+        rel: rel.to_string(),
+        label: None,
         default_checked: true,
         dangerous: false,
     }
@@ -29,7 +30,10 @@ fn plan_lists_checked_targets_and_rejects_escaping_paths() {
 
     // Node project with two cleanable targets and a risky default-off one.
     write(&root.join("app/package.json"), 0);
-    write(&root.join("app/node_modules/react/index.js"), 2 * MB as usize);
+    write(
+        &root.join("app/node_modules/react/index.js"),
+        2 * MB as usize,
+    );
     write(&root.join("app/.next/chunk.js"), 3 * MB as usize);
     write(&root.join("app/dist/bundle.js"), 4 * MB as usize);
     fs::create_dir_all(root.join("app/real")).unwrap();
@@ -37,7 +41,7 @@ fn plan_lists_checked_targets_and_rejects_escaping_paths() {
     // A directory outside the project that rules try to reach.
     write(&root.join("outside/big.bin"), 5 * MB as usize);
 
-    let mut rules = builtin_rules().to_vec();
+    let mut rules = builtin_rules();
     rules.extend([
         extra_rule("test.escape", "../outside"),
         extra_rule("test.link", "escape_link"),
@@ -59,7 +63,7 @@ fn plan_lists_checked_targets_and_rejects_escaping_paths() {
 
     let mut targets = expand_targets(project, &rules);
     for target in &mut targets {
-        target.size = Some(match target.rule_id {
+        target.size = Some(match target.rule_id.as_str() {
             "node.node_modules" => 2 * MB,
             "node.next" => 3 * MB,
             _ => 0,

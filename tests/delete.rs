@@ -24,9 +24,9 @@ fn project<'a>(projects: &'a [Project], name: &str) -> &'a Project {
 
 /// Node targets with sizes attached, so the plan has byte counts to report.
 fn plan_for(project: &Project, root: &Path) -> DeletePlan {
-    let mut targets = expand_targets(project, builtin_rules());
+    let mut targets = expand_targets(project, &builtin_rules());
     for target in &mut targets {
-        target.size = Some(match target.rule_id {
+        target.size = Some(match target.rule_id.as_str() {
             "node.node_modules" => 2 * MB,
             "node.next" => 3 * MB,
             other => panic!("unexpected target {other}"),
@@ -39,7 +39,7 @@ fn plan_for(project: &Project, root: &Path) -> DeletePlan {
             targets: &targets,
         }],
         &[root.to_path_buf()],
-        builtin_rules(),
+        &builtin_rules(),
     )
 }
 
@@ -109,7 +109,7 @@ fn one_failure_does_not_stop_the_batch() {
     let mut expanded = Vec::new();
     for name in ["locked", "free"] {
         let found = project(&projects, name);
-        let mut targets = expand_targets(found, builtin_rules());
+        let mut targets = expand_targets(found, &builtin_rules());
         assert_eq!(targets.len(), 1, "{name} only has node_modules");
         targets[0].size = Some(MB);
         expanded.push((found, targets));
@@ -122,7 +122,7 @@ fn one_failure_does_not_stop_the_batch() {
             targets,
         })
         .collect();
-    let delete_plan = plan(&plan_projects, &[root.clone()], builtin_rules());
+    let delete_plan = plan(&plan_projects, &[root.clone()], &builtin_rules());
 
     // A read-only target directory cannot be emptied.
     let locked = root.join("locked/node_modules");
