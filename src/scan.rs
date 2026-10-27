@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -41,33 +41,21 @@ const PLATFORM_DIRS: [&str; 6] = ["android", "ios", "macos", "windows", "linux",
 /// Discover projects under `roots`, sorted by name.
 pub fn scan(roots: &[PathBuf]) -> Vec<Project> {
     let mut projects = Vec::new();
-    let mut seen = HashSet::new();
-
     for root in roots {
-        let walker = WalkDir::new(root)
-            .max_depth(MAX_DEPTH)
-            .into_iter()
-            .filter_entry(|entry| entry.depth() == 0 || !is_pruned(entry));
+        merge_scan(&mut projects, scan_root(root));
+    }
+    projects
+}
 
-        for entry in walker.filter_map(Result::ok) {
-            if !entry.file_type().is_dir() {
-                continue;
-            }
-            let path = fs::canonicalize(entry.path()).unwrap_or_else(|_| entry.path().to_path_buf());
-            let Some(stack) = detect_stack(&path) else {
-                continue;
-            };
-            if seen.insert(path.clone()) {
-                projects.push(Project {
-                    name: entry_name(&path),
-                    path,
-                    stack,
-                });
-            }
+/// Fold a fresh scan of one subtree into an existing list: paths stay unique,
+/// and platform subdirectories that now belong to a registered parent disappear.
+pub fn merge_scan(projects: &mut Vec<Project>, found: Vec<Project>) {
+    for project in found {
+        if !projects.iter().any(|known| known.path == project.path) {
+            projects.push(project);
         }
     }
 
-    // Filter only after every root has been walked, so the result does not depend on root order.
     let project_paths: HashSet<PathBuf> = projects.iter().map(|p| p.path.clone()).collect();
     projects.retain(|project| !is_platform_subdir(&project.path, &project_paths));
 
@@ -77,6 +65,34 @@ pub fn scan(roots: &[PathBuf]) -> Vec<Project> {
             .cmp(&b.name.to_lowercase())
             .then_with(|| a.path.cmp(&b.path))
     });
+}
+
+/// Drop tracked entries whose project the latest scan no longer contains.
+pub fn retain_scanned<T>(tracked: &mut HashMap<PathBuf, T>, projects: &[Project]) {
+    tracked.retain(|path, _| projects.iter().any(|project| &project.path == path));
+}
+
+fn scan_root(root: &Path) -> Vec<Project> {
+    let mut projects = Vec::new();
+    let walker = WalkDir::new(root)
+        .max_depth(MAX_DEPTH)
+        .into_iter()
+        .filter_entry(|entry| entry.depth() == 0 || !is_pruned(entry));
+
+    for entry in walker.filter_map(Result::ok) {
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        let path = fs::canonicalize(entry.path()).unwrap_or_else(|_| entry.path().to_path_buf());
+        let Some(stack) = detect_stack(&path) else {
+            continue;
+        };
+        projects.push(Project {
+            name: entry_name(&path),
+            path,
+            stack,
+        });
+    }
     projects
 }
 

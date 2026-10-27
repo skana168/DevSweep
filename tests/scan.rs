@@ -1,6 +1,7 @@
-use devsweep::scan::{Stack, scan};
+use devsweep::scan::{Stack, merge_scan, retain_scanned, scan};
+use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn write(path: &Path) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -127,6 +128,59 @@ fn depth_is_limited_to_five_levels_below_the_root() {
 
     assert_eq!(projects.len(), 1);
     assert_eq!(projects[0].name, "e");
+}
+
+#[test]
+fn rescan_keeps_selection_for_survivors_and_drops_vanished_projects() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(&root.join("alpha/package.json"));
+    write(&root.join("beta/package.json"));
+
+    let first = scan(&[root.to_path_buf()]);
+    let mut selected: HashMap<PathBuf, bool> =
+        first.iter().map(|p| (p.path.clone(), true)).collect();
+
+    fs::remove_dir_all(root.join("beta")).unwrap();
+    let second = scan(&[root.to_path_buf()]);
+    retain_scanned(&mut selected, &second);
+
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected.get(&first[0].path), Some(&true));
+}
+
+#[test]
+fn merging_a_new_root_matches_scanning_both_roots_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let one = dir.path().join("one");
+    let two = dir.path().join("two");
+    write(&one.join("alpha/package.json"));
+    write(&two.join("beta/package.json"));
+
+    let mut projects = scan(std::slice::from_ref(&one));
+    merge_scan(&mut projects, scan(std::slice::from_ref(&two)));
+
+    assert_eq!(projects, scan(&[one, two]));
+}
+
+#[test]
+fn rescanning_a_surviving_child_root_restores_a_suppressed_platform_subdir() {
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().join("app");
+    let child = parent.join("android");
+    write(&parent.join("pubspec.yaml"));
+    write(&child.join("settings.gradle.kts"));
+
+    let mut projects = scan(&[parent, child.clone()]);
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].stack, Stack::Flutter);
+
+    // The UI removes the parent root, keeps projects under the child, then re-walks it.
+    projects.retain(|project| project.path.starts_with(&child));
+    merge_scan(&mut projects, scan(std::slice::from_ref(&child)));
+
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].stack, Stack::Android);
 }
 
 #[test]

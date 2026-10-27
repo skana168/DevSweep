@@ -77,6 +77,14 @@ pub struct Strings {
     pub cache_not_found: &'static str,
     pub cache_redownload: &'static str,
     pub cache_cargo_note: &'static str,
+    pub all: &'static str,
+    pub type_filter: &'static str,
+    pub search_hint: &'static str,
+    pub reclaimable: &'static str,
+    pub select_all: &'static str,
+    pub no_match_title: &'static str,
+    pub no_match_body: &'static str,
+    pub clear_filters: &'static str,
 }
 
 impl Strings {
@@ -164,6 +172,14 @@ static ZH: Strings = Strings {
     cache_not_found: "未找到",
     cache_redownload: "清理后需重新下载",
     cache_cargo_note: "清理会影响本机 Rust 构建",
+    all: "全部",
+    type_filter: "类型",
+    search_hint: "搜索名称或路径 (⌘F)",
+    reclaimable: "可释放",
+    select_all: "全选当前结果",
+    no_match_title: "没有匹配的项目",
+    no_match_body: "换一个关键词或类型过滤再试一次。",
+    clear_filters: "清空筛选",
 };
 
 static EN: Strings = Strings {
@@ -217,4 +233,12 @@ static EN: Strings = Strings {
     cache_not_found: "Not found",
     cache_redownload: "Downloads again next time",
     cache_cargo_note: "Affects Rust builds on this machine",
+    all: "All",
+    type_filter: "Type",
+    search_hint: "Search name or path (⌘F)",
+    reclaimable: "Cleanable",
+    select_all: "Select everything shown",
+    no_match_title: "No matching projects",
+    no_match_body: "Try another keyword or type filter.",
+    clear_filters: "Clear filters",
 };

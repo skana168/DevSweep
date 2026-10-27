@@ -3,22 +3,29 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use devsweep::cache::{self, CacheGroup, CacheRule};
 use devsweep::delete::{self, DeleteEvent, DeleteMode, Failure};
 use devsweep::plan::{self, DeletePlan, LARGE_TARGET_BYTES, PlanProject};
 use devsweep::rules::{self, Target};
-use devsweep::scan::{self, Project};
+use devsweep::scan::{self, Project, Stack};
 use devsweep::size::{self, SizeEvent, SizeRequest};
 use eframe::CreationContext;
 use eframe::egui::{
     self, Align, Button, Checkbox, Color32, CornerRadius, Frame, Key, KeyboardShortcut, Label, Layout,
-    Modifiers, RichText, ScrollArea, Sense, Stroke, StrokeKind, Ui, UiBuilder,
+    Modifiers, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit, Ui, UiBuilder,
 };
 
 use crate::i18n::{Lang, Strings};
 use crate::theme::{self, Tokens};
+
+/// A window that spent this long in the background gets a fresh scan on focus.
+const REFRESH_AFTER: Duration = Duration::from_secs(30);
+
+fn search_id() -> egui::Id {
+    egui::Id::unique("project_search")
+}
 
 pub struct DevSweepApp {
     lang: Lang,
@@ -29,6 +36,12 @@ pub struct DevSweepApp {
     entries: HashMap<PathBuf, ProjectEntry>,
     caches: Vec<CacheRow>,
     measurement: Option<Measurement>,
+    search: String,
+    filter: Option<Stack>,
+    sort: Sort,
+    /// Previous frame's window focus, for the focus-refresh hook.
+    was_focused: Option<bool>,
+    last_scan: Instant,
     /// Last project whose checkbox was clicked; Shift extends from here.
     selection_anchor: Option<PathBuf>,
     preview_open: bool,
@@ -47,6 +60,12 @@ pub struct DevSweepApp {
 enum View {
     Projects,
     Caches,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sort {
+    Name,
+    Size,
 }
 
 #[derive(Clone, Copy)]
@@ -112,6 +131,11 @@ impl DevSweepApp {
                 })
                 .collect(),
             measurement: None,
+            search: String::new(),
+            filter: None,
+            sort: Sort::Name,
+            was_focused: None,
+            last_scan: Instant::now(),
             selection_anchor: None,
             preview_open: false,
             pending: None,
@@ -133,25 +157,19 @@ impl DevSweepApp {
         if let Some(path) = rfd::FileDialog::new().pick_folder() {
             let path = std::fs::canonicalize(&path).unwrap_or(path);
             if !self.roots.contains(&path) {
+                // Only the new subtree is walked; existing projects keep their sizes.
+                scan::merge_scan(&mut self.projects, scan::scan(std::slice::from_ref(&path)));
                 self.roots.push(path);
-                self.rescan(ctx);
+                self.sync_entries();
+                self.measure_missing(ctx);
+                self.last_scan = Instant::now();
             }
         }
     }
 
     fn rescan(&mut self, ctx: &egui::Context) {
         self.projects = scan::scan(&self.roots);
-        let rules = rules::builtin_rules();
-        // Known projects keep their expanded/checked state; vanished ones drop out.
-        self.entries
-            .retain(|path, _| self.projects.iter().any(|project| &project.path == path));
-        for project in &self.projects {
-            self.entries.entry(project.path.clone()).or_insert_with(|| ProjectEntry {
-                targets: rules::expand_targets(project, rules),
-                expanded: false,
-                selected: false,
-            });
-        }
+        self.sync_entries();
         // A cache recreated since the last scan becomes measurable again.
         for row in &mut self.caches {
             if row.cleaned && row.path.as_ref().is_some_and(|path| path.is_dir()) {
@@ -160,6 +178,67 @@ impl DevSweepApp {
             }
         }
         self.measure_missing(ctx);
+        self.last_scan = Instant::now();
+    }
+
+    /// Track expanded/checked state per canonical path; survivors keep it, vanished
+    /// projects and their selection drop out.
+    fn sync_entries(&mut self) {
+        scan::retain_scanned(&mut self.entries, &self.projects);
+        let rules = rules::builtin_rules();
+        for project in &self.projects {
+            self.entries.entry(project.path.clone()).or_insert_with(|| ProjectEntry {
+                targets: rules::expand_targets(project, rules),
+                expanded: false,
+                selected: false,
+            });
+        }
+    }
+
+    fn project_size(&self, index: usize) -> Option<u64> {
+        self.entries
+            .get(&self.projects[index].path)
+            .and_then(|entry| size::checked_size(&entry.targets))
+    }
+
+    /// Indices of projects matching the type filter and search, in display order.
+    fn visible(&self) -> Vec<usize> {
+        let query = self.search.trim().to_lowercase();
+        let mut rows: Vec<usize> = self
+            .projects
+            .iter()
+            .enumerate()
+            .filter(|(_, project)| self.filter.is_none_or(|stack| project.stack == stack))
+            .filter(|(_, project)| {
+                query.is_empty()
+                    || project.name.to_lowercase().contains(&query)
+                    || project
+                        .path
+                        .to_string_lossy()
+                        .to_lowercase()
+                        .contains(&query)
+            })
+            .map(|(index, _)| index)
+            .collect();
+
+        rows.sort_by(|&a, &b| {
+            let name = |index: usize| self.projects[index].name.to_lowercase();
+            match self.sort {
+                Sort::Name => name(a)
+                    .cmp(&name(b))
+                    .then_with(|| self.projects[a].path.cmp(&self.projects[b].path)),
+                // Unmeasured projects always sink below measured ones.
+                Sort::Size => match (self.project_size(a), self.project_size(b)) {
+                    (Some(left), Some(right)) => {
+                        right.cmp(&left).then_with(|| name(a).cmp(&name(b)))
+                    }
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => name(a).cmp(&name(b)),
+                },
+            }
+        });
+        rows
     }
 
     /// Sizes already computed for a target survive rescans; only unmeasured targets queue up.
@@ -267,23 +346,24 @@ impl DevSweepApp {
             .all(|entry| size::checked_size(&entry.targets).is_some())
     }
 
-    /// Shift extends the selection from the anchor, in list order.
-    fn toggle_selection(&mut self, index: usize, extend: bool) {
-        let path = self.projects[index].path.clone();
+    /// Shift extends the selection from the anchor, in the visible list order.
+    fn toggle_selection(&mut self, visible: &[usize], position: usize, extend: bool) {
+        let path = self.projects[visible[position]].path.clone();
         // The checkbox already flipped this row; use the new value for the range.
         let Some(selected) = self.entries.get(&path).map(|entry| entry.selected) else {
             return;
         };
 
         if extend {
-            if let Some(anchor) = self
-                .selection_anchor
-                .as_ref()
-                .and_then(|anchor| self.projects.iter().position(|p| &p.path == anchor))
-            {
-                let (from, to) = (anchor.min(index), anchor.max(index));
-                for project in &self.projects[from..=to] {
-                    if let Some(entry) = self.entries.get_mut(&project.path) {
+            if let Some(anchor) = self.selection_anchor.as_ref().and_then(|anchor| {
+                visible
+                    .iter()
+                    .position(|&index| &self.projects[index].path == anchor)
+            }) {
+                let (from, to) = (anchor.min(position), anchor.max(position));
+                for &index in &visible[from..=to] {
+                    let path = &self.projects[index].path;
+                    if let Some(entry) = self.entries.get_mut(path) {
                         if !entry.targets.is_empty() {
                             entry.selected = selected;
                         }
@@ -299,25 +379,38 @@ impl DevSweepApp {
         self.selection_anchor = Some(path);
     }
 
-    /// ⌘/Ctrl+A: select every project when not all are selected, otherwise clear.
-    fn toggle_select_all(&mut self) {
-        let selectable: Vec<PathBuf> = self
-            .projects
+    /// Selectable visible projects: those with something to clean.
+    fn selectable(&self, visible: &[usize]) -> Vec<PathBuf> {
+        visible
             .iter()
+            .map(|&index| &self.projects[index])
             .filter(|project| {
                 self.entries
                     .get(&project.path)
                     .is_some_and(|entry| !entry.targets.is_empty())
             })
             .map(|project| project.path.clone())
-            .collect();
-        let all_selected = !selectable.is_empty()
-            && selectable
+            .collect()
+    }
+
+    fn all_selected(&self, paths: &[PathBuf]) -> bool {
+        !paths.is_empty()
+            && paths
                 .iter()
-                .all(|path| self.entries.get(path).is_some_and(|entry| entry.selected));
-        for path in selectable {
-            if let Some(entry) = self.entries.get_mut(&path) {
-                entry.selected = !all_selected;
+                .all(|path| self.entries.get(path).is_some_and(|entry| entry.selected))
+    }
+
+    /// ⌘/Ctrl+A: select every visible project when not all are selected, otherwise clear.
+    fn toggle_select_all(&mut self, visible: &[usize]) {
+        let selectable = self.selectable(visible);
+        let selected = !self.all_selected(&selectable);
+        self.set_selected(&selectable, selected);
+    }
+
+    fn set_selected(&mut self, paths: &[PathBuf], selected: bool) {
+        for path in paths {
+            if let Some(entry) = self.entries.get_mut(path) {
+                entry.selected = selected;
             }
         }
         self.selection_anchor = None;
@@ -833,8 +926,22 @@ impl DevSweepApp {
             });
         }
         if let Some(index) = remove {
-            self.roots.remove(index);
-            self.rescan(ui.ctx());
+            let removed = self.roots.remove(index);
+            // Projects covered by another root stay. Roots below the removed one get
+            // re-walked, since their projects may have been merged into its parent.
+            self.projects
+                .retain(|project| self.roots.iter().any(|root| project.path.starts_with(root)));
+            let nested: Vec<PathBuf> = self
+                .roots
+                .iter()
+                .filter(|root| root.starts_with(&removed))
+                .cloned()
+                .collect();
+            for root in nested {
+                scan::merge_scan(&mut self.projects, scan::scan(std::slice::from_ref(&root)));
+            }
+            self.sync_entries();
+            self.last_scan = Instant::now();
         }
 
         ui.add_space(8.0);
@@ -848,18 +955,33 @@ impl DevSweepApp {
         }
 
         ui.add_space(20.0);
-        if ui
-            .add_sized(
-                [width, 32.0],
-                Button::selectable(
-                    self.view == View::Projects,
-                    RichText::new(format!("{} {}", s.projects, self.projects.len())).size(14.0),
-                ),
-            )
-            .clicked()
-        {
-            self.view = View::Projects;
+        ui.label(RichText::new(s.type_filter.to_uppercase()).size(11.0).color(t.text_muted));
+        ui.add_space(4.0);
+        let filters = std::iter::once((None, s.all)).chain(
+            [Stack::Flutter, Stack::Android, Stack::Ios, Stack::Node]
+                .map(|stack| (Some(stack), s.stack(stack))),
+        );
+        for (filter, label) in filters {
+            let count = match filter {
+                Some(stack) => self
+                    .projects
+                    .iter()
+                    .filter(|project| project.stack == stack)
+                    .count(),
+                None => self.projects.len(),
+            };
+            let active = self.view == View::Projects && self.filter == filter;
+            let label = RichText::new(format!("{label}  {count}")).size(14.0);
+            if ui
+                .add_sized([width, 30.0], Button::selectable(active, label))
+                .clicked()
+            {
+                self.view = View::Projects;
+                self.filter = filter;
+            }
         }
+
+        ui.add_space(12.0);
         let total = self
             .cache_total()
             .map(size::format_size)
@@ -878,7 +1000,14 @@ impl DevSweepApp {
         }
     }
 
-    fn content(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings, plan: &DeletePlan) {
+    fn content(
+        &mut self,
+        ui: &mut Ui,
+        t: &Tokens,
+        s: &Strings,
+        plan: &DeletePlan,
+        visible: &[usize],
+    ) {
         if self.roots.is_empty() {
             if self.card(ui, t, s.empty_title, s.empty_body, Some(s.add_directory)) {
                 self.add_directory(ui.ctx());
@@ -890,7 +1019,7 @@ impl DevSweepApp {
 
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new(format!("{} · {}", s.projects, self.projects.len()))
+                RichText::new(format!("{} · {}", s.projects, visible.len()))
                     .size(18.0)
                     .strong()
                     .color(t.text),
@@ -922,6 +1051,17 @@ impl DevSweepApp {
                 if ui.add_enabled(count > 0, button).clicked() {
                     self.preview_open = true;
                 }
+
+                ui.add_space(8.0);
+                // Taken out so the closure does not hold a second borrow of `self`.
+                let mut search = std::mem::take(&mut self.search);
+                ui.add(
+                    TextEdit::singleline(&mut search)
+                        .id(search_id())
+                        .hint_text(s.search_hint)
+                        .desired_width(190.0),
+                );
+                self.search = search;
             });
         });
         ui.add_space(12.0);
@@ -930,18 +1070,49 @@ impl DevSweepApp {
             self.card(ui, t, s.no_projects_title, s.no_projects_body, None);
             return;
         }
+        if visible.is_empty() {
+            if self.card(ui, t, s.no_match_title, s.no_match_body, Some(s.clear_filters)) {
+                self.search.clear();
+                self.filter = None;
+            }
+            return;
+        }
+
+        let selectable = self.selectable(visible);
+        let all_selected = self.all_selected(&selectable);
+        let mut all = all_selected;
+        let mut select_all = false;
+        ui.horizontal(|ui| {
+            select_all = ui
+                .add_enabled(!selectable.is_empty(), Checkbox::without_text(&mut all))
+                .on_hover_text(s.select_all)
+                .clicked();
+            if sort_header(ui, s.projects, "↑", self.sort == Sort::Name, t) {
+                self.sort = Sort::Name;
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if sort_header(ui, s.reclaimable, "↓", self.sort == Sort::Size, t) {
+                    self.sort = Sort::Size;
+                }
+            });
+        });
+        if select_all {
+            self.set_selected(&selectable, !all_selected);
+        }
+        ui.add_space(4.0);
 
         let mut toggled = None;
         ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 let entries = &mut self.entries;
-                for (index, project) in self.projects.iter().enumerate() {
+                for (position, &index) in visible.iter().enumerate() {
+                    let project = &self.projects[index];
                     let Some(entry) = entries.get_mut(&project.path) else {
                         continue;
                     };
                     if project_row(ui, project, entry, t, s) {
-                        toggled = Some(index);
+                        toggled = Some(position);
                     }
                     if entry.expanded {
                         for target in &mut entry.targets {
@@ -951,9 +1122,9 @@ impl DevSweepApp {
                     ui.add_space(6.0);
                 }
             });
-        if let Some(index) = toggled {
+        if let Some(position) = toggled {
             let extend = ui.input(|input| input.modifiers.shift);
-            self.toggle_selection(index, extend);
+            self.toggle_selection(visible, position, extend);
         }
     }
 
@@ -1053,6 +1224,18 @@ impl eframe::App for DevSweepApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_measurement(ctx);
         self.poll_execution(ctx);
+
+        // Refresh stale data when the window comes back, but only after the grace period.
+        let focused = ctx.input(|input| input.viewport().focused);
+        if focused == Some(true)
+            && self.was_focused == Some(false)
+            && self.last_scan.elapsed() >= REFRESH_AFTER
+        {
+            self.rescan(ctx);
+        }
+        if focused.is_some() {
+            self.was_focused = focused;
+        }
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
@@ -1113,12 +1296,23 @@ impl eframe::App for DevSweepApp {
             .frame(Frame::new().fill(t.surface).inner_margin(16))
             .show(ui, |ui| self.sidebar(ui, t, s));
 
+        let visible = self.visible();
         if self.view == View::Projects {
-            let select_all = ui.ctx().input_mut(|input| {
-                input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::A))
+            // ⌘A belongs to the search box while it has focus.
+            let search_focused = ui.memory(|memory| memory.focused()) == Some(search_id());
+            if !search_focused {
+                let select_all = ui.ctx().input_mut(|input| {
+                    input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::A))
+                });
+                if select_all {
+                    self.toggle_select_all(&visible);
+                }
+            }
+            let focus_search = ui.ctx().input_mut(|input| {
+                input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::F))
             });
-            if select_all {
-                self.toggle_select_all();
+            if focus_search {
+                ui.memory_mut(|memory| memory.request_focus(search_id()));
             }
         }
 
@@ -1130,7 +1324,7 @@ impl eframe::App for DevSweepApp {
         egui::CentralPanel::default()
             .frame(Frame::new().fill(t.bg).inner_margin(24))
             .show(ui, |ui| match self.view {
-                View::Projects => self.content(ui, t, s, &plan),
+                View::Projects => self.content(ui, t, s, &plan, &visible),
                 View::Caches => self.caches_content(ui, t, s),
             });
 
@@ -1155,6 +1349,18 @@ fn secondary_button(ui: &mut Ui, label: &str, t: &Tokens) -> bool {
             .min_size(egui::vec2(88.0, 34.0)),
     )
     .clicked()
+}
+
+/// A clickable column label; the active column carries a direction arrow.
+fn sort_header(ui: &mut Ui, label: &str, arrow: &str, active: bool, t: &Tokens) -> bool {
+    let text = if active {
+        format!("{label} {arrow}")
+    } else {
+        label.to_string()
+    };
+    let color = if active { t.text } else { t.text_muted };
+    ui.add(Button::new(RichText::new(text).size(12.0).color(color)).frame(false))
+        .clicked()
 }
 
 fn stat_row(ui: &mut Ui, label: &str, value: &str, t: &Tokens) {
