@@ -1,191 +1,152 @@
-# DevSweep
+<p align="center">
+  <img src="assets/icon.png" width="112" alt="DevSweep icon: a folder under a sweeping green arc">
+</p>
 
-找出开发机器上被项目缓存和全局缓存占掉的几十 GB，勾选后一次清掉。
-A local GUI for finding and cleaning development caches on macOS and Windows.
+<h1 align="center">DevSweep</h1>
 
-[中文](#中文) · [English](#english)
+<p align="center">
+  <b>Find the tens of gigabytes your build folders and package caches are quietly eating, tick what you
+  don't need, and clear it in one go.</b><br>
+  A local desktop app for macOS and Windows: Flutter, Android, iOS and Node projects, plus the global
+  caches behind them. No cloud, no account, nothing leaves your machine.
+</p>
 
----
+<p align="center">
+  <img alt="100% Rust" src="https://img.shields.io/badge/100%25-Rust-b7410e?style=flat-square&logo=rust">
+  <img alt="macOS · Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Windows-26282e?style=flat-square">
+  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-3a3a3a?style=flat-square">
+  <img alt="Status: early alpha" src="https://img.shields.io/badge/status-early%20alpha-d69e2e?style=flat-square">
+  <br>
+  <a href="https://github.com/skana168/DevSweep/actions/workflows/ci.yml"><img alt="CI: macOS and Windows tests" src="https://github.com/skana168/DevSweep/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/skana168/DevSweep/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/skana168/DevSweep?style=flat-square"></a>
+</p>
 
-## 中文
+<p align="center">
+  <a href="https://github.com/skana168/DevSweep/releases/latest"><b>Download DevSweep</b></a> ·
+  <a href="https://github.com/skana168/DevSweep/releases">All releases</a> ·
+  <a href="#build-from-source">Build from source</a> ·
+  <a href="docs/rules.md">Rules reference</a> ·
+  <a href="README.zh-CN.md">中文</a>
+</p>
 
-### 功能
+<p align="center">
+  <img src="docs/screenshots/main.png" alt="DevSweep on macOS in the light theme: a sidebar listing the scan root, project types and global caches, and a table of Flutter, Android and Node projects with their stack, cleanable size and a Clean button" width="1000">
+</p>
 
-- 添加多个扫描根目录，自动识别 **Flutter / Android / iOS / Node** 项目（含 monorepo 子项目）
-- 按项目列出可清理体积；每行「清理」打开该项目详情，逐项挑选后再删；体积在后台计算，列表先出现
-- 按类型过滤、按名称或路径搜索、按名称或体积排序
-- 每行「更多」可直接打开项目文件夹或在终端打开；删除前有确认框（条目数、总大小、> 5 GB 逐项警示）
-- 默认把内容移入**废纸篓**（macOS）/ 回收站（Windows），可在设置中改为直接删除
-- **全局缓存**页列出 npm、Gradle、pnpm、bun、Yarn、pub、CocoaPods、Playwright、Xcode DerivedData、Cargo registry、pip 等缓存的路径与体积，逐条清理
-- 中文 / English 界面（默认跟随系统），深色 / 浅色主题
-- 项目内的清理规则可用 `rules.toml` 关闭、改默认勾选、追加自定义目录；全局缓存清单固定，不受其影响
+## What it does
 
-### 安装
+Every Flutter, Android, iOS and Node project leaves something behind: `build/`, `node_modules/`,
+`.dart_tool/`, `Pods/`, `.next/`. DevSweep walks the folders you choose, recognises each project,
+and shows how much of it is expendable in one table. Open a project, tick the entries you want gone,
+confirm the panel, and the space comes back. The same window also lists the global caches that have
+nothing to do with any single project.
 
-从 [Releases](../../releases) 下载：
+It never deletes anything on its own: nothing is touched until you confirm a plan, and nothing
+outside the rules (`.git`, your home folder, the project root, paths outside the project) can ever
+be part of that plan.
 
-| 平台 | 文件 | 用法 |
-|---|---|---|
-| macOS | `DevSweep_<版本>_macos.dmg` | 打开后把 DevSweep 拖进 Applications |
-| Windows | `devsweep_<版本>_windows.zip` | 解压后直接运行 `devsweep.exe`（便携，无需安装） |
+## Features
 
-发布包**未签名、未公证**，所以系统会拦一次。这是预期行为，不是文件损坏。
+<table>
+  <tr>
+    <td width="33%" valign="top">
+      <h3>🧹 A panel per project</h3>
+      Every cleanable path in a project with its size. Risky entries start unchecked, and the confirmation dialog spells out the count, the total and any item over 5 GB.
+    </td>
+    <td width="33%" valign="top">
+      <h3>📊 Numbers in the background</h3>
+      The list appears first and sizes fill in as they are measured. Filter by stack, search by name or path, sort by name or size.
+    </td>
+    <td width="33%" valign="top">
+      <h3>🌍 The caches outside your projects</h3>
+      One view for the package and toolchain caches every project shares, each with its real size. Entries that need a re-download say so.
+    </td>
+  </tr>
+</table>
 
-**macOS（Gatekeeper）**：双击提示「无法打开，因为 Apple 无法检查…」时，打开「系统设置 → 隐私与安全性」，在页面底部点「仍要打开」；或右键点 App 选「打开」再确认。也可以在终端去掉隔离标记：
+### Global caches
 
-```sh
-xattr -dr com.apple.quarantine /Applications/DevSweep.app
-```
+| Dependency cache | Toolchain cache |
+|---|---|
+| Gradle caches, Gradle distributions, npm, pnpm, bun, Yarn, pub, CocoaPods | Playwright, Xcode DerivedData, Cargo registry, pip |
 
-**Windows（SmartScreen）**：运行 exe 时若出现「Windows 已保护你的电脑」，点「更多信息」→「仍要运行」。
-个别杀软会对未签名的新 exe 报未知发布者，按需加入信任。
+Clearing one of these frees space for every project at once, and the next build downloads or rebuilds
+what it needs. The list is fixed: `rules.toml` does not extend or disable it.
 
-### 使用
+## Install
 
-1. 左下角 `+ 添加目录` 加入你的项目父目录（如 `~/Projects`、`D:\code`）
-2. 点某一行的 `清理`，在面板里逐项勾选要删的内容（危险项默认不勾）
-3. 点面板底部的 `清理 N 项 · 380 MB`，在确认框里核对后执行
-4. 全局缓存在侧栏「全局缓存」，那里逐条清理；标了「需重新下载」的条目清理后要重新拉依赖
+Download the build for your computer from the [latest release](https://github.com/skana168/DevSweep/releases/latest), or browse [all releases](https://github.com/skana168/DevSweep/releases). `<version>` is the version number, for example `0.1.1`.
 
-窗口重新获得焦点且距上次扫描超过 30 秒会自动刷新；已有的体积会保留，面板里的勾选不跨次保留。
-
-### 规则文件 `rules.toml`
-
-- macOS：`~/Library/Application Support/DevSweep/rules.toml`
-- Windows：`%APPDATA%\DevSweep\rules.toml`
-
-文件不存在时，点界面里的「打开规则文件」会按模板生成带注释的默认文件。三种用法：
-
-```toml
-# 1. 关闭不信任的内置条目
-disable = ["node.dist", "ios.pods"]
-
-# 2. 改条目的默认勾选状态
-[defaults]
-"node.dist" = true
-
-# 3. 追加自己的清理目录（stack: flutter / android / ios / node / "*"，label 可选）
-[[extra]]
-stack = "*"
-path = ".cache"
-label = "Cache"
-```
-
-内置条目 id 从类型前缀开始，例如 `flutter.build`、`flutter.dart_tool`、`android.build`、`android.module_build`、`ios.pods`、`ios.xcuserdata`、`node.node_modules`、`node.next`、`node.dist`（默认不勾）。已发布的 id 不会改名。
-
-`path` 只接受项目内的字面相对路径，可含单段通配 `*`（如 `*/build`）；写错或指向项目外时该条被忽略并在界面上提示。
-
-### 从源码构建
-
-需要 Rust stable。macOS 另需 Xcode Command Line Tools。
-
-```sh
-cargo run              # 调试运行
-cargo test             # 只测 core，不开窗口
-./scripts/bundle-macos.sh   # 产出 target/DevSweep_<版本>_macos.dmg
-cargo build --release  # Windows 便携 exe：target\release\devsweep.exe
-```
-
-图标：`assets/icon.svg` 是源文件，由 `scripts/make-icons.sh` 渲染为 `assets/icon.icns`（macOS bundle 用）与 `assets/icon.ico`（构建期由 `build.rs` 嵌入 exe）。渲染结果已提交，常规构建不需要 rsvg 或 ImageMagick。
-
-测试边界：自动化测试只覆盖 `src/` 里的 core（扫描、规则匹配、体积、计划、删除、配置）；UI 层只测一件事——中文字形在每套字体里都画得出来（`src/theme.rs`）。
-
-### 字体与致谢
-
-界面视觉取自 [Craft Launcher](https://github.com/storytold/craft-launcher) 的 ArtCraft 设计（Apache-2.0），字体为 Archivo、Inter、Geist Mono，中文字形是 [Maple Mono](https://github.com/subframe7536/maple-font) CN 的 GB2312 子集，均由 [SIL OFL 1.1](assets/fonts/) 授权。详见 [NOTICE](NOTICE) 与 [ADR 0002](docs/adr/0002-craft-theme-and-bundled-cjk-font.md)。
-
-### 许可
-
-[MIT](LICENSE)
-
----
-
-## English
-
-### Features
-
-- Add one or more scan roots; Flutter, Android, iOS and Node projects are detected automatically, including monorepo sub-projects
-- Every project shows its cleanable size; its row's `Clean` button opens a panel where you pick the entries to delete; sizes are computed in the background so the list appears first
-- Filter by project type, search by name or path, sort by name or size
-- A row's `More` menu opens the project folder or a terminal there; a confirmation dialog shows entry count, total size and every item above 5 GB
-- Cleaning moves things to the **Trash** by default (Recycle Bin on Windows); switch to permanent deletion in settings
-- A **Global caches** view lists npm, Gradle, pnpm, bun, Yarn, pub, CocoaPods, Playwright, Xcode DerivedData, Cargo registry and pip caches with sizes, cleared one entry at a time
-- Chinese / English UI (follows the system by default), dark / light theme
-- Project rules can be disabled, re-defaulted or extended with `rules.toml`; the global cache list is fixed and unaffected
-
-### Install
-
-Download from [Releases](../../releases):
-
-| Platform | File | Usage |
+| Platform | File | What it is |
 |---|---|---|
 | macOS | `DevSweep_<version>_macos.dmg` | Open it and drag DevSweep into Applications |
-| Windows | `devsweep_<version>_windows.zip` | Unzip and run `devsweep.exe` (portable, no installer) |
+| Windows | `devsweep_<version>_windows.zip` | Portable: unzip and run `devsweep.exe`, no installer |
 
-The binaries are **unsigned and not notarized**, so the OS will stop them once. That is expected, not corruption.
+> [!IMPORTANT]
+> **The builds are unsigned and not notarized**, so the OS will stop them once. That is expected,
+> not corruption.
+>
+> **macOS (Gatekeeper)**: if macOS says it cannot check the app, open System Settings → Privacy &
+> Security and click "Open Anyway" at the bottom, or right-click the app, choose Open and confirm.
+> You can also drop the quarantine flag:
+>
+> ```sh
+> xattr -dr com.apple.quarantine /Applications/DevSweep.app
+> ```
+>
+> **Windows (SmartScreen)**: if "Windows protected your PC" appears, click "More info" → "Run
+> anyway". Some antivirus tools flag new unsigned executables; allow the build if you trust it.
 
-**macOS (Gatekeeper)**: if macOS says it cannot verify the app, open System Settings → Privacy & Security and click "Open Anyway" at the bottom, or right-click the app and choose Open. You can also drop the quarantine flag:
+## Usage
 
-```sh
-xattr -dr com.apple.quarantine /Applications/DevSweep.app
-```
+1. Click `+ Add directory` in the sidebar and add the folders your projects live in, e.g. `~/Projects` or `D:\code`
+2. Click a row's `Clean` to open its panel and tick the entries to delete; dangerous ones start off
+3. Click `Clean N · 380 MB` at the bottom of the panel, check the dialog, confirm
+4. Global caches are under "Global caches" in the sidebar, cleared one entry at a time
+5. A row's `...` menu opens the project folder or a terminal there
 
-**Windows (SmartScreen)**: if "Windows protected your PC" appears, click "More info" → "Run anyway". Some antivirus tools flag new unsigned executables; allow it if you trust the build.
+Deletions go to the **Trash** (Recycle Bin on Windows) by default, so a mistake is recoverable;
+Settings can switch to permanent deletion. The list refreshes when the window regains focus after
+more than 30 seconds away: measured sizes survive that refresh, the panel's ticks do not.
 
-### Usage
+## Custom rules
 
-1. Click `+ Add folder` in the sidebar and add your project parents (e.g. `~/Projects`, `D:\code`)
-2. Click a row's `Clean` and tick the entries to delete in the panel (risky ones start off)
-3. Click `Clean N · 380 MB` at the bottom of the panel, review the dialog, confirm
-4. Global caches live under "Global caches" in the sidebar; clear them one by one. Entries marked as needing a re-download will have to be fetched again
+Project rules are built in; `rules.toml` turns them off, changes which ones start checked, or adds a
+directory of your own:
 
-The list refreshes when the window regains focus after more than 30 seconds away; measured sizes survive the refresh, the panel's ticks do not.
+| Platform | Path |
+|---|---|
+| macOS | `~/Library/Application Support/DevSweep/rules.toml` |
+| Windows | `%APPDATA%\DevSweep\rules.toml` |
 
-### `rules.toml`
+"Open rules file" in the app writes a commented template if the file is missing. The full reference
+— every built-in rule id, the path restrictions, examples — is in [`docs/rules.md`](docs/rules.md).
 
-- macOS: `~/Library/Application Support/DevSweep/rules.toml`
-- Windows: `%APPDATA%\DevSweep\rules.toml`
-
-If the file does not exist, "Open rules file" in the app generates a commented template. Three things you can do:
-
-```toml
-# 1. turn built-in entries off
-disable = ["node.dist", "ios.pods"]
-
-# 2. change whether an entry is checked by default
-[defaults]
-"node.dist" = true
-
-# 3. add a directory of your own (stack: flutter / android / ios / node / "*", label optional)
-[[extra]]
-stack = "*"
-path = ".cache"
-label = "Cache"
-```
-
-Built-in ids start with their stack, e.g. `flutter.build`, `flutter.dart_tool`, `android.build`, `android.module_build`, `ios.pods`, `ios.xcuserdata`, `node.node_modules`, `node.next`, `node.dist` (unchecked by default). Published ids never get renamed.
-
-`path` must be a literal relative path inside the project, optionally with a single-segment wildcard such as `*/build`. Invalid or escaping paths are ignored and reported in the UI.
-
-### Build from source
+## Build from source
 
 Rust stable is required; macOS also needs Xcode Command Line Tools.
 
 ```sh
-cargo run                   # run in debug
-cargo test                  # core tests only, no window needed
-./scripts/bundle-macos.sh   # writes target/DevSweep_<version>_macos.dmg
-cargo build --release       # Windows portable exe: target\release\devsweep.exe
+cargo run                    # run in debug
+cargo test                   # core tests only, no window needed
+./scripts/bundle-macos.sh    # writes target/DevSweep_<version>_macos.dmg
+cargo build --release        # Windows portable exe: target\release\devsweep.exe
 ```
 
-Icons: `assets/icon.svg` is the source, rendered by `scripts/make-icons.sh` into `assets/icon.icns` (macOS app bundle) and `assets/icon.ico` (embedded into the exe by `build.rs`). The rendered files are committed, so normal builds need neither rsvg nor ImageMagick.
+CI runs `cargo test` on macOS and Windows for every push. Icons: `assets/icon.svg` is the source,
+rendered by `scripts/make-icons.sh` into `assets/icon.icns` (macOS bundle) and `assets/icon.ico`
+(embedded into the exe by `build.rs`). The rendered files are committed, so normal builds need
+neither rsvg nor ImageMagick.
 
-Testing boundary: automated tests cover the core in `src/` (scan, rule matching, sizing, plan, delete, config). The UI layer has one test: that every font family can draw Chinese (`src/theme.rs`).
+Testing boundary: automated tests cover the core in `src/` (scan, rule matching, sizing, plan,
+delete, config). The UI layer has one test: that every font family can draw Chinese (`src/theme.rs`).
 
-### Theme and credits
+## License
 
-The interface follows Craft Launcher's ArtCraft design (Apache-2.0). Fonts: Archivo, Inter and Geist Mono, with Chinese from a GB2312 subset of [Maple Mono](https://github.com/subframe7536/maple-font) CN — all under the [SIL OFL 1.1](assets/fonts/). See [NOTICE](NOTICE) and [ADR 0002](docs/adr/0002-craft-theme-and-bundled-cjk-font.md).
+[MIT](LICENSE).
 
-### License
-
-[MIT](LICENSE)
+The interface follows [Craft Launcher](https://github.com/storytold/craft-launcher)'s ArtCraft design
+(Apache-2.0). Fonts: Archivo, Inter and Geist Mono, with Chinese from a GB2312 subset of
+[Maple Mono](https://github.com/subframe7536/maple-font) CN, all under the
+[SIL OFL 1.1](assets/fonts/). See [NOTICE](NOTICE) and
+[ADR 0002](docs/adr/0002-craft-theme-and-bundled-cjk-font.md).
