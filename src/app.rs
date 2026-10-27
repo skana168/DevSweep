@@ -1382,7 +1382,7 @@ impl DevSweepApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for (group, title) in [
-                    (CacheGroup::Project, s.cache_group_project),
+                    (CacheGroup::Dependency, s.cache_group_dependency),
                     (CacheGroup::Toolchain, s.cache_group_toolchain),
                 ] {
                     let mut heading = false;

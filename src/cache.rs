@@ -21,9 +21,9 @@ impl Platform {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheGroup {
-    /// Cache tied to a project's package manager or build.
-    Project,
-    /// Tools that keep state outside any project.
+    /// Caches a project's package manager refills.
+    Dependency,
+    /// Other toolchain state.
     Toolchain,
 }
 
@@ -72,7 +72,7 @@ static CACHES: [CacheRule; 12] = [
     CacheRule {
         id: "gradle.caches",
         name: "Gradle caches",
-        group: CacheGroup::Project,
+        group: CacheGroup::Dependency,
         mac: home(".gradle/caches"),
         win: home(".gradle/caches"),
         dangerous: false,
@@ -80,7 +80,7 @@ static CACHES: [CacheRule; 12] = [
     CacheRule {
         id: "gradle.dists",
         name: "Gradle distributions",
-        group: CacheGroup::Project,
+        group: CacheGroup::Dependency,
         mac: home(".gradle/wrapper/dists"),
         win: home(".gradle/wrapper/dists"),
         dangerous: false,
@@ -88,7 +88,7 @@ static CACHES: [CacheRule; 12] = [
     CacheRule {
         id: "npm.cacache",
         name: "npm",
-        group: CacheGroup::Project,
+        group: CacheGroup::Dependency,
         mac: home(".npm/_cacache"),
         win: local("npm-cache"),
         dangerous: false,
@@ -96,7 +96,7 @@ static CACHES: [CacheRule; 12] = [
     CacheRule {
         id: "pnpm.store",
         name: "pnpm",
-        group: CacheGroup::Project,
+        group: CacheGroup::Dependency,
         mac: home("Library/pnpm/store"),
         win: local("pnpm/store"),
         dangerous: false,
@@ -104,7 +104,7 @@ static CACHES: [CacheRule; 12] = [
     CacheRule {
         id: "bun.cache",
         name: "bun",
-        group: CacheGroup::Project,
+        group: CacheGroup::Dependency,
         mac: home(".bun/install/cache"),
         win: home(".bun/install/cache"),
         dangerous: false,
@@ -112,7 +112,7 @@ static CACHES: [CacheRule; 12] = [
     CacheRule {
         id: "yarn.cache",
         name: "Yarn",
-        group: CacheGroup::Project,
+        group: CacheGroup::Dependency,
         mac: home("Library/Caches/Yarn"),
         win: local("Yarn/Cache"),
         dangerous: false,
@@ -120,7 +120,7 @@ static CACHES: [CacheRule; 12] = [
     CacheRule {
         id: "pub.cache",
         name: "pub",
-        group: CacheGroup::Project,
+        group: CacheGroup::Dependency,
         mac: home(".pub-cache"),
         win: local("Pub/Cache"),
         dangerous: false,
@@ -128,7 +128,7 @@ static CACHES: [CacheRule; 12] = [
     CacheRule {
         id: "cocoapods.cache",
         name: "CocoaPods",
-        group: CacheGroup::Project,
+        group: CacheGroup::Dependency,
         mac: home("Library/Caches/CocoaPods"),
         win: local("CocoaPods/Cache"),
         dangerous: false,
@@ -297,7 +297,7 @@ mod tests {
         assert_eq!(
             rules
                 .iter()
-                .filter(|rule| rule.group == CacheGroup::Project)
+                .filter(|rule| rule.group == CacheGroup::Dependency)
                 .count(),
             8
         );
