@@ -2,6 +2,7 @@
 
 mod app;
 mod i18n;
+mod terminal;
 mod theme;
 
 fn main() -> eframe::Result {

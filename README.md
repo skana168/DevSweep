@@ -12,9 +12,9 @@ A local GUI for finding and cleaning development caches on macOS and Windows.
 ### 功能
 
 - 添加多个扫描根目录，自动识别 **Flutter / Android / iOS / Node** 项目（含 monorepo 子项目）
-- 按项目列出可回收体积，可展开查看每一条清理项；体积在后台计算，列表先出现
+- 按项目列出可清理体积；每行「清理」打开该项目详情，逐项挑选后再删；体积在后台计算，列表先出现
 - 按类型过滤、按名称或路径搜索、按名称或体积排序
-- 勾选单个或批量清理；删除前有确认框（项目数、条目数、总大小、完整路径），另有 Dry-run 预览
+- 每行「更多」可直接打开项目文件夹或在终端打开；删除前有确认框（条目数、总大小、> 5 GB 逐项警示）
 - 默认把内容移入**废纸篓**（macOS）/ 回收站（Windows），可在设置中改为直接删除
 - **全局缓存**页列出 npm、Gradle、pnpm、bun、Yarn、pub、CocoaPods、Playwright、Xcode DerivedData、Cargo registry、pip 等缓存的路径与体积，逐条清理
 - 中文 / English 界面（默认跟随系统），深色 / 浅色主题
@@ -43,11 +43,11 @@ xattr -dr com.apple.quarantine /Applications/DevSweep.app
 ### 使用
 
 1. 左下角 `+ 添加目录` 加入你的项目父目录（如 `~/Projects`、`D:\code`）
-2. 列表出现后，展开行确认要删的条目，勾选项目
-3. 点 `清理 N 项 · 380 MB`，在确认框里核对路径后执行
+2. 点某一行的 `清理`，在面板里逐项勾选要删的内容（危险项默认不勾）
+3. 点面板底部的 `清理 N 项 · 380 MB`，在确认框里核对后执行
 4. 全局缓存在侧栏「全局缓存」，那里逐条清理；标了「需重新下载」的条目清理后要重新拉依赖
 
-窗口重新获得焦点且距上次扫描超过 30 秒会自动刷新；已有的体积与勾选会保留。
+窗口重新获得焦点且距上次扫描超过 30 秒会自动刷新；已有的体积会保留，面板里的勾选不跨次保留。
 
 ### 规则文件 `rules.toml`
 
@@ -105,9 +105,9 @@ cargo build --release  # Windows 便携 exe：target\release\devsweep.exe
 ### Features
 
 - Add one or more scan roots; Flutter, Android, iOS and Node projects are detected automatically, including monorepo sub-projects
-- Every project shows its reclaimable size, expandable into individual cleanable entries; sizes are computed in the background so the list appears first
+- Every project shows its cleanable size; its row's `Clean` button opens a panel where you pick the entries to delete; sizes are computed in the background so the list appears first
 - Filter by project type, search by name or path, sort by name or size
-- Select one or many projects and clean them; a confirmation dialog shows project count, entry count, total size and full paths, plus a dry-run preview
+- A row's `More` menu opens the project folder or a terminal there; a confirmation dialog shows entry count, total size and every item above 5 GB
 - Cleaning moves things to the **Trash** by default (Recycle Bin on Windows); switch to permanent deletion in settings
 - A **Global caches** view lists npm, Gradle, pnpm, bun, Yarn, pub, CocoaPods, Playwright, Xcode DerivedData, Cargo registry and pip caches with sizes, cleared one entry at a time
 - Chinese / English UI (follows the system by default), dark / light theme
@@ -135,11 +135,11 @@ xattr -dr com.apple.quarantine /Applications/DevSweep.app
 ### Usage
 
 1. Click `+ Add folder` in the sidebar and add your project parents (e.g. `~/Projects`, `D:\code`)
-2. Expand a row to check which entries will go, then select projects
-3. Click `Clean N · 380 MB`, review the paths in the dialog, confirm
+2. Click a row's `Clean` and tick the entries to delete in the panel (risky ones start off)
+3. Click `Clean N · 380 MB` at the bottom of the panel, review the dialog, confirm
 4. Global caches live under "Global caches" in the sidebar; clear them one by one. Entries marked as needing a re-download will have to be fetched again
 
-The list refreshes when the window regains focus after more than 30 seconds away; measured sizes and your selection survive the refresh.
+The list refreshes when the window regains focus after more than 30 seconds away; measured sizes survive the refresh, the panel's ticks do not.
 
 ### `rules.toml`
 

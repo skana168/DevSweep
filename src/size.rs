@@ -38,11 +38,10 @@ pub fn dir_size(path: &Path) -> u64 {
         .sum()
 }
 
-/// Sum of the checked targets, or `None` while any of them is still being measured.
-pub fn checked_size(targets: &[Target]) -> Option<u64> {
+/// Sum of every target's size, or `None` while any of them is still being measured.
+pub fn total_size(targets: &[Target]) -> Option<u64> {
     targets
         .iter()
-        .filter(|target| target.checked)
         .try_fold(0, |sum, target| target.size.map(|size| sum + size))
 }
 

@@ -25,7 +25,9 @@ pub struct Target {
     pub rule_id: String,
     pub path: PathBuf,
     pub size: Option<u64>,
+    /// The clean panel's draft choice; reset to `default_checked` each time it opens.
     pub checked: bool,
+    pub default_checked: bool,
     pub dangerous: bool,
     pub label: Option<String>,
 }
@@ -300,6 +302,7 @@ pub fn expand_targets(project: &Project, rules: &[Rule]) -> Vec<Target> {
                 path,
                 size: None,
                 checked: rule.default_checked,
+                default_checked: rule.default_checked,
                 dangerous: rule.dangerous,
                 label: rule.label.clone(),
             });

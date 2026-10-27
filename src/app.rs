@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use devsweep::cache::{self, CacheGroup, CacheRule};
 use devsweep::config::{self, Config, LanguageChoice, ThemeChoice};
 use devsweep::delete::{self, DeleteEvent, DeleteMode, Failure};
-use devsweep::plan::{self, DeletePlan, LARGE_TARGET_BYTES, PlanProject};
+use devsweep::plan::{self, DeletePlan, PlanProject};
 use devsweep::rules::{self, Rule, Target};
 use devsweep::scan::{self, Project, Stack};
 use devsweep::size::{self, SizeEvent, SizeRequest};
@@ -20,14 +20,14 @@ use eframe::egui::{
 use egui_extras::{Column, TableBuilder, TableRow};
 
 use crate::i18n::{Lang, Strings};
+use crate::terminal;
 use crate::theme::{self, Tokens};
 
 /// A window that spent this long in the background gets a fresh scan on focus.
 const REFRESH_AFTER: Duration = Duration::from_secs(30);
 
-/// A project row carries a name and a path; a target row carries one line.
+/// A project row carries a name, a path and its two row actions.
 const PROJECT_ROW_H: f32 = 56.0;
-const TARGET_ROW_H: f32 = 30.0;
 
 fn search_id() -> egui::Id {
     egui::Id::unique("project_search")
@@ -54,9 +54,8 @@ pub struct DevSweepApp {
     /// Previous frame's window focus, for the focus-refresh hook.
     was_focused: Option<bool>,
     last_scan: Instant,
-    /// Last project whose checkbox was clicked; Shift extends from here.
-    selection_anchor: Option<PathBuf>,
-    preview_open: bool,
+    /// The project whose clean panel is open, with its live draft plan.
+    panel: Option<Panel>,
     /// What the open confirm dialog will clean; `None` while it is closed.
     pending: Option<Cleanup>,
     /// The user has ticked "I understand" in the confirm dialog.
@@ -81,53 +80,41 @@ enum Sort {
     Size,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Cleanup {
-    Projects,
+    Project(PathBuf),
     Cache(&'static CacheRule),
+}
+
+/// What a row's buttons ask the app to do, applied outside the table borrow.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowAction {
+    Panel,
+    Folder,
+    Terminal,
+}
+
+/// An open clean panel: the project plus the plan its current draft would delete.
+struct Panel {
+    project: PathBuf,
+    plan: DeletePlan,
 }
 
 struct CacheRow {
     rule: &'static CacheRule,
     path: Option<PathBuf>,
     size: Option<u64>,
-    /// The user's opt-in; risky entries start unchecked.
-    checked: bool,
     cleaned: bool,
 }
 
 struct ProjectEntry {
     targets: Vec<Target>,
-    expanded: bool,
 }
 
-/// A project's checked state, derived from its targets.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TriState {
-    Off,
-    Partial,
-    On,
-}
-
-impl ProjectEntry {
-    fn state(&self) -> TriState {
-        let checked = self.targets.iter().filter(|target| target.checked).count();
-        if checked == 0 {
-            TriState::Off
-        } else if checked == self.targets.len() {
-            TriState::On
-        } else {
-            TriState::Partial
-        }
-    }
-
-    /// The parent's checkbox: check the safe targets. Risky ones stay out unless the
-    /// project has nothing else, so the row can never dead-end; clearing always clears.
-    fn set_checked(&mut self, checked: bool) {
-        let safe_only = checked && self.targets.iter().any(|target| !target.dangerous);
-        for target in &mut self.targets {
-            target.checked = checked && !(safe_only && target.dangerous);
-        }
+/// Resets the panel's draft to each target's rule default: risky rules stay off.
+fn reset_draft(targets: &mut [Target]) {
+    for target in targets {
+        target.checked = target.default_checked;
     }
 }
 
@@ -170,7 +157,6 @@ impl DevSweepApp {
             caches: cache::entries()
                 .into_iter()
                 .map(|entry| CacheRow {
-                    checked: !entry.rule.dangerous,
                     rule: entry.rule,
                     path: entry.path,
                     size: None,
@@ -183,8 +169,7 @@ impl DevSweepApp {
             sort: Sort::Name,
             was_focused: None,
             last_scan: Instant::now(),
-            selection_anchor: None,
-            preview_open: false,
+            panel: None,
             pending: None,
             confirm_large_ack: false,
             execution: None,
@@ -243,8 +228,8 @@ impl DevSweepApp {
         self.last_scan = Instant::now();
     }
 
-    /// Track expanded/checked state per canonical path; survivors keep it, vanished
-    /// projects and their selection drop out.
+    /// Track the draft targets per canonical path; survivors keep them, vanished
+    /// projects drop out.
     fn sync_entries(&mut self) {
         scan::retain_scanned(&mut self.entries, &self.projects);
         let rules = &self.rules;
@@ -253,7 +238,6 @@ impl DevSweepApp {
                 .entry(project.path.clone())
                 .or_insert_with(|| ProjectEntry {
                     targets: rules::expand_targets(project, rules),
-                    expanded: false,
                 });
         }
     }
@@ -261,7 +245,7 @@ impl DevSweepApp {
     fn project_size(&self, index: usize) -> Option<u64> {
         self.entries
             .get(&self.projects[index].path)
-            .and_then(|entry| size::checked_size(&entry.targets))
+            .and_then(|entry| size::total_size(&entry.targets))
     }
 
     /// Indices of projects matching the type filter and search, in display order.
@@ -397,128 +381,43 @@ impl DevSweepApp {
         }
     }
 
-    fn selected_sizes_known(&self) -> bool {
-        self.projects
-            .iter()
-            .filter_map(|project| self.entries.get(&project.path))
-            .filter(|entry| entry.state() != TriState::Off)
-            .all(|entry| size::checked_size(&entry.targets).is_some())
-    }
-
-    /// Sets a project's targets, and with Shift the whole range from the anchor, in the
-    /// visible list order.
-    fn toggle_selection(
-        &mut self,
-        visible: &[usize],
-        position: usize,
-        extend: bool,
-        checked: bool,
-    ) {
-        let path = self.projects[visible[position]].path.clone();
-
-        if extend
-            && let Some(anchor) = self.selection_anchor.as_ref().and_then(|anchor| {
-                visible
-                    .iter()
-                    .position(|&index| &self.projects[index].path == anchor)
-            })
-        {
-            let (from, to) = (anchor.min(position), anchor.max(position));
-            for &index in &visible[from..=to] {
-                if let Some(entry) = self.entries.get_mut(&self.projects[index].path) {
-                    entry.set_checked(checked);
-                }
-            }
-            return;
-        }
-
-        if let Some(entry) = self.entries.get_mut(&path) {
-            entry.set_checked(checked);
-        }
-        self.selection_anchor = Some(path);
-    }
-
-    /// Selectable visible projects: those with something to clean.
-    fn selectable(&self, visible: &[usize]) -> Vec<PathBuf> {
-        visible
-            .iter()
-            .map(|&index| &self.projects[index])
-            .filter(|project| {
-                self.entries
-                    .get(&project.path)
-                    .is_some_and(|entry| !entry.targets.is_empty())
-            })
-            .map(|project| project.path.clone())
-            .collect()
-    }
-
-    /// The header checkbox over `paths`: one state if they all agree, mixed otherwise.
-    fn bulk_state(&self, paths: &[PathBuf]) -> TriState {
-        let mut states = paths
-            .iter()
-            .filter_map(|path| self.entries.get(path))
-            .map(ProjectEntry::state);
-        let Some(first) = states.next() else {
-            return TriState::Off;
+    /// The plan the panel's current draft would delete, for one project.
+    fn project_plan(&self, path: &Path) -> DeletePlan {
+        let Some(project) = self.projects.iter().find(|project| project.path == path) else {
+            return empty_plan();
         };
-        if states.all(|state| state == first) {
-            first
-        } else {
-            TriState::Partial
-        }
+        let Some(entry) = self.entries.get(path) else {
+            return empty_plan();
+        };
+        plan::plan(
+            &[PlanProject {
+                path: &project.path,
+                stack: project.stack,
+                targets: &entry.targets,
+            }],
+            &self.config.roots,
+            &self.rules,
+        )
     }
 
-    /// Whether every project already has something chosen; the bulk toggle fills when not.
-    fn all_chosen(&self, paths: &[PathBuf]) -> bool {
-        !paths.is_empty()
-            && paths.iter().all(|path| {
-                self.entries
-                    .get(path)
-                    .is_some_and(|entry| entry.state() != TriState::Off)
-            })
-    }
-
-    /// ⌘/Ctrl+A: fill every visible project, or clear them when all are already chosen.
-    fn toggle_select_all(&mut self, visible: &[usize]) {
-        let selectable = self.selectable(visible);
-        let checked = !self.all_chosen(&selectable);
-        self.set_selected(&selectable, checked);
-    }
-
-    fn set_selected(&mut self, paths: &[PathBuf], selected: bool) {
-        for path in paths {
-            if let Some(entry) = self.entries.get_mut(path) {
-                entry.set_checked(selected);
-            }
-        }
-        self.selection_anchor = None;
-    }
-
-    fn build_plan(&self) -> DeletePlan {
-        let projects: Vec<PlanProject> = self
-            .projects
-            .iter()
-            .filter_map(|project| {
-                let entry = self.entries.get(&project.path)?;
-                (entry.state() != TriState::Off).then_some(PlanProject {
-                    path: &project.path,
-                    stack: project.stack,
-                    targets: &entry.targets,
-                })
-            })
-            .collect();
-        plan::plan(&projects, &self.config.roots, &self.rules)
+    /// Open the clean panel with a fresh draft: each target back to its rule default.
+    fn open_panel(&mut self, path: &Path) {
+        let Some(entry) = self.entries.get_mut(path) else {
+            return;
+        };
+        reset_draft(&mut entry.targets);
+        let plan = self.project_plan(path);
+        self.panel = Some(Panel {
+            project: path.to_path_buf(),
+            plan,
+        });
     }
 
     /// Plan for the cleanup the confirm dialog will run.
     fn plan_for(&self, cleanup: Cleanup) -> DeletePlan {
         match cleanup {
-            Cleanup::Projects => self.build_plan(),
-            Cleanup::Cache(rule) => self.cache_plan(rule).unwrap_or(DeletePlan {
-                items: Vec::new(),
-                skipped: Vec::new(),
-                total_bytes: 0,
-            }),
+            Cleanup::Project(path) => self.project_plan(&path),
+            Cleanup::Cache(rule) => self.cache_plan(rule).unwrap_or_else(empty_plan),
         }
     }
 
@@ -538,6 +437,7 @@ impl DevSweepApp {
     /// Execute the current plan on a worker thread. The UI keeps painting while
     /// per-project events stream back.
     fn start_execution(&mut self, ctx: &egui::Context, cleanup: Cleanup) {
+        let global_cache = matches!(cleanup, Cleanup::Cache(_));
         let plan = self.plan_for(cleanup);
         if plan.items.is_empty() {
             return;
@@ -557,7 +457,7 @@ impl DevSweepApp {
             current: None,
             rx,
             abort,
-            global_cache: matches!(cleanup, Cleanup::Cache(_)),
+            global_cache,
         });
         self.flash = None;
         self.failures.clear();
@@ -593,14 +493,20 @@ impl DevSweepApp {
                         entry
                             .targets
                             .retain(|target| !deleted.contains(&target.path));
-                        entry.set_checked(false);
-                        entry.expanded = false;
+                        reset_draft(&mut entry.targets);
+                    }
+                    // Its panel has nothing left to show.
+                    if self
+                        .panel
+                        .as_ref()
+                        .is_some_and(|panel| panel.project == project)
+                    {
+                        self.panel = None;
                     }
                     for row in &mut self.caches {
                         if row.path.as_ref().is_some_and(|path| deleted.contains(path)) {
                             row.size = Some(0);
                             row.cleaned = true;
-                            row.checked = false;
                         }
                     }
                     execution.done += 1;
@@ -628,7 +534,6 @@ impl DevSweepApp {
             });
             self.failures = report.failures;
             self.failures_open = !self.failures.is_empty();
-            self.selection_anchor = None;
             changed = true;
         } else if lost {
             self.execution = None;
@@ -641,14 +546,26 @@ impl DevSweepApp {
         }
     }
 
-    /// The dry-run preview: what the next cleanup would delete, before the confirm dialog.
-    fn preview_dialog(&mut self, ctx: &egui::Context, t: &Tokens, s: &Strings, plan: &DeletePlan) {
-        if !self.preview_open {
+    /// The project's clean panel: details, a draft of what to delete, and the two exits.
+    fn clean_panel(&mut self, ctx: &egui::Context, t: &Tokens, s: &Strings) {
+        let Some(mut panel) = self.panel.take() else {
             return;
-        }
+        };
+        let path = panel.project.clone();
+        let Some(project) = self.projects.iter().find(|project| project.path == path) else {
+            return;
+        };
+        let (name, stack) = (project.name.clone(), project.stack);
+        let Some(entry) = self.entries.get_mut(&path) else {
+            return;
+        };
+        let targets = &mut entry.targets;
+        let chosen = targets.iter().filter(|target| target.checked).count();
+        let mut dirty = false;
         let mut close = false;
+        let mut clean = false;
 
-        let modal = egui::Modal::new(egui::Id::unique("preview"))
+        let modal = egui::Modal::new(egui::Id::unique("clean_panel"))
             .frame(
                 Frame::new()
                     .fill(t.bg)
@@ -659,106 +576,140 @@ impl DevSweepApp {
             .show(ctx, |ui| {
                 ui.set_width(640.0);
                 ui.horizontal(|ui| {
-                    ui.label(theme::title(s.preview, 20.0, t.text));
+                    ui.label(theme::title(&name, 20.0, t.text));
+                    ui.add_space(8.0);
+                    chip(ui, s.stack(stack), t);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let button =
                             Button::new(RichText::new("×").color(t.text_muted)).frame(false);
                         if ui.add(button).clicked() {
                             close = true;
                         }
-                        ui.add_space(8.0);
-                        ui.label(
-                            RichText::new(size::format_size(plan.total_bytes))
-                                .size(16.0)
-                                .monospace()
-                                .color(t.good),
-                        );
                     });
                 });
+                ui.add_space(6.0);
+                let full = path.display().to_string();
+                ui.add(
+                    Label::new(
+                        RichText::new(&full)
+                            .size(12.0)
+                            .monospace()
+                            .color(t.text_muted),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(&full);
+                ui.add_space(12.0);
+                stat_row(ui, s.items, &format!("{chosen} / {}", targets.len()), t);
+                stat_row(ui, s.total, &size::format_size(panel.plan.total_bytes), t);
                 ui.add_space(10.0);
                 ui.separator();
                 ui.add_space(6.0);
 
                 ScrollArea::vertical()
-                    .max_height(420.0)
+                    .max_height(360.0)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
-                        let mut current: Option<&Path> = None;
-                        for item in &plan.items {
-                            if current != Some(item.project_path.as_path()) {
-                                if current.is_some() {
-                                    ui.add_space(8.0);
-                                }
-                                current = Some(item.project_path.as_path());
-                                ui.label(
-                                    RichText::new(project_name(&item.project_path))
-                                        .size(13.0)
-                                        .strong()
-                                        .color(t.text),
-                                );
-                            }
+                        for target in targets.iter_mut() {
+                            // Risky entries stay visually weak until chosen on purpose.
+                            let dimmed = target.dangerous && !target.checked;
+                            let color = if dimmed { t.text_muted } else { t.text };
+                            let rel = target.path.strip_prefix(&path).unwrap_or(&target.path);
+                            let text = target
+                                .label
+                                .clone()
+                                .unwrap_or_else(|| rel.display().to_string());
+                            let size = target
+                                .size
+                                .map(size::format_size)
+                                .unwrap_or_else(|| "…".to_string());
                             ui.horizontal(|ui| {
-                                let label = Label::new(
-                                    RichText::new(item.target_path.display().to_string())
-                                        .size(12.0)
-                                        .monospace()
-                                        .color(t.text_muted),
+                                dirty |= ui
+                                    .add(Checkbox::without_text(&mut target.checked))
+                                    .changed();
+                                ui.add(
+                                    Label::new(
+                                        RichText::new(text).size(13.0).monospace().color(color),
+                                    )
+                                    .truncate(),
                                 )
-                                .truncate();
-                                ui.add(label)
-                                    .on_hover_text(item.target_path.display().to_string());
+                                .on_hover_text(target.path.display().to_string());
+                                if target.dangerous {
+                                    ui.label(theme::hud(s.dangerous, t.danger));
+                                }
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                     ui.label(
-                                        RichText::new(size::format_size(item.bytes))
-                                            .size(12.0)
-                                            .monospace()
-                                            .color(t.text),
+                                        RichText::new(size).size(13.0).monospace().color(color),
                                     );
-                                    if item.large {
-                                        ui.label(
-                                            RichText::new(format!(
-                                                "> {}",
-                                                size::format_size(LARGE_TARGET_BYTES)
-                                            ))
-                                            .size(11.0)
-                                            .color(t.danger),
-                                        );
-                                    }
                                 });
                             });
                         }
 
-                        if !plan.skipped.is_empty() {
-                            ui.add_space(16.0);
-                            ui.label(RichText::new(s.skipped).size(13.0).strong().color(t.danger));
-                            for skip in &plan.skipped {
-                                let label = Label::new(
-                                    RichText::new(skip.path.display().to_string())
-                                        .size(11.0)
-                                        .monospace()
-                                        .color(t.text_muted),
-                                )
-                                .truncate();
-                                ui.add(label).on_hover_text(skip.path.display().to_string());
-                                ui.label(
-                                    RichText::new(s.skip_reason(skip.reason))
-                                        .size(11.0)
-                                        .color(t.danger),
-                                );
+                        if !panel.plan.skipped.is_empty() {
+                            ui.add_space(12.0);
+                            ui.label(theme::hud(s.skipped, t.danger));
+                            for skip in &panel.plan.skipped {
+                                let rel = skip.path.strip_prefix(&path).unwrap_or(&skip.path);
+                                ui.horizontal(|ui| {
+                                    ui.add(
+                                        Label::new(
+                                            RichText::new(rel.display().to_string())
+                                                .size(11.0)
+                                                .monospace()
+                                                .color(t.text_muted),
+                                        )
+                                        .truncate(),
+                                    )
+                                    .on_hover_text(skip.path.display().to_string());
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        ui.label(
+                                            RichText::new(s.skip_reason(skip.reason))
+                                                .size(11.0)
+                                                .color(t.danger),
+                                        );
+                                    });
+                                });
                             }
                         }
                     });
 
-                ui.add_space(20.0);
+                ui.add_space(16.0);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if secondary_button(ui, s.close, t) {
+                    let planned = panel.plan.items.len();
+                    let label = if planned == 0 {
+                        s.clean.to_string()
+                    } else {
+                        format!(
+                            "{} {planned} {} · {}",
+                            s.clean,
+                            s.items,
+                            size::format_size(panel.plan.total_bytes)
+                        )
+                    };
+                    // Unknown sizes could hide a > 5 GB target, so wait for them.
+                    let known = targets
+                        .iter()
+                        .filter(|target| target.checked)
+                        .all(|target| target.size.is_some());
+                    if danger_button(ui, &label, t, planned > 0 && known) {
+                        clean = true;
+                    }
+                    ui.add_space(4.0);
+                    if secondary_button(ui, s.cancel, t) {
                         close = true;
                     }
                 });
             });
 
-        if close || modal.should_close() {
-            self.preview_open = false;
+        // The draft changed: replan now, so the totals match what is on screen.
+        if dirty {
+            panel.plan = self.project_plan(&path);
+        }
+        if clean {
+            self.pending = Some(Cleanup::Project(path));
+            self.confirm_large_ack = false;
+        } else if !close && !modal.should_close() {
+            self.panel = Some(panel);
         }
     }
 
@@ -832,12 +783,6 @@ impl DevSweepApp {
             return;
         }
 
-        let projects = plan
-            .items
-            .iter()
-            .map(|item| &item.project_path)
-            .collect::<std::collections::HashSet<_>>()
-            .len();
         let large: Vec<&plan::PlanItem> = plan.items.iter().filter(|item| item.large).collect();
         let total = if known {
             size::format_size(plan.total_bytes)
@@ -846,7 +791,13 @@ impl DevSweepApp {
         };
         let title = match cleanup {
             Cleanup::Cache(rule) => format!("{} · {}", s.confirm_title, rule.name),
-            Cleanup::Projects => s.confirm_title.to_string(),
+            Cleanup::Project(ref path) => {
+                format!("{} · {}", s.confirm_title, project_name(path))
+            }
+        };
+        let cache_warning = match cleanup {
+            Cleanup::Cache(rule) if rule.dangerous => Some(s.cache_cargo_note),
+            _ => None,
         };
         let mut ack = self.confirm_large_ack;
         let mut close = false;
@@ -863,11 +814,13 @@ impl DevSweepApp {
                 ui.set_width(440.0);
                 ui.label(theme::title(title, 20.0, t.text));
                 ui.add_space(12.0);
-                if let Cleanup::Projects = cleanup {
-                    stat_row(ui, s.projects, &projects.to_string(), t);
-                }
                 stat_row(ui, s.items, &plan.items.len().to_string(), t);
-                stat_row(ui, s.preview_total, &total, t);
+                stat_row(ui, s.total, &total, t);
+
+                if let Some(warning) = cache_warning {
+                    ui.add_space(12.0);
+                    ui.label(RichText::new(warning).size(13.0).color(t.danger));
+                }
 
                 if !large.is_empty() {
                     ui.add_space(12.0);
@@ -1252,14 +1205,7 @@ impl DevSweepApp {
             });
     }
 
-    fn content(
-        &mut self,
-        ui: &mut Ui,
-        t: &Tokens,
-        s: &Strings,
-        plan: &DeletePlan,
-        visible: &[usize],
-    ) {
+    fn content(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings, visible: &[usize]) {
         if self.config.roots.is_empty() {
             if self.card(ui, t, s.empty_title, s.empty_body, Some(s.add_directory)) {
                 self.add_directory(ui.ctx());
@@ -1276,37 +1222,6 @@ impl DevSweepApp {
                 t.text,
             ));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let count = plan.items.len();
-                let label = if count == 0 {
-                    s.clean.to_string()
-                } else {
-                    let total = if self.selected_sizes_known() {
-                        size::format_size(plan.total_bytes)
-                    } else {
-                        "…".to_string()
-                    };
-                    format!("{} {} {} · {}", s.clean, count, s.items, total)
-                };
-                let running = self.execution.is_some();
-                if danger_button(ui, &label, t, count > 0 && !running) {
-                    self.pending = Some(Cleanup::Projects);
-                    self.confirm_large_ack = false;
-                    self.preview_open = false;
-                }
-
-                ui.add_space(4.0);
-                if action_button(
-                    ui,
-                    s.preview,
-                    Kind::Secondary,
-                    t,
-                    count > 0,
-                    egui::vec2(96.0, 38.0),
-                ) {
-                    self.preview_open = true;
-                }
-
-                ui.add_space(8.0);
                 // Taken out so the closure does not hold a second borrow of `self`.
                 let mut search = std::mem::take(&mut self.search);
                 ui.add(
@@ -1341,117 +1256,81 @@ impl DevSweepApp {
             return;
         }
 
-        let selectable = self.selectable(visible);
-        let bulk = self.bulk_state(&selectable);
-        let all_chosen = self.all_chosen(&selectable);
-        let mut select_all = false;
         let mut sort_clicked = None;
-        let mut toggled = None;
+        let mut action = None;
 
         // Rules run across the whole table, padding included.
         let span = ui.available_rect_before_wrap().x_range();
-        let show_items = ui.available_width() >= 700.0;
         let sort = self.sort;
+        let running = self.execution.is_some();
 
         Frame::new()
             .stroke(t.hairline())
             .inner_margin(egui::Margin::symmetric(16, 0))
             .show(ui, |ui| {
-                let mut table = TableBuilder::new(ui)
+                TableBuilder::new(ui)
                     .striped(false)
                     .cell_layout(Layout::left_to_right(Align::Center))
-                    .column(Column::exact(40.0))
-                    .column(Column::remainder().at_least(220.0).clip(true))
-                    .column(Column::exact(120.0));
-                if show_items {
-                    table = table.column(Column::exact(80.0));
-                }
-                table
-                    .column(Column::exact(120.0))
+                    .column(Column::remainder().at_least(160.0).clip(true))
+                    .column(Column::exact(90.0))
+                    .column(Column::exact(100.0))
+                    .column(Column::exact(96.0))
+                    .column(Column::exact(44.0))
                     .header(42.0, |mut header| {
-                        header.col(|ui| {
-                            select_all = tri_checkbox(ui, t, bulk, !selectable.is_empty())
-                                .on_hover_text(s.select_all)
-                                .clicked();
-                            row_rule(ui, t, span);
-                        });
                         header.col(|ui| {
                             if sort_header(ui, s.project_column, "↑", sort == Sort::Name, t) {
                                 sort_clicked = Some(Sort::Name);
                             }
+                            row_rule(ui, t, span);
                         });
                         header.col(|ui| {
                             ui.label(theme::hud(s.stack_column, t.text_muted));
                         });
-                        if show_items {
-                            header.col(|ui| {
-                                ui.label(theme::hud(s.items, t.text_muted));
-                            });
-                        }
                         header.col(|ui| {
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if sort_header(ui, s.reclaimable, "↓", sort == Sort::Size, t) {
+                                if sort_header(ui, s.size_column, "↓", sort == Sort::Size, t) {
                                     sort_clicked = Some(Sort::Size);
                                 }
                             });
                         });
+                        header.col(|_| {});
+                        header.col(|_| {});
                     })
                     .body(|mut body| {
                         let projects = &self.projects;
                         let entries = &mut self.entries;
-                        for (position, &index) in visible.iter().enumerate() {
+                        let last_index = visible.last().copied();
+                        for &index in visible {
                             let project = &projects[index];
                             let Some(entry) = entries.get_mut(&project.path) else {
                                 continue;
                             };
-                            let last_project = position + 1 == visible.len();
-                            let children = entry.expanded && !entry.targets.is_empty();
-
-                            let mut toggle = None;
+                            let last = Some(index) == last_index;
                             body.row(PROJECT_ROW_H, |mut row| {
-                                toggle = project_table_row(
-                                    &mut row,
-                                    project,
-                                    entry,
-                                    last_project && !children,
-                                    show_items,
-                                    t,
-                                    s,
-                                    span,
-                                );
-                            });
-                            toggled = toggle.map(|checked| (position, checked));
-                            if children {
-                                let targets = &mut entry.targets;
-                                let last_target = targets.len() - 1;
-                                for (i, target) in targets.iter_mut().enumerate() {
-                                    body.row(TARGET_ROW_H, |mut row| {
-                                        target_table_row(
-                                            &mut row,
-                                            project,
-                                            target,
-                                            last_project && i == last_target,
-                                            show_items,
-                                            t,
-                                            s,
-                                            span,
-                                        );
-                                    });
+                                let hit = project_table_row(
+                                    &mut row, project, entry, last, running, t, s, span,
+                                )
+                                .map(|action| (project.path.clone(), action));
+                                // Only one row can be clicked per frame; later rows
+                                // must not clear an action an earlier row just set.
+                                if hit.is_some() {
+                                    action = hit;
                                 }
-                            }
+                            });
                         }
                     });
             });
 
-        if select_all {
-            self.set_selected(&selectable, !all_chosen);
-        }
         if let Some(key) = sort_clicked {
             self.sort = key;
         }
-        if let Some((position, checked)) = toggled {
-            let extend = ui.input(|input| input.modifiers.shift);
-            self.toggle_selection(visible, position, extend, checked);
+        match action {
+            Some((path, RowAction::Panel)) => self.open_panel(&path),
+            Some((path, RowAction::Folder)) => {
+                let _ = opener::open(&path);
+            }
+            Some((path, RowAction::Terminal)) => terminal::open(&path),
+            None => {}
         }
     }
 
@@ -1477,6 +1356,7 @@ impl DevSweepApp {
         ui.add_space(12.0);
 
         let mut clean = None;
+        let mut action = None;
         let busy = self.execution.is_some();
         ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -1492,8 +1372,10 @@ impl DevSweepApp {
                             ui.add_space(6.0);
                             heading = true;
                         }
-                        if let Some(rule) = cache_row(ui, row, t, s, busy) {
-                            clean = Some(rule);
+                        let (event, event_action) = cache_row(ui, row, t, s, busy);
+                        clean = clean.or(event);
+                        if event_action.is_some() {
+                            action = event_action;
                         }
                         ui.add_space(6.0);
                     }
@@ -1506,6 +1388,13 @@ impl DevSweepApp {
         if let Some(rule) = clean {
             self.pending = Some(Cleanup::Cache(rule));
             self.confirm_large_ack = false;
+        }
+        match action {
+            Some((path, RowAction::Folder)) => {
+                let _ = opener::open(&path);
+            }
+            Some((path, RowAction::Terminal)) => terminal::open(&path),
+            _ => {}
         }
     }
 
@@ -1621,16 +1510,6 @@ impl eframe::App for DevSweepApp {
 
         let visible = self.visible();
         if self.view == View::Projects {
-            // ⌘A belongs to the search box while it has focus.
-            let search_focused = ui.memory(|memory| memory.focused()) == Some(search_id());
-            if !search_focused {
-                let select_all = ui.ctx().input_mut(|input| {
-                    input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::A))
-                });
-                if select_all {
-                    self.toggle_select_all(&visible);
-                }
-            }
             let focus_search = ui.ctx().input_mut(|input| {
                 input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::F))
             });
@@ -1639,22 +1518,26 @@ impl eframe::App for DevSweepApp {
             }
         }
 
-        let plan = self.build_plan();
-
         egui::CentralPanel::default()
             .frame(Frame::new().fill(t.bg).inner_margin(24))
             .show(ui, |ui| match self.view {
-                View::Projects => self.content(ui, t, s, &plan, &visible),
+                View::Projects => self.content(ui, t, s, &visible),
                 View::Caches => self.caches_content(ui, t, s),
                 View::Settings => self.settings_content(ui, t, s),
             });
 
-        self.preview_dialog(ui.ctx(), t, s, &plan);
+        self.clean_panel(ui.ctx(), t, s);
 
-        if let Some(cleanup) = self.pending {
-            let pending_plan = self.plan_for(cleanup);
-            let known = match cleanup {
-                Cleanup::Projects => self.selected_sizes_known(),
+        if let Some(cleanup) = self.pending.clone() {
+            let pending_plan = self.plan_for(cleanup.clone());
+            let known = match &cleanup {
+                Cleanup::Project(path) => self.entries.get(path).is_some_and(|entry| {
+                    entry
+                        .targets
+                        .iter()
+                        .filter(|target| target.checked)
+                        .all(|target| target.size.is_some())
+                }),
                 Cleanup::Cache(_) => true,
             };
             self.confirm_dialog(ui.ctx(), t, s, &pending_plan, known, cleanup);
@@ -1762,202 +1645,122 @@ fn danger_button(ui: &mut Ui, label: &str, t: &Tokens, enabled: bool) -> bool {
     action_button(ui, label, Kind::Danger, t, enabled, egui::vec2(160.0, 38.0))
 }
 
-/// One project row: checkbox, name + path, stack, target count and reclaimable size.
-/// Returns the state its checkbox should be set to when it was clicked.
+/// One project row: name + path, stack, total size, and the two row actions.
 ///
-/// The checker's "last row" flag skips the rule under the final row, where the
-/// table's own frame already draws one.
+/// The "last row" flag skips the rule under the final row, where the table's own
+/// frame already draws one.
 #[allow(clippy::too_many_arguments)]
 fn project_table_row(
     row: &mut TableRow<'_, '_>,
     project: &Project,
     entry: &mut ProjectEntry,
     last: bool,
-    show_items: bool,
+    running: bool,
     t: &Tokens,
     s: &Strings,
     span: egui::Rangef,
-) -> Option<bool> {
-    let state = entry.state();
-    let mut toggle = None;
+) -> Option<RowAction> {
+    let mut action = None;
+    let cleanable = !entry.targets.is_empty();
+
     row.col(|ui| {
         if !last {
             row_rule(ui, t, span);
         }
-        let response = tri_checkbox(ui, t, state, !entry.targets.is_empty());
-        if response.clicked() {
-            // A full parent clears; anything less fills.
-            toggle = Some(state != TriState::On);
-        }
-    });
-
-    let mut expand = false;
-    row.col(|ui| {
-        // The whole cell is the target; the labels inside take no clicks.
+        // The whole cell opens the panel. Labels are selectable text by default and
+        // would swallow the click, so they hand it back to the cell.
         let open = ui.interact(
             ui.max_rect(),
             ui.scope_id().with("row-open"),
             Sense::click(),
         );
         ui.vertical(|ui| {
-            ui.label(RichText::new(&project.name).size(15.0).color(t.text));
+            ui.add(
+                Label::new(RichText::new(&project.name).size(15.0).color(t.text)).selectable(false),
+            );
             let path = Label::new(
                 RichText::new(project.path.display().to_string())
                     .size(12.0)
                     .monospace()
                     .color(t.text_muted),
             )
-            .truncate();
+            .truncate()
+            .selectable(false);
             ui.add(path)
                 .on_hover_text(project.path.display().to_string());
         });
-        if !entry.targets.is_empty() {
-            expand = open
+        if cleanable
+            && open
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .clicked();
+                .clicked()
+        {
+            action = Some(RowAction::Panel);
         }
     });
     row.col(|ui| {
         chip(ui, s.stack(project.stack), t);
     });
-    if show_items {
-        row.col(|ui| {
-            let count = entry.targets.len();
-            let color = if count == 0 { t.text_muted } else { t.text };
-            ui.label(
-                RichText::new(count.to_string())
-                    .size(13.0)
-                    .monospace()
-                    .color(color),
-            );
-        });
-    }
     row.col(|ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let (text, color) = match size::checked_size(&entry.targets) {
+            let (text, color) = match size::total_size(&entry.targets) {
                 Some(bytes) => (size::format_size(bytes), t.good),
                 None => ("…".to_string(), t.text_muted),
             };
             ui.label(RichText::new(text).size(14.0).monospace().color(color));
         });
     });
+    row.col(|ui| {
+        // Projects with nothing to clean keep only the folder actions.
+        if cleanable
+            && action_button(
+                ui,
+                s.clean,
+                Kind::Secondary,
+                t,
+                !running,
+                egui::vec2(84.0, 34.0),
+            )
+        {
+            action = Some(RowAction::Panel);
+        }
+    });
+    row.col(|ui| {
+        if let Some(choice) = more_menu(ui, t, s) {
+            action = Some(choice);
+        }
+    });
 
-    if expand {
-        entry.expanded = !entry.expanded;
-    }
-    toggle
+    action
 }
 
-/// A checkbox with a third, "some children are checked" state: filled with a check,
-/// filled with a dash, or empty.
-fn tri_checkbox(ui: &mut Ui, t: &Tokens, state: TriState, enabled: bool) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::click());
-    let fade = |color: Color32| {
-        if enabled {
-            color
-        } else {
-            color.gamma_multiply(0.5)
+/// The referto-style overflow trigger: a square "…" button with a two-item menu.
+fn more_menu(ui: &mut Ui, t: &Tokens, s: &Strings) -> Option<RowAction> {
+    let button = Button::new(RichText::new("…").size(15.0).color(t.text_muted))
+        .min_size(egui::vec2(34.0, 34.0));
+    let (response, open) = egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
+        ui.set_min_width(200.0);
+        let mut action = None;
+        if ui.button(s.open_folder).clicked() {
+            action = Some(RowAction::Folder);
+            ui.close();
         }
-    };
-    let on = state != TriState::Off;
-    let hovered = response.hovered() && enabled;
-    let border = if hovered { t.border_strong } else { t.border };
-    let (fill, stroke) = if on {
-        (fade(t.accent), Stroke::NONE)
-    } else {
-        (Color32::TRANSPARENT, Stroke::new(1.0, fade(border)))
-    };
-    let painter = ui.painter();
-    painter.rect(rect, CornerRadius::ZERO, fill, stroke, StrokeKind::Inside);
-    let ink = fade(Color32::WHITE);
-    match state {
-        TriState::On => {
-            painter.line_segment(
-                [
-                    rect.lerp_inside(egui::vec2(0.2, 0.52)),
-                    rect.lerp_inside(egui::vec2(0.42, 0.74)),
-                ],
-                Stroke::new(2.0, ink),
-            );
-            painter.line_segment(
-                [
-                    rect.lerp_inside(egui::vec2(0.42, 0.74)),
-                    rect.lerp_inside(egui::vec2(0.8, 0.28)),
-                ],
-                Stroke::new(2.0, ink),
-            );
+        if ui.button(s.open_terminal).clicked() {
+            action = Some(RowAction::Terminal);
+            ui.close();
         }
-        TriState::Partial => {
-            painter.hline(
-                rect.shrink2(egui::vec2(4.0, 0.0)).x_range(),
-                rect.center().y,
-                Stroke::new(2.0, ink),
-            );
-        }
-        TriState::Off => {}
-    }
-    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, enabled, on, ""));
-    if enabled {
-        response.on_hover_cursor(egui::CursorIcon::Default)
-    } else {
-        response
-    }
+        action
+    });
+    response.on_hover_text(s.more);
+    open.and_then(|open| open.inner)
 }
 
-/// One of a project's targets, indented under its project row.
-#[allow(clippy::too_many_arguments)]
-fn target_table_row(
-    row: &mut TableRow<'_, '_>,
-    project: &Project,
-    target: &mut Target,
-    last: bool,
-    show_items: bool,
-    t: &Tokens,
-    s: &Strings,
-    span: egui::Rangef,
-) {
-    let dimmed = target.dangerous && !target.checked;
-    row.col(|ui| {
-        if !last {
-            row_rule(ui, t, span);
-        }
-        ui.add_space(20.0);
-        ui.add(Checkbox::without_text(&mut target.checked));
-    });
-    row.col(|ui| {
-        // Risky entries stay visually weak until the user checks them on purpose.
-        let color = if dimmed { t.text_muted } else { t.text };
-        let rel = target
-            .path
-            .strip_prefix(&project.path)
-            .unwrap_or(&target.path);
-        let text = target
-            .label
-            .clone()
-            .unwrap_or_else(|| rel.display().to_string());
-        let label = Label::new(RichText::new(text).size(13.0).monospace().color(color)).truncate();
-        ui.add_space(24.0);
-        ui.add(label)
-            .on_hover_text(target.path.display().to_string());
-    });
-    row.col(|ui| {
-        if dimmed {
-            ui.label(theme::hud(s.unchecked, t.text_muted));
-        }
-    });
-    if show_items {
-        row.col(|_| {});
+/// A plan with nothing in it, for a project or cache that vanished mid-click.
+fn empty_plan() -> DeletePlan {
+    DeletePlan {
+        items: Vec::new(),
+        skipped: Vec::new(),
+        total_bytes: 0,
     }
-    row.col(|ui| {
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let text = match target.size {
-                Some(bytes) => size::format_size(bytes),
-                None => "…".to_string(),
-            };
-            let color = if dimmed { t.text_muted } else { t.text };
-            ui.label(RichText::new(text).size(13.0).monospace().color(color));
-        });
-    });
 }
 
 /// The hairline under the row `ui` is drawing, across the whole table. It sits on
@@ -1978,10 +1781,11 @@ fn cache_row(
     t: &Tokens,
     s: &Strings,
     busy: bool,
-) -> Option<&'static CacheRule> {
+) -> (Option<&'static CacheRule>, Option<(PathBuf, RowAction)>) {
     let exists = row.path.as_ref().is_some_and(|path| path.is_dir());
     let missing = !exists && !row.cleaned;
     let mut clean = false;
+    let mut action = None;
 
     Frame::new()
         .fill(t.surface)
@@ -1989,13 +1793,8 @@ fn cache_row(
         .inner_margin(egui::Margin::symmetric(16, 10))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.add_enabled(
-                    exists && !row.cleaned,
-                    Checkbox::without_text(&mut row.checked),
-                );
-
                 ui.vertical(|ui| {
-                    ui.set_max_width((ui.available_width() - 200.0).max(120.0));
+                    ui.set_max_width((ui.available_width() - 240.0).max(120.0));
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new(row.rule.name)
@@ -2021,11 +1820,17 @@ fn cache_row(
                 });
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    // Nothing to open when the entry is not on this machine.
+                    if let Some(path) = row.path.as_ref().filter(|_| exists)
+                        && let Some(choice) = more_menu(ui, t, s)
+                    {
+                        action = Some((path.clone(), choice));
+                    }
+                    ui.add_space(8.0);
                     let button = Button::new(theme::button_text(s.clean, t.text))
                         .fill(t.bg)
                         .stroke(t.hairline());
-                    let armed =
-                        exists && !row.cleaned && !busy && row.size.is_some() && row.checked;
+                    let armed = exists && !row.cleaned && !busy && row.size.is_some();
                     if ui.add_enabled(armed, button).clicked() {
                         clean = true;
                     }
@@ -2049,7 +1854,7 @@ fn cache_row(
             });
         });
 
-    clean.then_some(row.rule)
+    (clean.then_some(row.rule), action)
 }
 
 fn project_name(path: &Path) -> String {
@@ -2080,55 +1885,220 @@ fn chip(ui: &mut Ui, text: &str, t: &Tokens) {
 mod tests {
     use super::*;
 
-    fn target(dangerous: bool, checked: bool) -> Target {
+    fn target(rule_id: &str, default_checked: bool, dangerous: bool) -> Target {
         Target {
-            rule_id: if dangerous { "risky" } else { "safe" }.to_string(),
-            path: PathBuf::from("build"),
+            rule_id: rule_id.to_string(),
+            path: PathBuf::from(rule_id),
             size: Some(1024),
-            checked,
+            checked: !default_checked,
+            default_checked,
             dangerous,
             label: None,
         }
     }
 
-    fn entry(targets: Vec<Target>) -> ProjectEntry {
-        ProjectEntry {
-            targets,
-            expanded: false,
+    /// Opening the panel throws away what the last visit chose and restores the defaults.
+    #[test]
+    fn the_draft_resets_to_the_rule_defaults() {
+        let mut targets = vec![
+            target("build", true, false),
+            target("pods", false, false),
+            target("dist", false, true),
+        ];
+
+        reset_draft(&mut targets);
+
+        assert!(targets[0].checked);
+        assert!(!targets[1].checked);
+        assert!(!targets[2].checked, "a risky rule stays off by default");
+    }
+
+    // --- A headless click harness for the projects table. ---
+
+    /// One app with `rows` projects, each carrying one cleanable target.
+    fn app_with_rows(rows: usize) -> DevSweepApp {
+        let root = PathBuf::from("/tmp/devsweep-ui-test");
+        let mut projects = Vec::new();
+        let mut entries = HashMap::new();
+        for index in 0..rows {
+            let path = root.join(format!("p{index}"));
+            projects.push(Project {
+                name: format!("p{index}"),
+                path: path.clone(),
+                stack: Stack::Node,
+            });
+            entries.insert(
+                path,
+                ProjectEntry {
+                    targets: vec![target("node_modules", true, false)],
+                },
+            );
+        }
+        DevSweepApp {
+            lang: Lang::En,
+            config: Config {
+                roots: vec![root],
+                ..Config::default()
+            },
+            rules: Vec::new(),
+            rules_error: None,
+            root_notice: None,
+            view: View::Projects,
+            projects,
+            entries,
+            caches: Vec::new(),
+            measurement: None,
+            search: String::new(),
+            filter: None,
+            sort: Sort::Name,
+            was_focused: None,
+            last_scan: Instant::now(),
+            panel: None,
+            pending: None,
+            confirm_large_ack: false,
+            execution: None,
+            flash: None,
+            failures_open: false,
+            failures: Vec::new(),
         }
     }
 
+    fn raw_input(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 600.0),
+            )),
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn input(pos: egui::Pos2, pressed: bool) -> egui::RawInput {
+        raw_input(vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            },
+        ])
+    }
+
+    fn draw(app: &mut DevSweepApp, ctx: &egui::Context, input: egui::RawInput) {
+        let mut output = ctx.run_ui(input, |ui| {
+            let t = theme::tokens(egui::Theme::Dark);
+            let s = app.strings();
+            let visible = app.visible();
+            egui::CentralPanel::default()
+                .frame(Frame::new().fill(t.bg).inner_margin(24))
+                .show(ui, |ui| app.content(ui, t, s, &visible));
+        });
+        // Nothing renders these in a test, but epaint panics if they are dropped.
+        output.textures_delta.clear();
+    }
+
+    /// Press and release at `pos`, the way a real click arrives. One warm-up frame
+    /// first: the table's scroll area only has a clipped layout from its second frame.
+    fn click_at(app: &mut DevSweepApp, ctx: &egui::Context, pos: egui::Pos2) {
+        draw(app, ctx, input(pos, true));
+        draw(app, ctx, input(pos, true));
+        draw(app, ctx, input(pos, false));
+    }
+
+    /// Drives the "…" menu: click the trigger, then click at `item`. Returns the
+    /// action the menu hands back, which the caller is responsible for not running.
+    fn more_menu_action(ctx: &egui::Context, item: egui::Pos2) -> Option<RowAction> {
+        let t = theme::tokens(egui::Theme::Dark);
+        let s = Lang::En.strings();
+        let trigger = egui::pos2(100.0, 100.0);
+        let mut got = None;
+        let mut frame = |input: egui::RawInput| {
+            let mut output = ctx.run_ui(input, |ui| {
+                egui::Area::new(egui::Id::unique("menu-test"))
+                    .fixed_pos(trigger)
+                    .show(ui.ctx(), |ui| {
+                        if let Some(action) = more_menu(ui, t, s) {
+                            got = Some(action);
+                        }
+                    });
+            });
+            output.textures_delta.clear();
+        };
+
+        // Two warm-up frames: layers (the Area, then the popup) only join the hit
+        // test one frame after they are created.
+        frame(raw_input(Vec::new()));
+        frame(raw_input(Vec::new()));
+        frame(input(trigger + egui::vec2(17.0, 17.0), true));
+        frame(input(trigger + egui::vec2(17.0, 17.0), false));
+        frame(raw_input(Vec::new()));
+        frame(raw_input(Vec::new()));
+        frame(input(item, true));
+        frame(input(item, false));
+        got
+    }
+
+    /// Both menu entries must hand their action back to the row.
     #[test]
-    fn the_parent_state_comes_from_the_children() {
-        assert_eq!(entry(vec![]).state(), TriState::Off);
-        assert_eq!(entry(vec![target(false, false)]).state(), TriState::Off);
-        assert_eq!(entry(vec![target(false, true)]).state(), TriState::On);
-        assert_eq!(
-            entry(vec![target(false, true), target(false, false)]).state(),
-            TriState::Partial
+    fn the_more_menu_returns_the_clicked_action() {
+        let mut found = Vec::new();
+        for y in [150.0, 162.0, 174.0, 186.0, 198.0, 210.0] {
+            for x in [110.0, 140.0, 180.0, 220.0, 260.0] {
+                let ctx = egui::Context::default();
+                if let Some(action) = more_menu_action(&ctx, egui::pos2(x, y)) {
+                    found.push(action);
+                }
+            }
+        }
+        assert!(
+            found.contains(&RowAction::Folder),
+            "no click reached Open folder"
+        );
+        assert!(
+            found.contains(&RowAction::Terminal),
+            "no click reached Open in terminal"
         );
     }
 
-    /// Filling a project leaves its risky targets alone, so the parent reads as partial;
-    /// a project with nothing safe to clean still fills, and clearing always clears.
+    fn expected(index: usize) -> Option<PathBuf> {
+        Some(PathBuf::from(format!("/tmp/devsweep-ui-test/p{index}")))
+    }
+
+    /// The first row is not the last rendered one: its action must survive the rows
+    /// painted after it. The click lands on the path label, which must not eat it.
     #[test]
-    fn filling_skips_risky_targets_but_never_dead_ends() {
-        let mut mixed = entry(vec![target(false, false), target(true, false)]);
-        mixed.set_checked(true);
-        assert_eq!(mixed.state(), TriState::Partial);
-        assert!(mixed.targets[0].checked);
-        assert!(!mixed.targets[1].checked);
+    fn clicking_a_row_opens_its_panel() {
+        let mut app = app_with_rows(3);
+        let ctx = egui::Context::default();
+        click_at(&mut app, &ctx, egui::pos2(200.0, 150.0));
+        assert_eq!(
+            app.panel.as_ref().map(|panel| panel.project.clone()),
+            expected(0)
+        );
+    }
 
-        mixed.set_checked(false);
-        assert_eq!(mixed.state(), TriState::Off);
+    /// The row's `Clean` button has the same plumbing, without any label in the way.
+    #[test]
+    fn clicking_a_rows_clean_button_opens_its_panel() {
+        let mut app = app_with_rows(3);
+        let ctx = egui::Context::default();
+        click_at(&mut app, &ctx, egui::pos2(735.0, 150.0));
+        assert_eq!(
+            app.panel.as_ref().map(|panel| panel.project.clone()),
+            expected(0)
+        );
+    }
 
-        let mut risky_only = entry(vec![target(true, false)]);
-        risky_only.set_checked(true);
-        assert_eq!(risky_only.state(), TriState::On);
-        assert!(risky_only.targets[0].checked);
+    /// The row's size counts every target, risky ones included.
+    #[test]
+    fn the_row_total_ignores_the_draft() {
+        let mut targets = vec![target("build", true, false), target("dist", false, true)];
+        reset_draft(&mut targets);
 
-        let mut checked_risky = entry(vec![target(false, true), target(true, true)]);
-        checked_risky.set_checked(false);
-        assert!(checked_risky.targets.iter().all(|target| !target.checked));
+        assert_eq!(size::total_size(&targets), Some(2048));
+        targets[1].checked = true;
+        assert_eq!(size::total_size(&targets), Some(2048));
     }
 }

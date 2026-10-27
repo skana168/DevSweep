@@ -218,6 +218,7 @@ mod tests {
             path,
             size: Some(1_000),
             checked: true,
+            default_checked: true,
             dangerous: false,
             label: None,
         }

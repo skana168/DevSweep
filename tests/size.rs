@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use devsweep::rules::Target;
-use devsweep::size::{SizeRequest, checked_size, dir_size, format_size, measure};
+use devsweep::size::{SizeRequest, dir_size, format_size, measure, total_size};
 
 const MB: u64 = 1024 * 1024;
 
@@ -26,32 +26,26 @@ fn sizes_format_by_magnitude() {
 }
 
 #[test]
-fn checked_size_sums_only_checked_targets_and_waits_for_their_sizes() {
-    let target = |id: &'static str, size: Option<u64>, checked: bool| Target {
+fn total_size_counts_every_target_and_waits_for_their_sizes() {
+    let target = |id: &'static str, size: Option<u64>| Target {
         rule_id: id.to_string(),
         path: PathBuf::from(id),
         size,
-        checked,
+        checked: true,
+        default_checked: true,
         dangerous: false,
         label: None,
     };
 
-    // A risky target that is off contributes nothing, even though it is measured.
-    let measured = vec![
-        target("a", Some(1_000), true),
-        target("risky", Some(2_000), false),
-    ];
-    assert_eq!(checked_size(&measured), Some(1_000));
+    // Risky targets are part of the project's size whether or not they are chosen.
+    let measured = vec![target("a", Some(1_000)), target("risky", Some(2_000))];
+    assert_eq!(total_size(&measured), Some(3_000));
 
-    // Any checked target still being measured leaves the total unknown.
-    let pending = vec![
-        target("a", Some(1_000), true),
-        target("b", None, true),
-        target("risky", Some(2_000), false),
-    ];
-    assert_eq!(checked_size(&pending), None);
+    // Any target still being measured leaves the total unknown.
+    let pending = vec![target("a", Some(1_000)), target("b", None)];
+    assert_eq!(total_size(&pending), None);
 
-    assert_eq!(checked_size(&[]), Some(0));
+    assert_eq!(total_size(&[]), Some(0));
 }
 
 #[test]
