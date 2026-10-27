@@ -378,12 +378,13 @@ mod tests {
         fs::create_dir_all(root.join("app/app/build")).unwrap();
         fs::create_dir_all(root.join("app/build/nested")).unwrap();
 
-        let paths: Vec<String> = resolve(root, "*/build")
+        // Compare paths, not display strings: Windows joins with `\`.
+        let paths: Vec<PathBuf> = resolve(root, "*/build")
             .iter()
-            .map(|path| path.strip_prefix(root).unwrap().display().to_string())
+            .map(|path| path.strip_prefix(root).unwrap().to_path_buf())
             .collect();
 
-        assert_eq!(paths, vec!["app/build"]);
+        assert_eq!(paths, vec![PathBuf::from("app/build")]);
     }
 
     #[test]
