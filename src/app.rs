@@ -3,13 +3,13 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
-use devsweep::rules;
+use devsweep::rules::{self, Target};
 use devsweep::scan::{self, Project};
 use devsweep::size::{self, SizeEvent, SizeRequest};
 use eframe::CreationContext;
 use eframe::egui::{
-    self, Align, Button, Color32, CornerRadius, Frame, Label, Layout, RichText, ScrollArea, Stroke,
-    Ui,
+    self, Align, Button, Checkbox, Color32, CornerRadius, Frame, Label, Layout, RichText, ScrollArea,
+    Sense, Stroke, StrokeKind, Ui, UiBuilder,
 };
 
 use crate::i18n::{Lang, Strings};
@@ -19,8 +19,15 @@ pub struct DevSweepApp {
     lang: Lang,
     roots: Vec<PathBuf>,
     projects: Vec<Project>,
-    sizes: HashMap<PathBuf, u64>,
+    /// Expanded targets and per-row UI state, keyed by the project's canonical path.
+    entries: HashMap<PathBuf, ProjectEntry>,
     measurement: Option<Measurement>,
+}
+
+struct ProjectEntry {
+    targets: Vec<Target>,
+    expanded: bool,
+    selected: bool,
 }
 
 struct Measurement {
@@ -36,7 +43,7 @@ impl DevSweepApp {
             lang: Lang::from_system(),
             roots: Vec::new(),
             projects: Vec::new(),
-            sizes: HashMap::new(),
+            entries: HashMap::new(),
             measurement: None,
         }
     }
@@ -57,19 +64,37 @@ impl DevSweepApp {
 
     fn rescan(&mut self, ctx: &egui::Context) {
         self.projects = scan::scan(&self.roots);
+        let rules = rules::builtin_rules();
+        // Known projects keep their expanded/checked state; vanished ones drop out.
+        self.entries
+            .retain(|path, _| self.projects.iter().any(|project| &project.path == path));
+        for project in &self.projects {
+            self.entries.entry(project.path.clone()).or_insert_with(|| ProjectEntry {
+                targets: rules::expand_targets(project, rules),
+                expanded: false,
+                selected: false,
+            });
+        }
         self.measure_missing(ctx);
     }
 
-    /// Sizes already computed for a path survive rescans; only new projects queue up.
+    /// Sizes already computed for a target survive rescans; only unmeasured targets queue up.
     fn measure_missing(&mut self, ctx: &egui::Context) {
-        let rules = rules::builtin_rules();
         let requests: Vec<SizeRequest> = self
             .projects
             .iter()
-            .filter(|project| !self.sizes.contains_key(&project.path))
-            .map(|project| SizeRequest {
-                project: project.path.clone(),
-                targets: rules::expand_targets(project, rules),
+            .filter_map(|project| {
+                let entry = self.entries.get(&project.path)?;
+                let pending: Vec<Target> = entry
+                    .targets
+                    .iter()
+                    .filter(|target| target.size.is_none())
+                    .cloned()
+                    .collect();
+                (!pending.is_empty()).then(|| SizeRequest {
+                    project: project.path.clone(),
+                    targets: pending,
+                })
             })
             .collect();
 
@@ -98,9 +123,17 @@ impl DevSweepApp {
 
         loop {
             match measurement.rx.try_recv() {
-                Ok(SizeEvent { project, size }) => {
+                Ok(SizeEvent { project, sizes }) => {
                     measurement.done += 1;
-                    self.sizes.insert(project, size);
+                    if let Some(entry) = self.entries.get_mut(&project) {
+                        for (path, size) in sizes {
+                            if let Some(target) =
+                                entry.targets.iter_mut().find(|target| target.path == path)
+                            {
+                                target.size = Some(size);
+                            }
+                        }
+                    }
                     changed = true;
                 }
                 Err(TryRecvError::Empty) => break,
@@ -186,9 +219,17 @@ impl DevSweepApp {
         ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                let entries = &mut self.entries;
                 for project in &self.projects {
-                    let size = self.sizes.get(&project.path).copied();
-                    project_row(ui, project, size, t, s);
+                    let Some(entry) = entries.get_mut(&project.path) else {
+                        continue;
+                    };
+                    project_row(ui, project, entry, t, s);
+                    if entry.expanded {
+                        for target in &mut entry.targets {
+                            target_row(ui, project, target, t, s);
+                        }
+                    }
                     ui.add_space(6.0);
                 }
             });
@@ -291,46 +332,103 @@ fn primary_button(ui: &mut Ui, label: &str, t: &Tokens) -> bool {
     .clicked()
 }
 
-fn project_row(ui: &mut Ui, project: &Project, size: Option<u64>, t: &Tokens, s: &Strings) {
-    Frame::new()
-        .fill(t.surface)
-        .stroke(Stroke::new(1.0, t.border))
-        .corner_radius(CornerRadius::same(10))
-        .inner_margin(egui::Margin::symmetric(16, 10))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.set_max_width((ui.available_width() - 190.0).max(120.0));
-                    ui.label(RichText::new(&project.name).size(15.0).strong().color(t.text));
-                    let path = Label::new(
-                        RichText::new(project.path.display().to_string())
-                            .size(12.0)
-                            .monospace()
-                            .color(t.text_muted),
-                    )
-                    .truncate();
-                    ui.add(path)
-                        .on_hover_text(project.path.display().to_string());
-                });
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let (text, color) = match size {
-                        Some(bytes) => (size::format_size(bytes), t.accent),
-                        None => ("…".to_string(), t.text_muted),
-                    };
-                    // Fixed width keeps rows from shifting when the number arrives.
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(96.0, 18.0),
-                        Layout::right_to_left(Align::Center),
-                        |ui| {
-                            ui.label(RichText::new(text).size(14.0).monospace().color(color));
-                        },
-                    );
-                    ui.add_space(8.0);
-                    chip(ui, s.stack(project.stack), t);
-                });
-            });
-        });
+fn project_row(ui: &mut Ui, project: &Project, entry: &mut ProjectEntry, t: &Tokens, s: &Strings) {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.0), Sense::click());
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(10),
+        t.surface,
+        Stroke::new(1.0, t.border),
+        StrokeKind::Inside,
+    );
+
+    // The row senses clicks first so the checkbox, added below, wins the hit test.
+    let mut row = ui.new_child(
+        UiBuilder::new()
+            .max_rect(rect.shrink2(egui::vec2(16.0, 0.0)))
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+
+    let has_targets = !entry.targets.is_empty();
+    row.add_enabled(has_targets, Checkbox::without_text(&mut entry.selected));
+
+    row.vertical(|ui| {
+        ui.set_max_width((ui.available_width() - 200.0).max(120.0));
+        ui.label(RichText::new(&project.name).size(15.0).strong().color(t.text));
+        let path = Label::new(
+            RichText::new(project.path.display().to_string())
+                .size(12.0)
+                .monospace()
+                .color(t.text_muted),
+        )
+        .truncate();
+        ui.add(path)
+            .on_hover_text(project.path.display().to_string());
+    });
+
+    row.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        let (text, color) = match size::checked_size(&entry.targets) {
+            Some(bytes) => (size::format_size(bytes), t.accent),
+            None => ("…".to_string(), t.text_muted),
+        };
+        // Fixed width keeps rows from shifting when the number arrives.
+        ui.allocate_ui_with_layout(
+            egui::vec2(96.0, 18.0),
+            Layout::right_to_left(Align::Center),
+            |ui| {
+                ui.label(RichText::new(text).size(14.0).monospace().color(color));
+            },
+        );
+        ui.add_space(8.0);
+        chip(ui, s.stack(project.stack), t);
+        if !has_targets {
+            ui.label(RichText::new(s.no_targets).size(12.0).color(t.text_muted));
+        }
+    });
+
+    if response.clicked() && has_targets {
+        entry.expanded = !entry.expanded;
+    }
+}
+
+fn target_row(ui: &mut Ui, project: &Project, target: &mut Target, t: &Tokens, s: &Strings) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), Sense::hover());
+    let mut row = ui.new_child(
+        UiBuilder::new()
+            .max_rect(egui::Rect::from_min_max(
+                rect.min + egui::vec2(44.0, 0.0),
+                rect.max - egui::vec2(16.0, 0.0),
+            ))
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+
+    row.add(Checkbox::without_text(&mut target.checked));
+
+    // Risky entries stay visually weak until the user checks them on purpose.
+    let dimmed = target.dangerous && !target.checked;
+    let color = if dimmed { t.text_muted } else { t.text };
+    let rel = target.path.strip_prefix(&project.path).unwrap_or(&target.path);
+    let label = Label::new(
+        RichText::new(rel.display().to_string())
+            .size(13.0)
+            .monospace()
+            .color(color),
+    )
+    .truncate();
+    row.add(label)
+        .on_hover_text(target.path.display().to_string());
+
+    row.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        let text = match target.size {
+            Some(bytes) => size::format_size(bytes),
+            None => "…".to_string(),
+        };
+        ui.label(RichText::new(text).size(13.0).monospace().color(color));
+        if dimmed {
+            ui.label(RichText::new(s.unchecked).size(11.0).color(t.text_muted));
+        }
+    });
 }
 
 fn chip(ui: &mut Ui, text: &str, t: &Tokens) {

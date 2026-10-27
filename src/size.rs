@@ -38,6 +38,14 @@ pub fn dir_size(path: &Path) -> u64 {
         .sum()
 }
 
+/// Sum of the checked targets, or `None` while any of them is still being measured.
+pub fn checked_size(targets: &[Target]) -> Option<u64> {
+    targets
+        .iter()
+        .filter(|target| target.checked)
+        .try_fold(0, |sum, target| target.size.map(|size| sum + size))
+}
+
 pub struct SizeRequest {
     pub project: PathBuf,
     pub targets: Vec<Target>,
@@ -45,7 +53,8 @@ pub struct SizeRequest {
 
 pub struct SizeEvent {
     pub project: PathBuf,
-    pub size: u64,
+    /// One entry per requested target, in request order.
+    pub sizes: Vec<(PathBuf, u64)>,
 }
 
 /// Measure `requests` on a fixed pool of [`CONCURRENCY`] threads, reporting each
@@ -60,15 +69,14 @@ pub fn measure(requests: Vec<SizeRequest>, tx: Sender<SizeEvent>) {
         let tx = tx.clone();
         thread::spawn(move || {
             while let Some(request) = requests.get(next.fetch_add(1, Ordering::Relaxed)) {
-                let size = request
+                let sizes = request
                     .targets
                     .iter()
-                    .filter(|target| target.checked)
-                    .map(|target| dir_size(&target.path))
-                    .sum();
+                    .map(|target| (target.path.clone(), dir_size(&target.path)))
+                    .collect();
                 let event = SizeEvent {
                     project: request.project.clone(),
-                    size,
+                    sizes,
                 };
                 if tx.send(event).is_err() {
                     break;

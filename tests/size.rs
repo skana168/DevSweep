@@ -1,10 +1,10 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
 use devsweep::rules::Target;
-use devsweep::size::{SizeRequest, dir_size, format_size, measure};
+use devsweep::size::{SizeRequest, checked_size, dir_size, format_size, measure};
 
 const MB: u64 = 1024 * 1024;
 
@@ -20,6 +20,34 @@ fn sizes_format_by_magnitude() {
     assert_eq!(format_size(MB), "1 MB");
     assert_eq!(format_size(380 * MB), "380 MB");
     assert_eq!(format_size((1.2 * 1024.0 * 1024.0 * 1024.0) as u64), "1.2 GB");
+}
+
+#[test]
+fn checked_size_sums_only_checked_targets_and_waits_for_their_sizes() {
+    let target = |id: &'static str, size: Option<u64>, checked: bool| Target {
+        rule_id: id,
+        path: PathBuf::from(id),
+        size,
+        checked,
+        dangerous: false,
+    };
+
+    // A risky target that is off contributes nothing, even though it is measured.
+    let measured = vec![
+        target("a", Some(1_000), true),
+        target("risky", Some(2_000), false),
+    ];
+    assert_eq!(checked_size(&measured), Some(1_000));
+
+    // Any checked target still being measured leaves the total unknown.
+    let pending = vec![
+        target("a", Some(1_000), true),
+        target("b", None, true),
+        target("risky", Some(2_000), false),
+    ];
+    assert_eq!(checked_size(&pending), None);
+
+    assert_eq!(checked_size(&[]), Some(0));
 }
 
 #[test]
@@ -68,7 +96,7 @@ fn permission_errors_do_not_abort_the_walk() {
 }
 
 #[test]
-fn measure_counts_only_checked_targets() {
+fn measure_reports_a_size_for_every_target() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     write(&root.join("kept/a.bin"), 1_000);
@@ -82,12 +110,16 @@ fn measure_counts_only_checked_targets() {
                 Target {
                     rule_id: "kept",
                     path: root.join("kept"),
+                    size: None,
                     checked: true,
+                    dangerous: false,
                 },
                 Target {
                     rule_id: "risky",
                     path: root.join("risky"),
+                    size: None,
                     checked: false,
+                    dangerous: true,
                 },
             ],
         }],
@@ -96,6 +128,9 @@ fn measure_counts_only_checked_targets() {
 
     let event = rx.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!(event.project, root);
-    assert_eq!(event.size, 1_000);
+    assert_eq!(
+        event.sizes,
+        vec![(root.join("kept"), 1_000), (root.join("risky"), 2_000)]
+    );
     assert!(rx.recv().is_err());
 }

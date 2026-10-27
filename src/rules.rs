@@ -17,7 +17,9 @@ pub struct Rule {
 pub struct Target {
     pub rule_id: &'static str,
     pub path: PathBuf,
+    pub size: Option<u64>,
     pub checked: bool,
+    pub dangerous: bool,
 }
 
 pub fn builtin_rules() -> &'static [Rule] {
@@ -218,7 +220,9 @@ pub fn expand_targets(project: &Project, rules: &[Rule]) -> Vec<Target> {
             targets.push(Target {
                 rule_id: rule.id,
                 path,
+                size: None,
                 checked: rule.default_checked,
+                dangerous: rule.dangerous,
             });
         }
     }
@@ -302,11 +306,32 @@ mod tests {
     }
 
     #[test]
+    fn expansion_carries_dangerous_flag_and_its_default_checked_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("node_modules")).unwrap();
+        fs::create_dir_all(root.join("dist")).unwrap();
+
+        let mut node = project(root);
+        node.stack = Stack::Node;
+
+        let targets = expand_targets(&node, builtin_rules());
+        let find = |id: &str| targets.iter().find(|target| target.rule_id == id).unwrap();
+
+        assert!(find("node.node_modules").checked);
+        assert!(!find("node.node_modules").dangerous);
+        assert!(!find("node.dist").checked);
+        assert!(find("node.dist").dangerous);
+        assert!(targets.iter().all(|target| target.size.is_none()));
+    }
+
+    #[test]
     fn xcodeproj_wildcard_resolves_xcuserdata() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         fs::create_dir_all(root.join("App.xcodeproj/xcuserdata")).unwrap();
         fs::create_dir_all(root.join("Other.xcodeproj/xcuserdata")).unwrap();
+        fs::create_dir_all(root.join("nested/Deep.xcodeproj/xcuserdata")).unwrap();
 
         let mut ios = project(root);
         ios.stack = Stack::Ios;
@@ -317,6 +342,7 @@ mod tests {
             .map(|target| target.path)
             .collect();
 
+        // `nested/Deep.xcodeproj/xcuserdata` is one level too deep and must not match.
         assert_eq!(
             paths,
             vec![
