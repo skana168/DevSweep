@@ -48,12 +48,12 @@ pub fn checked_size(targets: &[Target]) -> Option<u64> {
 
 pub struct SizeRequest {
     pub project: PathBuf,
-    pub targets: Vec<Target>,
+    pub paths: Vec<PathBuf>,
 }
 
 pub struct SizeEvent {
     pub project: PathBuf,
-    /// One entry per requested target, in request order.
+    /// One entry per requested path, in request order.
     pub sizes: Vec<(PathBuf, u64)>,
 }
 
@@ -70,9 +70,9 @@ pub fn measure(requests: Vec<SizeRequest>, tx: Sender<SizeEvent>) {
         thread::spawn(move || {
             while let Some(request) = requests.get(next.fetch_add(1, Ordering::Relaxed)) {
                 let sizes = request
-                    .targets
+                    .paths
                     .iter()
-                    .map(|target| (target.path.clone(), dir_size(&target.path)))
+                    .map(|path| (path.clone(), dir_size(path)))
                     .collect();
                 let event = SizeEvent {
                     project: request.project.clone(),

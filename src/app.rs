@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
+use devsweep::cache::{self, CacheGroup, CacheRule};
 use devsweep::delete::{self, DeleteEvent, DeleteMode, Failure};
 use devsweep::plan::{self, DeletePlan, LARGE_TARGET_BYTES, PlanProject};
 use devsweep::rules::{self, Target};
@@ -21,15 +22,18 @@ use crate::theme::{self, Tokens};
 
 pub struct DevSweepApp {
     lang: Lang,
+    view: View,
     roots: Vec<PathBuf>,
     projects: Vec<Project>,
     /// Expanded targets and per-row UI state, keyed by the project's canonical path.
     entries: HashMap<PathBuf, ProjectEntry>,
+    caches: Vec<CacheRow>,
     measurement: Option<Measurement>,
     /// Last project whose checkbox was clicked; Shift extends from here.
     selection_anchor: Option<PathBuf>,
     preview_open: bool,
-    confirm_open: bool,
+    /// What the open confirm dialog will clean; `None` while it is closed.
+    pending: Option<Cleanup>,
     /// The user has ticked "I understand" in the confirm dialog.
     confirm_large_ack: bool,
     execution: Option<Execution>,
@@ -37,6 +41,27 @@ pub struct DevSweepApp {
     flash: Option<Flash>,
     failures_open: bool,
     failures: Vec<Failure>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum View {
+    Projects,
+    Caches,
+}
+
+#[derive(Clone, Copy)]
+enum Cleanup {
+    Projects,
+    Cache(&'static CacheRule),
+}
+
+struct CacheRow {
+    rule: &'static CacheRule,
+    path: Option<PathBuf>,
+    size: Option<u64>,
+    /// The user's opt-in; risky entries start unchecked.
+    checked: bool,
+    cleaned: bool,
 }
 
 struct ProjectEntry {
@@ -57,31 +82,47 @@ struct Execution {
     current: Option<String>,
     rx: Receiver<DeleteEvent>,
     abort: Arc<AtomicBool>,
+    /// Show the "downloads again next time" hint in the result banner.
+    global_cache: bool,
 }
 
 struct Flash {
     bytes: u64,
     aborted: bool,
+    global_cache: bool,
 }
 
 impl DevSweepApp {
     pub fn new(cc: &CreationContext<'_>) -> Self {
         theme::install(&cc.egui_ctx);
-        Self {
+        let mut app = Self {
             lang: Lang::from_system(),
+            view: View::Projects,
             roots: Vec::new(),
             projects: Vec::new(),
             entries: HashMap::new(),
+            caches: cache::entries()
+                .into_iter()
+                .map(|entry| CacheRow {
+                    checked: !entry.rule.dangerous,
+                    rule: entry.rule,
+                    path: entry.path,
+                    size: None,
+                    cleaned: false,
+                })
+                .collect(),
             measurement: None,
             selection_anchor: None,
             preview_open: false,
-            confirm_open: false,
+            pending: None,
             confirm_large_ack: false,
             execution: None,
             flash: None,
             failures_open: false,
             failures: Vec::new(),
-        }
+        };
+        app.measure_missing(&cc.egui_ctx);
+        app
     }
 
     fn strings(&self) -> &'static Strings {
@@ -111,28 +152,44 @@ impl DevSweepApp {
                 selected: false,
             });
         }
+        // A cache recreated since the last scan becomes measurable again.
+        for row in &mut self.caches {
+            if row.cleaned && row.path.as_ref().is_some_and(|path| path.is_dir()) {
+                row.cleaned = false;
+                row.size = None;
+            }
+        }
         self.measure_missing(ctx);
     }
 
     /// Sizes already computed for a target survive rescans; only unmeasured targets queue up.
     fn measure_missing(&mut self, ctx: &egui::Context) {
-        let requests: Vec<SizeRequest> = self
+        let mut requests: Vec<SizeRequest> = self
             .projects
             .iter()
             .filter_map(|project| {
                 let entry = self.entries.get(&project.path)?;
-                let pending: Vec<Target> = entry
+                let pending: Vec<PathBuf> = entry
                     .targets
                     .iter()
                     .filter(|target| target.size.is_none())
-                    .cloned()
+                    .map(|target| target.path.clone())
                     .collect();
                 (!pending.is_empty()).then(|| SizeRequest {
                     project: project.path.clone(),
-                    targets: pending,
+                    paths: pending,
                 })
             })
             .collect();
+
+        // Caches are measured as their own requests so each row fills in as it lands.
+        requests.extend(self.caches.iter().filter_map(|row| {
+            let path = row.path.as_ref()?;
+            (row.size.is_none() && !row.cleaned && path.is_dir()).then(|| SizeRequest {
+                project: path.clone(),
+                paths: vec![path.clone()],
+            })
+        }));
 
         if requests.is_empty() {
             self.measurement = None;
@@ -162,11 +219,22 @@ impl DevSweepApp {
                 Ok(SizeEvent { project, sizes }) => {
                     measurement.done += 1;
                     if let Some(entry) = self.entries.get_mut(&project) {
-                        for (path, size) in sizes {
+                        for (path, size) in &sizes {
                             if let Some(target) =
-                                entry.targets.iter_mut().find(|target| target.path == path)
+                                entry.targets.iter_mut().find(|target| &target.path == path)
                             {
-                                target.size = Some(size);
+                                target.size = Some(*size);
+                            }
+                        }
+                    }
+                    if let Some(row) = self
+                        .caches
+                        .iter_mut()
+                        .find(|row| row.path.as_ref() == Some(&project))
+                    {
+                        if let Some((_, size)) = sizes.first() {
+                            if !row.cleaned {
+                                row.size = Some(*size);
                             }
                         }
                     }
@@ -271,10 +339,35 @@ impl DevSweepApp {
         plan::plan(&projects, &self.roots, rules::builtin_rules())
     }
 
+    /// Plan for the cleanup the confirm dialog will run.
+    fn plan_for(&self, cleanup: Cleanup) -> DeletePlan {
+        match cleanup {
+            Cleanup::Projects => self.build_plan(),
+            Cleanup::Cache(rule) => self.cache_plan(rule).unwrap_or(DeletePlan {
+                items: Vec::new(),
+                skipped: Vec::new(),
+                total_bytes: 0,
+            }),
+        }
+    }
+
+    fn cache_plan(&self, rule: &CacheRule) -> Option<DeletePlan> {
+        let row = self.caches.iter().find(|row| row.rule.id == rule.id)?;
+        cache::plan(rule.id, row.size?)
+    }
+
+    /// Sum of the cache sizes that exist on disk. `None` while one is measuring.
+    fn cache_total(&self) -> Option<u64> {
+        self.caches
+            .iter()
+            .filter(|row| row.cleaned || row.path.as_ref().is_some_and(|path| path.is_dir()))
+            .try_fold(0, |sum, row| row.size.map(|size| sum + size))
+    }
+
     /// Execute the current plan on a worker thread. The UI keeps painting while
     /// per-project events stream back.
-    fn start_execution(&mut self, ctx: &egui::Context) {
-        let plan = self.build_plan();
+    fn start_execution(&mut self, ctx: &egui::Context, cleanup: Cleanup) {
+        let plan = self.plan_for(cleanup);
         if plan.items.is_empty() {
             return;
         }
@@ -293,6 +386,7 @@ impl DevSweepApp {
             current: None,
             rx,
             abort,
+            global_cache: matches!(cleanup, Cleanup::Cache(_)),
         });
         self.flash = None;
         self.failures.clear();
@@ -310,6 +404,7 @@ impl DevSweepApp {
         let Some(execution) = &mut self.execution else {
             return;
         };
+        let global_cache = execution.global_cache;
         let mut changed = false;
         let mut finished = None;
         let mut lost = false;
@@ -327,6 +422,17 @@ impl DevSweepApp {
                         entry.targets.retain(|target| !deleted.contains(&target.path));
                         entry.selected = false;
                         entry.expanded = false;
+                    }
+                    for row in &mut self.caches {
+                        if row
+                            .path
+                            .as_ref()
+                            .is_some_and(|path| deleted.contains(path))
+                        {
+                            row.size = Some(0);
+                            row.cleaned = true;
+                            row.checked = false;
+                        }
                     }
                     execution.done += 1;
                     changed = true;
@@ -349,6 +455,7 @@ impl DevSweepApp {
             self.flash = Some(Flash {
                 bytes: report.freed_bytes,
                 aborted: report.aborted,
+                global_cache,
             });
             self.failures = report.failures;
             self.failures_open = !self.failures.is_empty();
@@ -490,6 +597,9 @@ impl DevSweepApp {
         if flash.aborted {
             label = format!("{label} · {}", s.aborted);
         }
+        if flash.global_cache {
+            label = format!("{label} · {}", s.cache_redownload);
+        }
         let failure_count = self.failures.len();
         let mut dismiss = false;
         let mut show_failures = false;
@@ -532,8 +642,16 @@ impl DevSweepApp {
         }
     }
 
-    fn confirm_dialog(&mut self, ctx: &egui::Context, t: &Tokens, s: &Strings, plan: &DeletePlan) {
-        if !self.confirm_open {
+    fn confirm_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        t: &Tokens,
+        s: &Strings,
+        plan: &DeletePlan,
+        known: bool,
+        cleanup: Cleanup,
+    ) {
+        if self.pending.is_none() {
             return;
         }
 
@@ -544,11 +662,14 @@ impl DevSweepApp {
             .collect::<std::collections::HashSet<_>>()
             .len();
         let large: Vec<&plan::PlanItem> = plan.items.iter().filter(|item| item.large).collect();
-        let known = self.selected_sizes_known();
         let total = if known {
             size::format_size(plan.total_bytes)
         } else {
             "…".to_string()
+        };
+        let title = match cleanup {
+            Cleanup::Cache(rule) => format!("{} · {}", s.confirm_title, rule.name),
+            Cleanup::Projects => s.confirm_title.to_string(),
         };
         let mut ack = self.confirm_large_ack;
         let mut close = false;
@@ -564,14 +685,11 @@ impl DevSweepApp {
             )
             .show(ctx, |ui| {
                 ui.set_width(440.0);
-                ui.label(
-                    RichText::new(s.confirm_title)
-                        .size(18.0)
-                        .strong()
-                        .color(t.text),
-                );
+                ui.label(RichText::new(title).size(18.0).strong().color(t.text));
                 ui.add_space(12.0);
-                stat_row(ui, s.projects, &projects.to_string(), t);
+                if let Cleanup::Projects = cleanup {
+                    stat_row(ui, s.projects, &projects.to_string(), t);
+                }
                 stat_row(ui, s.items, &plan.items.len().to_string(), t);
                 stat_row(ui, s.preview_total, &total, t);
 
@@ -612,10 +730,10 @@ impl DevSweepApp {
 
         self.confirm_large_ack = ack;
         if confirm {
-            self.confirm_open = false;
-            self.start_execution(ctx);
+            self.pending = None;
+            self.start_execution(ctx, cleanup);
         } else if close || modal.backdrop_response.clicked() {
-            self.confirm_open = false;
+            self.pending = None;
         }
     }
 
@@ -728,6 +846,36 @@ impl DevSweepApp {
         if ui.add_sized([width, 34.0], button).clicked() {
             self.add_directory(ui.ctx());
         }
+
+        ui.add_space(20.0);
+        if ui
+            .add_sized(
+                [width, 32.0],
+                Button::selectable(
+                    self.view == View::Projects,
+                    RichText::new(format!("{} {}", s.projects, self.projects.len())).size(14.0),
+                ),
+            )
+            .clicked()
+        {
+            self.view = View::Projects;
+        }
+        let total = self
+            .cache_total()
+            .map(size::format_size)
+            .unwrap_or_else(|| "…".to_string());
+        if ui
+            .add_sized(
+                [width, 32.0],
+                Button::selectable(
+                    self.view == View::Caches,
+                    RichText::new(format!("{}  {total}", s.global_caches)).size(14.0),
+                ),
+            )
+            .clicked()
+        {
+            self.view = View::Caches;
+        }
     }
 
     fn content(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings, plan: &DeletePlan) {
@@ -759,10 +907,9 @@ impl DevSweepApp {
                     };
                     format!("{} {} {} · {}", s.clean, count, s.items, total)
                 };
-                // Execution arrives with ticket 05; the button already reflects the plan.
                 let running = self.execution.is_some();
                 if primary_button(ui, &label, t, count > 0 && !running) {
-                    self.confirm_open = true;
+                    self.pending = Some(Cleanup::Projects);
                     self.confirm_large_ack = false;
                 }
 
@@ -807,6 +954,65 @@ impl DevSweepApp {
         if let Some(index) = toggled {
             let extend = ui.input(|input| input.modifiers.shift);
             self.toggle_selection(index, extend);
+        }
+    }
+
+    fn caches_content(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings) {
+        self.flash_banner(ui, t, s);
+
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(s.global_caches)
+                    .size(18.0)
+                    .strong()
+                    .color(t.text),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let total = self
+                    .cache_total()
+                    .map(size::format_size)
+                    .unwrap_or_else(|| "…".to_string());
+                ui.label(RichText::new(total).size(16.0).monospace().color(t.accent));
+            });
+        });
+        ui.add_space(4.0);
+        ui.label(RichText::new(s.cache_redownload).size(12.0).color(t.text_muted));
+        ui.add_space(12.0);
+
+        let mut clean = None;
+        let busy = self.execution.is_some();
+        ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for (group, title) in [
+                    (CacheGroup::Project, s.cache_group_project),
+                    (CacheGroup::Toolchain, s.cache_group_toolchain),
+                ] {
+                    let mut heading = false;
+                    for row in self.caches.iter_mut().filter(|row| row.rule.group == group) {
+                        if !heading {
+                            ui.label(
+                                RichText::new(title.to_uppercase())
+                                    .size(11.0)
+                                    .color(t.text_muted),
+                            );
+                            ui.add_space(6.0);
+                            heading = true;
+                        }
+                        if let Some(rule) = cache_row(ui, row, t, s, busy) {
+                            clean = Some(rule);
+                        }
+                        ui.add_space(6.0);
+                    }
+                    if heading {
+                        ui.add_space(12.0);
+                    }
+                }
+            });
+
+        if let Some(rule) = clean {
+            self.pending = Some(Cleanup::Cache(rule));
+            self.confirm_large_ack = false;
         }
     }
 
@@ -907,21 +1113,35 @@ impl eframe::App for DevSweepApp {
             .frame(Frame::new().fill(t.surface).inner_margin(16))
             .show(ui, |ui| self.sidebar(ui, t, s));
 
-        let select_all = ui.ctx().input_mut(|input| {
-            input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::A))
-        });
-        if select_all {
-            self.toggle_select_all();
+        if self.view == View::Projects {
+            let select_all = ui.ctx().input_mut(|input| {
+                input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::A))
+            });
+            if select_all {
+                self.toggle_select_all();
+            }
         }
 
         let plan = self.build_plan();
-        self.preview_panel(ui, t, s, &plan);
+        if self.view == View::Projects {
+            self.preview_panel(ui, t, s, &plan);
+        }
 
         egui::CentralPanel::default()
             .frame(Frame::new().fill(t.bg).inner_margin(24))
-            .show(ui, |ui| self.content(ui, t, s, &plan));
+            .show(ui, |ui| match self.view {
+                View::Projects => self.content(ui, t, s, &plan),
+                View::Caches => self.caches_content(ui, t, s),
+            });
 
-        self.confirm_dialog(ui.ctx(), t, s, &plan);
+        if let Some(cleanup) = self.pending {
+            let pending_plan = self.plan_for(cleanup);
+            let known = match cleanup {
+                Cleanup::Projects => self.selected_sizes_known(),
+                Cleanup::Cache(_) => true,
+            };
+            self.confirm_dialog(ui.ctx(), t, s, &pending_plan, known, cleanup);
+        }
         self.failures_dialog(ui.ctx(), t, s);
     }
 }
@@ -1067,6 +1287,92 @@ fn target_row(ui: &mut Ui, project: &Project, target: &mut Target, t: &Tokens, s
             ui.label(RichText::new(s.unchecked).size(11.0).color(t.text_muted));
         }
     });
+}
+
+fn cache_row(
+    ui: &mut Ui,
+    row: &mut CacheRow,
+    t: &Tokens,
+    s: &Strings,
+    busy: bool,
+) -> Option<&'static CacheRule> {
+    let exists = row.path.as_ref().is_some_and(|path| path.is_dir());
+    let missing = !exists && !row.cleaned;
+    let mut clean = false;
+
+    Frame::new()
+        .fill(t.surface)
+        .stroke(Stroke::new(1.0, t.border))
+        .corner_radius(10)
+        .inner_margin(egui::Margin::symmetric(16, 10))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add_enabled(
+                    exists && !row.cleaned,
+                    Checkbox::without_text(&mut row.checked),
+                );
+
+                ui.vertical(|ui| {
+                    ui.set_max_width((ui.available_width() - 200.0).max(120.0));
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(row.rule.name)
+                                .size(14.0)
+                                .strong()
+                                .color(t.text),
+                        );
+                        // Only the cargo registry carries a risk note today.
+                        if row.rule.id == "cargo.registry" {
+                            ui.label(
+                                RichText::new(s.cache_cargo_note)
+                                    .size(11.0)
+                                    .color(t.danger),
+                            );
+                        }
+                    });
+                    if let Some(path) = &row.path {
+                        let label = Label::new(
+                            RichText::new(path.display().to_string())
+                                .size(11.0)
+                                .monospace()
+                                .color(t.text_muted),
+                        )
+                        .truncate();
+                        ui.add(label).on_hover_text(path.display().to_string());
+                    }
+                });
+
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let button = Button::new(RichText::new(s.clean).size(12.0))
+                        .fill(t.bg)
+                        .stroke(Stroke::new(1.0, t.border))
+                        .corner_radius(6);
+                    let armed =
+                        exists && !row.cleaned && !busy && row.size.is_some() && row.checked;
+                    if ui.add_enabled(armed, button).clicked() {
+                        clean = true;
+                    }
+                    ui.add_space(8.0);
+                    let (text, color) = if missing {
+                        (s.cache_not_found.to_string(), t.danger)
+                    } else {
+                        match row.size {
+                            Some(bytes) => (size::format_size(bytes), t.accent),
+                            None => ("…".to_string(), t.text_muted),
+                        }
+                    };
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(88.0, 18.0),
+                        Layout::right_to_left(Align::Center),
+                        |ui| {
+                            ui.label(RichText::new(text).size(13.0).monospace().color(color));
+                        },
+                    );
+                });
+            });
+        });
+
+    clean.then_some(row.rule)
 }
 
 fn project_name(path: &Path) -> String {

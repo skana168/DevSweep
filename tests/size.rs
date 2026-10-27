@@ -106,22 +106,7 @@ fn measure_reports_a_size_for_every_target() {
     measure(
         vec![SizeRequest {
             project: root.to_path_buf(),
-            targets: vec![
-                Target {
-                    rule_id: "kept",
-                    path: root.join("kept"),
-                    size: None,
-                    checked: true,
-                    dangerous: false,
-                },
-                Target {
-                    rule_id: "risky",
-                    path: root.join("risky"),
-                    size: None,
-                    checked: false,
-                    dangerous: true,
-                },
-            ],
+            paths: vec![root.join("kept"), root.join("risky")],
         }],
         tx,
     );
