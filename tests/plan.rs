@@ -24,6 +24,48 @@ fn extra_rule(id: &'static str, rel: &'static str) -> Rule {
 }
 
 #[test]
+fn a_file_rule_is_plannable_and_counts_its_own_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+
+    write(&root.join("app/pubspec.yaml"), 0);
+    write(&root.join("app/.flutter-plugins-dependencies"), 1_200);
+    write(&root.join("app/lib/main.dart"), 0);
+
+    let projects = scan(&[root.clone()]);
+    let project = projects
+        .iter()
+        .find(|project| project.name == "app")
+        .expect("app is discovered");
+    let mut targets = expand_targets(project, &builtin_rules());
+    let target = targets
+        .iter_mut()
+        .find(|target| target.rule_id == "flutter.plugins_dependencies")
+        .expect("the file rule expands");
+    target.size = Some(1_200);
+
+    let plan = plan(
+        &[PlanProject {
+            path: &project.path,
+            stack: project.stack,
+            targets: &targets,
+        }],
+        &[root.clone()],
+        &builtin_rules(),
+    );
+
+    assert_eq!(
+        plan.items
+            .iter()
+            .map(|item| item.target_path.clone())
+            .collect::<Vec<_>>(),
+        vec![project.path.join(".flutter-plugins-dependencies")]
+    );
+    assert_eq!(plan.total_bytes, 1_200);
+    assert!(plan.skipped.is_empty(), "{:?}", plan.skipped);
+}
+
+#[test]
 fn plan_lists_checked_targets_and_rejects_escaping_paths() {
     let dir = tempfile::tempdir().unwrap();
     let root = fs::canonicalize(dir.path()).unwrap();

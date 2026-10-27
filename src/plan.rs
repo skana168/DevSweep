@@ -45,7 +45,8 @@ pub enum SkipReason {
     Git,
     OutsideRules,
     Missing,
-    NotADirectory,
+    /// Exists but cannot be resolved to an absolute path.
+    Unresolvable,
     Overlap,
 }
 
@@ -148,11 +149,8 @@ fn check_target(
     // A symlink is one entry; canonicalizing it only validates where it points.
     let meta = fs::symlink_metadata(&target.path).map_err(|_| SkipReason::Missing)?;
     let is_link = meta.file_type().is_symlink();
-    if !meta.is_dir() && !is_link {
-        return Err(SkipReason::NotADirectory);
-    }
 
-    let canonical = fs::canonicalize(&target.path).map_err(|_| SkipReason::NotADirectory)?;
+    let canonical = fs::canonicalize(&target.path).map_err(|_| SkipReason::Unresolvable)?;
     let Ok(rel) = target.path.strip_prefix(project.path) else {
         return Err(SkipReason::OutsideProject);
     };
@@ -178,10 +176,6 @@ fn check_target(
     {
         return Err(SkipReason::Git);
     }
-    if is_link && !fs::metadata(&target.path).is_ok_and(|meta| meta.is_dir()) {
-        return Err(SkipReason::NotADirectory);
-    }
-
     let rule = rules
         .iter()
         .find(|rule| rule.id == target.rule_id)
@@ -263,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn protected_paths_are_skipped_with_their_reason() {
+    fn protected_paths_are_skipped_and_files_are_plannable() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         fs::create_dir_all(root.join(".git")).unwrap();
@@ -291,13 +285,17 @@ mod tests {
             vec![
                 (root.display().to_string(), SkipReason::ScanRoot),
                 (root.join(".git").display().to_string(), SkipReason::Git),
-                (
-                    root.join("package.json").display().to_string(),
-                    SkipReason::NotADirectory
-                ),
             ]
         );
-        assert!(plan.items.is_empty());
+        // A Target may be a file; the whole length counts.
+        assert_eq!(
+            plan.items
+                .iter()
+                .map(|item| item.target_path.clone())
+                .collect::<Vec<_>>(),
+            vec![root.join("package.json")]
+        );
+        assert_eq!(plan.total_bytes, 1_000);
     }
 
     #[test]

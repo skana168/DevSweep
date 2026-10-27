@@ -157,17 +157,14 @@ pub fn execute(
 
 fn delete_item(item: &PlanItem, mode: DeleteMode) -> Result<(), FailureReason> {
     let meta = fs::symlink_metadata(&item.target_path).map_err(|_| FailureReason::Missing)?;
-    // The plan only holds directories and symlinks; a plain file means the tree changed.
-    if !meta.is_dir() && !meta.file_type().is_symlink() {
-        return Err(FailureReason::Other);
-    }
 
     match mode {
         DeleteMode::Trash => move_to_trash(&item.target_path),
         DeleteMode::Direct if meta.file_type().is_symlink() => {
             remove_symlink(&item.target_path).map_err(io_reason)
         }
-        DeleteMode::Direct => remove_tree(&item.target_path).map_err(io_reason),
+        DeleteMode::Direct if meta.is_dir() => remove_tree(&item.target_path).map_err(io_reason),
+        DeleteMode::Direct => fs::remove_file(&item.target_path).map_err(io_reason),
     }
 }
 

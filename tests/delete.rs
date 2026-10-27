@@ -92,6 +92,44 @@ fn direct_delete_removes_targets_and_keeps_sources() {
     assert!(root.join("outside/keep.txt").is_file());
 }
 
+#[test]
+fn direct_delete_removes_file_targets_and_keeps_the_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+
+    write(&root.join("app/pubspec.yaml"), 0);
+    write(&root.join("app/.flutter-plugins-dependencies"), 1_200);
+    write(&root.join("app/lib/main.dart"), 0);
+
+    let projects = scan(&[root.clone()]);
+    let app = project(&projects, "app");
+    let mut targets = expand_targets(app, &builtin_rules());
+    let target = targets
+        .iter_mut()
+        .find(|target| target.rule_id == "flutter.plugins_dependencies")
+        .expect("the file rule expands");
+    target.size = Some(1_200);
+
+    let delete_plan = plan(
+        &[PlanProject {
+            path: &app.path,
+            stack: app.stack,
+            targets: &targets,
+        }],
+        &[root.clone()],
+        &builtin_rules(),
+    );
+    assert_eq!(delete_plan.items.len(), 1);
+
+    let report = run(delete_plan, DeleteMode::Direct, false);
+
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert_eq!(report.freed_bytes, 1_200);
+    assert!(!app.path.join(".flutter-plugins-dependencies").exists());
+    assert!(app.path.join("pubspec.yaml").is_file());
+    assert!(app.path.join("lib/main.dart").is_file());
+}
+
 #[cfg(unix)]
 #[test]
 fn one_failure_does_not_stop_the_batch() {
