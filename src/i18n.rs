@@ -1,3 +1,4 @@
+use devsweep::plan::SkipReason;
 use devsweep::scan::Stack;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +37,20 @@ pub struct Strings {
     pub measuring: &'static str,
     pub no_targets: &'static str,
     pub unchecked: &'static str,
+    pub clean: &'static str,
+    pub items: &'static str,
+    pub preview: &'static str,
+    pub preview_total: &'static str,
+    pub skipped: &'static str,
+    pub skip_outside_project: &'static str,
+    pub skip_project_root: &'static str,
+    pub skip_home: &'static str,
+    pub skip_scan_root: &'static str,
+    pub skip_git: &'static str,
+    pub skip_outside_rules: &'static str,
+    pub skip_missing: &'static str,
+    pub skip_not_a_directory: &'static str,
+    pub skip_overlap: &'static str,
     pub stack_flutter: &'static str,
     pub stack_android: &'static str,
     pub stack_ios: &'static str,
@@ -49,6 +64,20 @@ impl Strings {
             Stack::Android => self.stack_android,
             Stack::Ios => self.stack_ios,
             Stack::Node => self.stack_node,
+        }
+    }
+
+    pub fn skip_reason(&self, reason: SkipReason) -> &'static str {
+        match reason {
+            SkipReason::OutsideProject => self.skip_outside_project,
+            SkipReason::ProjectRoot => self.skip_project_root,
+            SkipReason::Home => self.skip_home,
+            SkipReason::ScanRoot => self.skip_scan_root,
+            SkipReason::Git => self.skip_git,
+            SkipReason::OutsideRules => self.skip_outside_rules,
+            SkipReason::Missing => self.skip_missing,
+            SkipReason::NotADirectory => self.skip_not_a_directory,
+            SkipReason::Overlap => self.skip_overlap,
         }
     }
 }
@@ -65,6 +94,20 @@ static ZH: Strings = Strings {
     measuring: "体积计算中",
     no_targets: "无可清理项",
     unchecked: "未勾选",
+    clean: "清理",
+    items: "项",
+    preview: "预览",
+    preview_total: "合计",
+    skipped: "被拒绝",
+    skip_outside_project: "超出项目范围",
+    skip_project_root: "项目根目录",
+    skip_home: "用户主目录",
+    skip_scan_root: "扫描根",
+    skip_git: ".git 目录",
+    skip_outside_rules: "规则外路径",
+    skip_missing: "不存在",
+    skip_not_a_directory: "不是目录",
+    skip_overlap: "重叠目标",
     stack_flutter: "Flutter",
     stack_android: "Android",
     stack_ios: "iOS",
@@ -83,6 +126,20 @@ static EN: Strings = Strings {
     measuring: "Measuring sizes",
     no_targets: "Nothing to clean",
     unchecked: "Unchecked",
+    clean: "Clean",
+    items: "items",
+    preview: "Preview",
+    preview_total: "Total",
+    skipped: "Rejected",
+    skip_outside_project: "Outside the project",
+    skip_project_root: "Project root",
+    skip_home: "Home directory",
+    skip_scan_root: "Scan root",
+    skip_git: ".git directory",
+    skip_outside_rules: "Not covered by a rule",
+    skip_missing: "Missing",
+    skip_not_a_directory: "Not a directory",
+    skip_overlap: "Overlaps another target",
     stack_flutter: "Flutter",
     stack_android: "Android",
     stack_ios: "iOS",

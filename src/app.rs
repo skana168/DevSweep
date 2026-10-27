@@ -1,15 +1,16 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
+use devsweep::plan::{self, DeletePlan, LARGE_TARGET_BYTES, PlanProject};
 use devsweep::rules::{self, Target};
 use devsweep::scan::{self, Project};
 use devsweep::size::{self, SizeEvent, SizeRequest};
 use eframe::CreationContext;
 use eframe::egui::{
-    self, Align, Button, Checkbox, Color32, CornerRadius, Frame, Label, Layout, RichText, ScrollArea,
-    Sense, Stroke, StrokeKind, Ui, UiBuilder,
+    self, Align, Button, Checkbox, Color32, CornerRadius, Frame, Key, KeyboardShortcut, Label, Layout,
+    Modifiers, RichText, ScrollArea, Sense, Stroke, StrokeKind, Ui, UiBuilder,
 };
 
 use crate::i18n::{Lang, Strings};
@@ -22,6 +23,9 @@ pub struct DevSweepApp {
     /// Expanded targets and per-row UI state, keyed by the project's canonical path.
     entries: HashMap<PathBuf, ProjectEntry>,
     measurement: Option<Measurement>,
+    /// Last project whose checkbox was clicked; Shift extends from here.
+    selection_anchor: Option<PathBuf>,
+    preview_open: bool,
 }
 
 struct ProjectEntry {
@@ -45,6 +49,8 @@ impl DevSweepApp {
             projects: Vec::new(),
             entries: HashMap::new(),
             measurement: None,
+            selection_anchor: None,
+            preview_open: false,
         }
     }
 
@@ -155,6 +161,197 @@ impl DevSweepApp {
         }
     }
 
+    fn selected_sizes_known(&self) -> bool {
+        self.projects
+            .iter()
+            .filter_map(|project| self.entries.get(&project.path))
+            .filter(|entry| entry.selected)
+            .all(|entry| size::checked_size(&entry.targets).is_some())
+    }
+
+    /// Shift extends the selection from the anchor, in list order.
+    fn toggle_selection(&mut self, index: usize, extend: bool) {
+        let path = self.projects[index].path.clone();
+        // The checkbox already flipped this row; use the new value for the range.
+        let Some(selected) = self.entries.get(&path).map(|entry| entry.selected) else {
+            return;
+        };
+
+        if extend {
+            if let Some(anchor) = self
+                .selection_anchor
+                .as_ref()
+                .and_then(|anchor| self.projects.iter().position(|p| &p.path == anchor))
+            {
+                let (from, to) = (anchor.min(index), anchor.max(index));
+                for project in &self.projects[from..=to] {
+                    if let Some(entry) = self.entries.get_mut(&project.path) {
+                        if !entry.targets.is_empty() {
+                            entry.selected = selected;
+                        }
+                    }
+                }
+                return;
+            }
+        }
+
+        if let Some(entry) = self.entries.get_mut(&path) {
+            entry.selected = selected;
+        }
+        self.selection_anchor = Some(path);
+    }
+
+    /// ⌘/Ctrl+A: select every project when not all are selected, otherwise clear.
+    fn toggle_select_all(&mut self) {
+        let selectable: Vec<PathBuf> = self
+            .projects
+            .iter()
+            .filter(|project| {
+                self.entries
+                    .get(&project.path)
+                    .is_some_and(|entry| !entry.targets.is_empty())
+            })
+            .map(|project| project.path.clone())
+            .collect();
+        let all_selected = !selectable.is_empty()
+            && selectable
+                .iter()
+                .all(|path| self.entries.get(path).is_some_and(|entry| entry.selected));
+        for path in selectable {
+            if let Some(entry) = self.entries.get_mut(&path) {
+                entry.selected = !all_selected;
+            }
+        }
+        self.selection_anchor = None;
+    }
+
+    fn build_plan(&self) -> DeletePlan {
+        let projects: Vec<PlanProject> = self
+            .projects
+            .iter()
+            .filter_map(|project| {
+                let entry = self.entries.get(&project.path)?;
+                entry.selected.then_some(PlanProject {
+                    path: &project.path,
+                    stack: project.stack,
+                    targets: &entry.targets,
+                })
+            })
+            .collect();
+        plan::plan(&projects, &self.roots, rules::builtin_rules())
+    }
+
+    fn preview_panel(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings, plan: &DeletePlan) {
+        if !self.preview_open {
+            return;
+        }
+        let mut close = false;
+
+        egui::Panel::right("preview")
+            .exact_size(360.0)
+            .resizable(false)
+            .frame(Frame::new().fill(t.surface).inner_margin(16))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(s.preview).size(16.0).strong().color(t.text));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let button =
+                            Button::new(RichText::new("×").color(t.text_muted)).frame(false);
+                        if ui.add(button).clicked() {
+                            close = true;
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{} {}",
+                        s.preview_total,
+                        size::format_size(plan.total_bytes)
+                    ))
+                    .size(13.0)
+                    .color(t.text_muted),
+                );
+                ui.add_space(8.0);
+
+                ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        let mut current: Option<&Path> = None;
+                        for item in &plan.items {
+                            if current != Some(item.project_path.as_path()) {
+                                if current.is_some() {
+                                    ui.add_space(8.0);
+                                }
+                                current = Some(item.project_path.as_path());
+                                ui.label(
+                                    RichText::new(project_name(&item.project_path))
+                                        .size(13.0)
+                                        .strong()
+                                        .color(t.text),
+                                );
+                            }
+                            ui.horizontal(|ui| {
+                                let label = Label::new(
+                                    RichText::new(item.target_path.display().to_string())
+                                        .size(12.0)
+                                        .monospace()
+                                        .color(t.text_muted),
+                                )
+                                .truncate();
+                                ui.add(label)
+                                    .on_hover_text(item.target_path.display().to_string());
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    ui.label(
+                                        RichText::new(size::format_size(item.bytes))
+                                            .size(12.0)
+                                            .monospace()
+                                            .color(t.text),
+                                    );
+                                    if item.large {
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "> {}",
+                                                size::format_size(LARGE_TARGET_BYTES)
+                                            ))
+                                            .size(11.0)
+                                            .color(t.danger),
+                                        );
+                                    }
+                                });
+                            });
+                        }
+
+                        if !plan.skipped.is_empty() {
+                            ui.add_space(16.0);
+                            ui.label(
+                                RichText::new(s.skipped).size(13.0).strong().color(t.danger),
+                            );
+                            for skip in &plan.skipped {
+                                let label = Label::new(
+                                    RichText::new(skip.path.display().to_string())
+                                        .size(11.0)
+                                        .monospace()
+                                        .color(t.text_muted),
+                                )
+                                .truncate();
+                                ui.add(label)
+                                    .on_hover_text(skip.path.display().to_string());
+                                ui.label(
+                                    RichText::new(s.skip_reason(skip.reason))
+                                        .size(11.0)
+                                        .color(t.danger),
+                                );
+                            }
+                        }
+                    });
+            });
+
+        if close {
+            self.preview_open = false;
+        }
+    }
+
     fn sidebar(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings) {
         ui.label(RichText::new("DevSweep").size(20.0).strong().color(t.text));
         ui.add_space(16.0);
@@ -195,7 +392,7 @@ impl DevSweepApp {
         }
     }
 
-    fn content(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings) {
+    fn content(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings, plan: &DeletePlan) {
         if self.roots.is_empty() {
             if self.card(ui, t, s.empty_title, s.empty_body, Some(s.add_directory)) {
                 self.add_directory(ui.ctx());
@@ -203,12 +400,39 @@ impl DevSweepApp {
             return;
         }
 
-        ui.label(
-            RichText::new(format!("{} · {}", s.projects, self.projects.len()))
-                .size(18.0)
-                .strong()
-                .color(t.text),
-        );
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!("{} · {}", s.projects, self.projects.len()))
+                    .size(18.0)
+                    .strong()
+                    .color(t.text),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let count = plan.items.len();
+                let label = if count == 0 {
+                    s.clean.to_string()
+                } else {
+                    let total = if self.selected_sizes_known() {
+                        size::format_size(plan.total_bytes)
+                    } else {
+                        "…".to_string()
+                    };
+                    format!("{} {} {} · {}", s.clean, count, s.items, total)
+                };
+                // Execution arrives with ticket 05; the button already reflects the plan.
+                let _ = primary_button(ui, &label, t, count > 0);
+
+                ui.add_space(4.0);
+                let button = Button::new(RichText::new(s.preview).size(14.0))
+                    .fill(t.bg)
+                    .stroke(Stroke::new(1.0, t.border))
+                    .corner_radius(8)
+                    .min_size(egui::vec2(96.0, 38.0));
+                if ui.add_enabled(count > 0, button).clicked() {
+                    self.preview_open = true;
+                }
+            });
+        });
         ui.add_space(12.0);
 
         if self.projects.is_empty() {
@@ -216,15 +440,18 @@ impl DevSweepApp {
             return;
         }
 
+        let mut toggled = None;
         ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 let entries = &mut self.entries;
-                for project in &self.projects {
+                for (index, project) in self.projects.iter().enumerate() {
                     let Some(entry) = entries.get_mut(&project.path) else {
                         continue;
                     };
-                    project_row(ui, project, entry, t, s);
+                    if project_row(ui, project, entry, t, s) {
+                        toggled = Some(index);
+                    }
                     if entry.expanded {
                         for target in &mut entry.targets {
                             target_row(ui, project, target, t, s);
@@ -233,6 +460,10 @@ impl DevSweepApp {
                     ui.add_space(6.0);
                 }
             });
+        if let Some(index) = toggled {
+            let extend = ui.input(|input| input.modifiers.shift);
+            self.toggle_selection(index, extend);
+        }
     }
 
     fn card(
@@ -259,7 +490,7 @@ impl DevSweepApp {
                         ui.label(RichText::new(body).size(14.0).color(t.text_muted));
                         if let Some(action) = action {
                             ui.add_space(20.0);
-                            clicked = primary_button(ui, action, t);
+                            clicked = primary_button(ui, action, t, true);
                         }
                     });
                 });
@@ -311,18 +542,29 @@ impl eframe::App for DevSweepApp {
             .frame(Frame::new().fill(t.surface).inner_margin(16))
             .show(ui, |ui| self.sidebar(ui, t, s));
 
+        let select_all = ui.ctx().input_mut(|input| {
+            input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::A))
+        });
+        if select_all {
+            self.toggle_select_all();
+        }
+
+        let plan = self.build_plan();
+        self.preview_panel(ui, t, s, &plan);
+
         egui::CentralPanel::default()
             .frame(Frame::new().fill(t.bg).inner_margin(24))
-            .show(ui, |ui| self.content(ui, t, s));
+            .show(ui, |ui| self.content(ui, t, s, &plan));
     }
 }
 
-fn primary_button(ui: &mut Ui, label: &str, t: &Tokens) -> bool {
+fn primary_button(ui: &mut Ui, label: &str, t: &Tokens, enabled: bool) -> bool {
     let text = RichText::new(label)
         .size(15.0)
         .strong()
         .color(Color32::from_rgb(0x0F, 0x17, 0x2A));
-    ui.add(
+    ui.add_enabled(
+        enabled,
         Button::new(text)
             .fill(t.accent)
             .stroke(Stroke::NONE)
@@ -332,7 +574,13 @@ fn primary_button(ui: &mut Ui, label: &str, t: &Tokens) -> bool {
     .clicked()
 }
 
-fn project_row(ui: &mut Ui, project: &Project, entry: &mut ProjectEntry, t: &Tokens, s: &Strings) {
+fn project_row(
+    ui: &mut Ui,
+    project: &Project,
+    entry: &mut ProjectEntry,
+    t: &Tokens,
+    s: &Strings,
+) -> bool {
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.0), Sense::click());
     ui.painter().rect(
@@ -351,7 +599,7 @@ fn project_row(ui: &mut Ui, project: &Project, entry: &mut ProjectEntry, t: &Tok
     );
 
     let has_targets = !entry.targets.is_empty();
-    row.add_enabled(has_targets, Checkbox::without_text(&mut entry.selected));
+    let checkbox = row.add_enabled(has_targets, Checkbox::without_text(&mut entry.selected));
 
     row.vertical(|ui| {
         ui.set_max_width((ui.available_width() - 200.0).max(120.0));
@@ -387,9 +635,11 @@ fn project_row(ui: &mut Ui, project: &Project, entry: &mut ProjectEntry, t: &Tok
         }
     });
 
-    if response.clicked() && has_targets {
+    if response.clicked() && has_targets && !checkbox.clicked() {
         entry.expanded = !entry.expanded;
     }
+
+    checkbox.clicked()
 }
 
 fn target_row(ui: &mut Ui, project: &Project, target: &mut Target, t: &Tokens, s: &Strings) {
@@ -429,6 +679,12 @@ fn target_row(ui: &mut Ui, project: &Project, target: &mut Target, t: &Tokens, s
             ui.label(RichText::new(s.unchecked).size(11.0).color(t.text_muted));
         }
     });
+}
+
+fn project_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 fn chip(ui: &mut Ui, text: &str, t: &Tokens) {

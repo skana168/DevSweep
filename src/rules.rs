@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::scan::{Project, Stack};
 
+#[derive(Clone)]
 pub struct Rule {
     pub id: &'static str,
     /// `None` applies to every stack.
@@ -229,6 +230,18 @@ pub fn expand_targets(project: &Project, rules: &[Rule]) -> Vec<Target> {
     targets
 }
 
+/// One `*` inside a segment, matching a literal name otherwise.
+pub(crate) fn segment_matches(name: &str, pattern: &str) -> bool {
+    match pattern.split_once('*') {
+        Some((prefix, suffix)) => {
+            name.len() >= prefix.len() + suffix.len()
+                && name.starts_with(prefix)
+                && name.ends_with(suffix)
+        }
+        None => name == pattern,
+    }
+}
+
 /// Split `rel` into segments, expanding a single `*` in a segment against
 /// directory entries. No `**`, character classes, or regex.
 fn resolve(root: &Path, rel: &str) -> Vec<PathBuf> {
@@ -236,19 +249,18 @@ fn resolve(root: &Path, rel: &str) -> Vec<PathBuf> {
     for segment in rel.split('/') {
         let mut next = Vec::new();
         for base in &current {
-            match segment.split_once('*') {
-                Some((prefix, suffix)) => {
-                    let Ok(entries) = fs::read_dir(base) else {
-                        continue;
-                    };
-                    for entry in entries.filter_map(Result::ok) {
-                        let name = entry.file_name().to_string_lossy().into_owned();
-                        if name.starts_with(prefix) && name.ends_with(suffix) {
-                            next.push(base.join(name));
-                        }
+            if segment.contains('*') {
+                let Ok(entries) = fs::read_dir(base) else {
+                    continue;
+                };
+                for entry in entries.filter_map(Result::ok) {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if segment_matches(&name, segment) {
+                        next.push(base.join(name));
                     }
                 }
-                None => next.push(base.join(segment)),
+            } else {
+                next.push(base.join(segment));
             }
         }
         current = next;
