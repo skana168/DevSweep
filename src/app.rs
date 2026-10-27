@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
+use devsweep::delete::{self, DeleteEvent, DeleteMode, Failure};
 use devsweep::plan::{self, DeletePlan, LARGE_TARGET_BYTES, PlanProject};
 use devsweep::rules::{self, Target};
 use devsweep::scan::{self, Project};
@@ -26,6 +29,14 @@ pub struct DevSweepApp {
     /// Last project whose checkbox was clicked; Shift extends from here.
     selection_anchor: Option<PathBuf>,
     preview_open: bool,
+    confirm_open: bool,
+    /// The user has ticked "I understand" in the confirm dialog.
+    confirm_large_ack: bool,
+    execution: Option<Execution>,
+    /// Result banner shown after a cleanup.
+    flash: Option<Flash>,
+    failures_open: bool,
+    failures: Vec<Failure>,
 }
 
 struct ProjectEntry {
@@ -40,6 +51,19 @@ struct Measurement {
     rx: Receiver<SizeEvent>,
 }
 
+struct Execution {
+    done: usize,
+    total: usize,
+    current: Option<String>,
+    rx: Receiver<DeleteEvent>,
+    abort: Arc<AtomicBool>,
+}
+
+struct Flash {
+    bytes: u64,
+    aborted: bool,
+}
+
 impl DevSweepApp {
     pub fn new(cc: &CreationContext<'_>) -> Self {
         theme::install(&cc.egui_ctx);
@@ -51,6 +75,12 @@ impl DevSweepApp {
             measurement: None,
             selection_anchor: None,
             preview_open: false,
+            confirm_open: false,
+            confirm_large_ack: false,
+            execution: None,
+            flash: None,
+            failures_open: false,
+            failures: Vec::new(),
         }
     }
 
@@ -241,6 +271,100 @@ impl DevSweepApp {
         plan::plan(&projects, &self.roots, rules::builtin_rules())
     }
 
+    /// Execute the current plan on a worker thread. The UI keeps painting while
+    /// per-project events stream back.
+    fn start_execution(&mut self, ctx: &egui::Context) {
+        let plan = self.build_plan();
+        if plan.items.is_empty() {
+            return;
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let abort = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&abort);
+        // `DeleteMode::Trash` is the default; ticket 08 reads the mode from config.
+        std::thread::spawn(move || {
+            delete::execute(plan, DeleteMode::Trash, &flag, tx);
+        });
+
+        self.execution = Some(Execution {
+            done: 0,
+            total: 0,
+            current: None,
+            rx,
+            abort,
+        });
+        self.flash = None;
+        self.failures.clear();
+        self.failures_open = false;
+        ctx.request_repaint();
+    }
+
+    fn stop_execution(&self) {
+        if let Some(execution) = &self.execution {
+            execution.abort.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn poll_execution(&mut self, ctx: &egui::Context) {
+        let Some(execution) = &mut self.execution else {
+            return;
+        };
+        let mut changed = false;
+        let mut finished = None;
+        let mut lost = false;
+
+        loop {
+            match execution.rx.try_recv() {
+                Ok(DeleteEvent::Started { project, total }) => {
+                    execution.total = total;
+                    execution.current = Some(project_name(&project));
+                    changed = true;
+                }
+                Ok(DeleteEvent::ProjectDone { project, deleted }) => {
+                    if let Some(entry) = self.entries.get_mut(&project) {
+                        // Only the targets that actually left the disk go away.
+                        entry.targets.retain(|target| !deleted.contains(&target.path));
+                        entry.selected = false;
+                        entry.expanded = false;
+                    }
+                    execution.done += 1;
+                    changed = true;
+                }
+                Ok(DeleteEvent::Finished(report)) => {
+                    finished = Some(report);
+                    break;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    // A worker died without a report; don't leave the bar stuck.
+                    lost = true;
+                    break;
+                }
+            }
+        }
+
+        if let Some(report) = finished {
+            self.execution = None;
+            self.flash = Some(Flash {
+                bytes: report.freed_bytes,
+                aborted: report.aborted,
+            });
+            self.failures = report.failures;
+            self.failures_open = !self.failures.is_empty();
+            self.selection_anchor = None;
+            changed = true;
+        } else if lost {
+            self.execution = None;
+        }
+        if changed {
+            ctx.request_repaint();
+        }
+        if self.execution.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+    }
+
     fn preview_panel(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings, plan: &DeletePlan) {
         if !self.preview_open {
             return;
@@ -352,6 +476,220 @@ impl DevSweepApp {
         }
     }
 
+    /// "Freed 380 MB" after a cleanup, with a link to the failure list.
+    fn flash_banner(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings) {
+        let Some(flash) = self.flash.as_ref() else {
+            return;
+        };
+        let freed = if flash.bytes == 0 {
+            "0 MB".to_string()
+        } else {
+            size::format_size(flash.bytes)
+        };
+        let mut label = format!("{} {freed}", s.freed);
+        if flash.aborted {
+            label = format!("{label} · {}", s.aborted);
+        }
+        let failure_count = self.failures.len();
+        let mut dismiss = false;
+        let mut show_failures = false;
+
+        Frame::new()
+            .fill(t.accent.gamma_multiply(0.12))
+            .stroke(Stroke::new(1.0, t.accent))
+            .corner_radius(10)
+            .inner_margin(egui::Margin::symmetric(16, 10))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(label).size(14.0).strong().color(t.accent));
+                    if failure_count > 0 {
+                        let button = Button::new(
+                            RichText::new(format!("{} ({failure_count})", s.failures))
+                                .size(13.0)
+                                .color(t.danger),
+                        )
+                        .frame(false);
+                        if ui.add(button).clicked() {
+                            show_failures = true;
+                        }
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let close =
+                            Button::new(RichText::new("×").color(t.text_muted)).frame(false);
+                        if ui.add(close).clicked() {
+                            dismiss = true;
+                        }
+                    });
+                });
+            });
+        ui.add_space(12.0);
+
+        if dismiss {
+            self.flash = None;
+        }
+        if show_failures {
+            self.failures_open = true;
+        }
+    }
+
+    fn confirm_dialog(&mut self, ctx: &egui::Context, t: &Tokens, s: &Strings, plan: &DeletePlan) {
+        if !self.confirm_open {
+            return;
+        }
+
+        let projects = plan
+            .items
+            .iter()
+            .map(|item| &item.project_path)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        let large: Vec<&plan::PlanItem> = plan.items.iter().filter(|item| item.large).collect();
+        let known = self.selected_sizes_known();
+        let total = if known {
+            size::format_size(plan.total_bytes)
+        } else {
+            "…".to_string()
+        };
+        let mut ack = self.confirm_large_ack;
+        let mut close = false;
+        let mut confirm = false;
+
+        let modal = egui::Modal::new(egui::Id::unique("confirm_delete"))
+            .frame(
+                Frame::new()
+                    .fill(t.surface)
+                    .stroke(Stroke::new(1.0, t.border))
+                    .corner_radius(16)
+                    .inner_margin(24),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(440.0);
+                ui.label(
+                    RichText::new(s.confirm_title)
+                        .size(18.0)
+                        .strong()
+                        .color(t.text),
+                );
+                ui.add_space(12.0);
+                stat_row(ui, s.projects, &projects.to_string(), t);
+                stat_row(ui, s.items, &plan.items.len().to_string(), t);
+                stat_row(ui, s.preview_total, &total, t);
+
+                if !large.is_empty() {
+                    ui.add_space(12.0);
+                    ui.label(RichText::new(s.large_warning).size(13.0).color(t.danger));
+                    for item in &large {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} · {}",
+                                item.target_path.display(),
+                                size::format_size(item.bytes)
+                            ))
+                            .size(11.0)
+                            .monospace()
+                            .color(t.danger),
+                        );
+                    }
+                    ui.add_space(8.0);
+                    ui.checkbox(&mut ack, RichText::new(s.large_ack).size(13.0));
+                }
+
+                ui.add_space(20.0);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    // Unknown sizes could hide a > 5 GB target, so wait for them.
+                    if primary_button(ui, s.confirm, t, known && (large.is_empty() || ack)) {
+                        confirm = true;
+                    }
+                    ui.add_space(4.0);
+                    if secondary_button(ui, s.cancel, t) {
+                        close = true;
+                    }
+                });
+                if ui.ctx().input(|input| input.key_pressed(Key::Escape)) {
+                    close = true;
+                }
+            });
+
+        self.confirm_large_ack = ack;
+        if confirm {
+            self.confirm_open = false;
+            self.start_execution(ctx);
+        } else if close || modal.backdrop_response.clicked() {
+            self.confirm_open = false;
+        }
+    }
+
+    fn failures_dialog(&mut self, ctx: &egui::Context, t: &Tokens, s: &Strings) {
+        if !self.failures_open {
+            return;
+        }
+        let mut close = false;
+
+        let modal = egui::Modal::new(egui::Id::unique("delete_failures"))
+            .frame(
+                Frame::new()
+                    .fill(t.surface)
+                    .stroke(Stroke::new(1.0, t.border))
+                    .corner_radius(16)
+                    .inner_margin(24),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(560.0);
+                ui.label(
+                    RichText::new(format!("{} ({})", s.failures, self.failures.len()))
+                        .size(18.0)
+                        .strong()
+                        .color(t.danger),
+                );
+                ui.add_space(12.0);
+                ScrollArea::vertical()
+                    .max_height(320.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for failure in &self.failures {
+                            ui.horizontal(|ui| {
+                                let rel = failure
+                                    .path
+                                    .strip_prefix(&failure.project_path)
+                                    .unwrap_or(&failure.path);
+                                ui.label(
+                                    RichText::new(project_name(&failure.project_path))
+                                        .size(13.0)
+                                        .strong()
+                                        .color(t.text),
+                                );
+                                ui.label(
+                                    RichText::new(rel.display().to_string())
+                                        .size(12.0)
+                                        .monospace()
+                                        .color(t.text_muted),
+                                );
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    ui.label(
+                                        RichText::new(s.failure_reason(failure.reason))
+                                            .size(12.0)
+                                            .color(t.danger),
+                                    );
+                                });
+                            });
+                        }
+                    });
+                ui.add_space(16.0);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if secondary_button(ui, s.close, t) {
+                        close = true;
+                    }
+                });
+                if ui.ctx().input(|input| input.key_pressed(Key::Escape)) {
+                    close = true;
+                }
+            });
+
+        if close || modal.backdrop_response.clicked() {
+            self.failures_open = false;
+        }
+    }
+
     fn sidebar(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings) {
         ui.label(RichText::new("DevSweep").size(20.0).strong().color(t.text));
         ui.add_space(16.0);
@@ -400,6 +738,8 @@ impl DevSweepApp {
             return;
         }
 
+        self.flash_banner(ui, t, s);
+
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(format!("{} · {}", s.projects, self.projects.len()))
@@ -420,7 +760,11 @@ impl DevSweepApp {
                     format!("{} {} {} · {}", s.clean, count, s.items, total)
                 };
                 // Execution arrives with ticket 05; the button already reflects the plan.
-                let _ = primary_button(ui, &label, t, count > 0);
+                let running = self.execution.is_some();
+                if primary_button(ui, &label, t, count > 0 && !running) {
+                    self.confirm_open = true;
+                    self.confirm_large_ack = false;
+                }
 
                 ui.add_space(4.0);
                 let button = Button::new(RichText::new(s.preview).size(14.0))
@@ -502,6 +846,7 @@ impl DevSweepApp {
 impl eframe::App for DevSweepApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_measurement(ctx);
+        self.poll_execution(ctx);
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
@@ -524,6 +869,26 @@ impl eframe::App for DevSweepApp {
                             .size(11.0)
                             .color(t.text_muted),
                         );
+                    }
+                    if let Some(execution) = &self.execution {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} {}/{} · {}",
+                                s.cleaning,
+                                execution.done,
+                                execution.total,
+                                execution.current.as_deref().unwrap_or_default()
+                            ))
+                            .size(11.0)
+                            .color(t.text),
+                        );
+                        let aborting = execution.abort.load(Ordering::Relaxed);
+                        let button = Button::new(RichText::new(s.abort).size(11.0))
+                            .frame(false)
+                            .stroke(Stroke::new(1.0, t.border));
+                        if ui.add_enabled(!aborting, button).clicked() {
+                            self.stop_execution();
+                        }
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.label(
@@ -555,7 +920,30 @@ impl eframe::App for DevSweepApp {
         egui::CentralPanel::default()
             .frame(Frame::new().fill(t.bg).inner_margin(24))
             .show(ui, |ui| self.content(ui, t, s, &plan));
+
+        self.confirm_dialog(ui.ctx(), t, s, &plan);
+        self.failures_dialog(ui.ctx(), t, s);
     }
+}
+
+fn secondary_button(ui: &mut Ui, label: &str, t: &Tokens) -> bool {
+    ui.add(
+        Button::new(RichText::new(label).size(14.0))
+            .fill(t.bg)
+            .stroke(Stroke::new(1.0, t.border))
+            .corner_radius(8)
+            .min_size(egui::vec2(88.0, 34.0)),
+    )
+    .clicked()
+}
+
+fn stat_row(ui: &mut Ui, label: &str, value: &str, t: &Tokens) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).size(13.0).color(t.text_muted));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(RichText::new(value).size(13.0).monospace().color(t.text));
+        });
+    });
 }
 
 fn primary_button(ui: &mut Ui, label: &str, t: &Tokens, enabled: bool) -> bool {

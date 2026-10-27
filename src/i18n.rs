@@ -1,3 +1,4 @@
+use devsweep::delete::FailureReason;
 use devsweep::plan::SkipReason;
 use devsweep::scan::Stack;
 
@@ -51,6 +52,21 @@ pub struct Strings {
     pub skip_missing: &'static str,
     pub skip_not_a_directory: &'static str,
     pub skip_overlap: &'static str,
+    pub confirm_title: &'static str,
+    pub confirm: &'static str,
+    pub cancel: &'static str,
+    pub large_warning: &'static str,
+    pub large_ack: &'static str,
+    pub cleaning: &'static str,
+    pub abort: &'static str,
+    pub aborted: &'static str,
+    pub freed: &'static str,
+    pub failures: &'static str,
+    pub close: &'static str,
+    pub fail_permission: &'static str,
+    pub fail_in_use: &'static str,
+    pub fail_missing: &'static str,
+    pub fail_other: &'static str,
     pub stack_flutter: &'static str,
     pub stack_android: &'static str,
     pub stack_ios: &'static str,
@@ -78,6 +94,15 @@ impl Strings {
             SkipReason::Missing => self.skip_missing,
             SkipReason::NotADirectory => self.skip_not_a_directory,
             SkipReason::Overlap => self.skip_overlap,
+        }
+    }
+
+    pub fn failure_reason(&self, reason: FailureReason) -> &'static str {
+        match reason {
+            FailureReason::PermissionDenied => self.fail_permission,
+            FailureReason::InUse => self.fail_in_use,
+            FailureReason::Missing => self.fail_missing,
+            FailureReason::Other => self.fail_other,
         }
     }
 }
@@ -108,6 +133,21 @@ static ZH: Strings = Strings {
     skip_missing: "不存在",
     skip_not_a_directory: "不是目录",
     skip_overlap: "重叠目标",
+    confirm_title: "确认清理",
+    confirm: "确认清理",
+    cancel: "取消",
+    large_warning: "以下条目超过 5 GB：",
+    large_ack: "我确认删除这些大条目",
+    cleaning: "正在清理",
+    abort: "中止",
+    aborted: "已中止",
+    freed: "已释放",
+    failures: "失败清单",
+    close: "关闭",
+    fail_permission: "权限不足",
+    fail_in_use: "被占用",
+    fail_missing: "不存在",
+    fail_other: "其他错误",
     stack_flutter: "Flutter",
     stack_android: "Android",
     stack_ios: "iOS",
@@ -140,6 +180,21 @@ static EN: Strings = Strings {
     skip_missing: "Missing",
     skip_not_a_directory: "Not a directory",
     skip_overlap: "Overlaps another target",
+    confirm_title: "Confirm cleanup",
+    confirm: "Clean now",
+    cancel: "Cancel",
+    large_warning: "Items above 5 GB:",
+    large_ack: "I understand these large items will be deleted",
+    cleaning: "Cleaning",
+    abort: "Stop",
+    aborted: "Stopped",
+    freed: "Freed",
+    failures: "Failures",
+    close: "Close",
+    fail_permission: "Permission denied",
+    fail_in_use: "In use",
+    fail_missing: "Missing",
+    fail_other: "Other error",
     stack_flutter: "Flutter",
     stack_android: "Android",
     stack_ios: "iOS",
