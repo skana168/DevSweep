@@ -15,7 +15,7 @@ use devsweep::size::{self, SizeEvent, SizeRequest};
 use eframe::CreationContext;
 use eframe::egui::{
     self, Align, Button, Checkbox, Color32, CornerRadius, Frame, Key, KeyboardShortcut, Label,
-    Layout, Modifiers, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit, Ui,
+    Layout, Modifiers, Response, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit, Ui,
 };
 use egui_extras::{Column, TableBuilder, TableRow};
 
@@ -28,6 +28,9 @@ const REFRESH_AFTER: Duration = Duration::from_secs(30);
 
 /// A project row carries a name, a path and its two row actions.
 const PROJECT_ROW_H: f32 = 56.0;
+
+/// The height of a segmented cell and of the settings sheet's controls.
+const CELL_H: f32 = 34.0;
 
 fn search_id() -> egui::Id {
     egui::Id::unique("project_search")
@@ -65,13 +68,14 @@ pub struct DevSweepApp {
     flash: Option<Flash>,
     failures_open: bool,
     failures: Vec<Failure>,
+    /// The settings sheet is showing.
+    settings_open: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
     Projects,
     Caches,
-    Settings,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -176,6 +180,7 @@ impl DevSweepApp {
             flash: None,
             failures_open: false,
             failures: Vec::new(),
+            settings_open: false,
         };
         app.projects = scan::scan(&app.active_roots());
         app.sync_entries();
@@ -580,9 +585,7 @@ impl DevSweepApp {
                     ui.add_space(8.0);
                     chip(ui, s.stack(stack), t);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let button =
-                            Button::new(RichText::new("×").color(t.text_muted)).frame(false);
-                        if ui.add(button).clicked() {
+                        if icon_button(ui, "×", t) {
                             close = true;
                         }
                     });
@@ -741,20 +744,15 @@ impl DevSweepApp {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(label).size(14.0).color(t.good));
                     if failure_count > 0 {
-                        let button = Button::new(
-                            RichText::new(format!("{} ({failure_count})", s.failures))
-                                .size(13.0)
-                                .color(t.danger),
-                        )
-                        .frame(false);
-                        if ui.add(button).clicked() {
+                        let text =
+                            RichText::new(format!("{} ({failure_count})", s.failures)).size(13.0);
+                        if text_button(ui, text, t.danger, t.text_strong).clicked() {
                             show_failures = true;
                         }
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let close =
-                            Button::new(RichText::new("×").color(t.text_muted)).frame(false);
-                        if ui.add(close).clicked() {
+                        let close = RichText::new("×");
+                        if text_button(ui, close, t.text_muted, t.text_strong).clicked() {
                             dismiss = true;
                         }
                     });
@@ -962,10 +960,7 @@ impl DevSweepApp {
             };
             let active = self.view == View::Projects && self.filter == filter;
             let label = RichText::new(format!("{label}  {count}")).size(14.0);
-            if ui
-                .add_sized([width, 30.0], nav_button(label, active, t))
-                .clicked()
-            {
+            if nav_button(ui, label, active, egui::vec2(width, 30.0), t).clicked() {
                 self.view = View::Projects;
                 self.filter = filter;
             }
@@ -976,37 +971,27 @@ impl DevSweepApp {
             .cache_total()
             .map(size::format_size)
             .unwrap_or_else(|| "…".to_string());
-        if ui
-            .add_sized(
-                [width, 32.0],
-                nav_button(
-                    RichText::new(format!("{}  {total}", s.global_caches)).size(14.0),
-                    self.view == View::Caches,
-                    t,
-                ),
-            )
-            .clicked()
+        let label = RichText::new(format!("{}  {total}", s.global_caches)).size(14.0);
+        if nav_button(
+            ui,
+            label,
+            self.view == View::Caches,
+            egui::vec2(width, 32.0),
+            t,
+        )
+        .clicked()
         {
             self.view = View::Caches;
         }
 
         ui.add_space(8.0);
-        if ui
-            .add_sized(
-                [width, 32.0],
-                nav_button(
-                    RichText::new(s.settings).size(14.0),
-                    self.view == View::Settings,
-                    t,
-                ),
-            )
-            .clicked()
-        {
-            self.view = View::Settings;
+        let label = RichText::new(s.settings).size(14.0);
+        if nav_button(ui, label, self.settings_open, egui::vec2(width, 32.0), t).clicked() {
+            self.settings_open = true;
         }
     }
 
-    /// The scan-root list, shared by the sidebar and the settings page.
+    /// The scan-root list, shared by the sidebar and the settings sheet.
     fn roots_editor(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings) {
         let covering = scan::covering_roots(&self.config.roots);
         let mut remove = None;
@@ -1025,9 +1010,10 @@ impl DevSweepApp {
                     None => root.display().to_string(),
                 };
                 ui.add_sized([name_width, 18.0], label).on_hover_text(hover);
-                let response =
-                    ui.add(Button::new(RichText::new("×").color(t.text_muted)).frame(false));
-                if response.on_hover_text(s.remove).clicked() {
+                if text_button(ui, RichText::new("×"), t.text_muted, t.text_strong)
+                    .on_hover_text(s.remove)
+                    .clicked()
+                {
                     remove = Some(index);
                 }
             });
@@ -1046,10 +1032,17 @@ impl DevSweepApp {
 
         ui.add_space(8.0);
         let width = ui.available_width();
-        let button = Button::new(theme::button_text(format!("+ {}", s.add_directory), t.text))
-            .fill(t.bg)
-            .stroke(t.hairline());
-        if ui.add_sized([width, 34.0], button).clicked() {
+        let (rest, hot) = look(Kind::Secondary, t);
+        let add = ui
+            .scope(|ui| {
+                paint_states(ui, rest, hot);
+                ui.add_sized(
+                    [width, CELL_H],
+                    Button::new(theme::button_text(format!("+ {}", s.add_directory))),
+                )
+            })
+            .inner;
+        if add.clicked() {
             self.add_directory(ui.ctx());
         }
         if let Some(notice) = self.root_notice {
@@ -1091,118 +1084,177 @@ impl DevSweepApp {
         let _ = opener::open(&path);
     }
 
-    fn settings_content(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings) {
-        ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.label(theme::title(s.settings, 26.0, t.text));
-                ui.add_space(16.0);
+    /// The settings sheet: hero, two columns of hairline panels, a Done footer.
+    fn settings_dialog(&mut self, ctx: &egui::Context, t: &Tokens, s: &Strings) {
+        if !self.settings_open {
+            return;
+        }
+        // The window less a margin, capped like the reference's large dialog.
+        let screen = ctx.content_rect();
+        let width = (screen.width() - 64.0).clamp(320.0, 1000.0);
+        let height = (screen.height() - 48.0).clamp(240.0, 820.0);
+        let mut done = false;
 
-                ui.label(theme::hud(s.language, t.text_muted));
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    for (choice, label) in [
-                        (LanguageChoice::System, s.system),
-                        (LanguageChoice::Zh, s.lang_zh),
-                        (LanguageChoice::En, s.lang_en),
-                    ] {
-                        if ui
-                            .add(nav_button(
-                                RichText::new(label).size(14.0),
-                                self.config.language == choice,
+        let modal = egui::Modal::new(egui::Id::unique("settings"))
+            .frame(
+                Frame::new()
+                    .fill(t.bg)
+                    .stroke(Stroke::new(1.0, t.border_strong))
+                    .shadow(theme::shadow(ctx.theme() == egui::Theme::Dark)),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(width);
+                ui.set_max_width(width);
+                ui.set_max_height(height);
+                let hero = sheet_hero(ui, s, t);
+                let footer = CELL_H + 32.0;
+                let body = (height - hero - footer - 2.0).max(0.0);
+                ScrollArea::vertical()
+                    .id_salt("settings_body")
+                    .max_height(body)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        Frame::new()
+                            .inner_margin(egui::Margin::same(24))
+                            .show(ui, |ui| {
+                                // The panel margin, then the two columns.
+                                let content = width - 48.0;
+                                ui.set_min_width(content);
+                                ui.set_max_width(content);
+                                let column = ((content - 32.0) / 2.0).floor();
+                                ui.horizontal_top(|ui| {
+                                    let size = egui::vec2(column, 0.0);
+                                    ui.allocate_ui_with_layout(
+                                        size,
+                                        Layout::top_down(Align::Min),
+                                        |ui| self.settings_left(ui, t, s),
+                                    );
+                                    // The columns are 32 apart; `item_spacing` already adds 8.
+                                    ui.add_space(24.0);
+                                    ui.allocate_ui_with_layout(
+                                        size,
+                                        Layout::top_down(Align::Min),
+                                        |ui| self.settings_right(ui, t, s),
+                                    );
+                                });
+                            });
+                    });
+                ui.painter()
+                    .hline(ui.max_rect().x_range(), ui.cursor().top(), t.hairline());
+                Frame::new()
+                    .inner_margin(egui::Margin::symmetric(24, 16))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        // One control row: `with_layout` would otherwise take the
+                        // remaining height and pad the footer.
+                        ui.set_height(CELL_H);
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            done = action_button(
+                                ui,
+                                s.done,
+                                Kind::Primary,
                                 t,
-                            ))
-                            .clicked()
-                        {
-                            self.config.language = choice;
-                            self.lang = Lang::from_choice(choice);
-                            self.persist();
+                                true,
+                                egui::vec2(90.0, CELL_H),
+                            );
+                        });
+                    });
+            });
+
+        if done || modal.should_close() {
+            self.settings_open = false;
+        }
+    }
+
+    fn settings_left(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings) {
+        // A full-width dropdown, as in the reference: the list is the panel's body.
+        settings_panel(ui, s.language, t, |ui| {
+            let mut language = self.config.language;
+            // As tall as a cell, so the dropdown sits level with the other controls.
+            ui.scope(|ui| {
+                ui.spacing_mut().interact_size.y = CELL_H;
+                egui::ComboBox::from_id_salt("settings_language")
+                    .selected_text(language_label(language, s))
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        for (choice, label) in language_choices(s) {
+                            ui.selectable_value(&mut language, choice, label);
                         }
-                    }
-                });
-                ui.add_space(20.0);
+                    });
+            });
+            if language != self.config.language {
+                self.config.language = language;
+                self.lang = Lang::from_choice(language);
+                self.persist();
+            }
+        });
 
-                ui.label(theme::hud(s.theme, t.text_muted));
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    for (choice, label) in [
-                        (ThemeChoice::System, s.system),
-                        (ThemeChoice::Dark, s.dark),
-                        (ThemeChoice::Light, s.light),
-                    ] {
-                        if ui
-                            .add(nav_button(
-                                RichText::new(label).size(14.0),
-                                self.config.theme == choice,
-                                t,
-                            ))
-                            .clicked()
-                        {
-                            self.config.theme = choice;
-                            theme::apply(ui.ctx(), choice);
-                            self.persist();
-                        }
-                    }
-                });
-                ui.add_space(20.0);
+        settings_panel(ui, s.theme, t, |ui| {
+            let mut choice = self.config.theme;
+            let options = [
+                (ThemeChoice::System, s.system),
+                (ThemeChoice::Dark, s.dark),
+                (ThemeChoice::Light, s.light),
+            ];
+            if cells(ui, &mut choice, &options, t) {
+                self.config.theme = choice;
+                theme::apply(ui.ctx(), choice);
+                self.persist();
+            }
+        });
 
-                ui.label(theme::hud(s.delete_mode, t.text_muted));
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    for (mode, label) in [
-                        (DeleteMode::Trash, s.delete_trash),
-                        (DeleteMode::Direct, s.delete_direct),
-                    ] {
-                        if ui
-                            .add(nav_button(
-                                RichText::new(label).size(14.0),
-                                self.config.delete_mode == mode,
-                                t,
-                            ))
-                            .clicked()
-                        {
-                            self.config.delete_mode = mode;
-                            self.persist();
-                        }
-                    }
-                });
-                ui.add_space(20.0);
+        settings_panel(ui, s.delete_mode, t, |ui| {
+            let mut mode = self.config.delete_mode;
+            let options = [
+                (DeleteMode::Trash, s.delete_trash),
+                (DeleteMode::Direct, s.delete_direct),
+            ];
+            if cells(ui, &mut mode, &options, t) {
+                self.config.delete_mode = mode;
+                self.persist();
+            }
+            // The consequence of each choice, as a note rather than a wide cell label.
+            ui.add_space(8.0);
+            ui.label(RichText::new(s.delete_note).size(12.0).color(t.text_muted));
+        });
+    }
 
-                ui.label(theme::hud(s.roots, t.text_muted));
-                ui.add_space(4.0);
-                self.roots_editor(ui, t, s);
-                ui.add_space(20.0);
+    fn settings_right(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings) {
+        settings_panel(ui, s.roots, t, |ui| self.roots_editor(ui, t, s));
 
-                ui.label(theme::hud(s.rules_file, t.text_muted));
-                ui.add_space(4.0);
-                if let Some(path) = config::rules_path() {
-                    ui.label(
-                        RichText::new(path.display().to_string())
+        settings_panel(ui, s.rules_file, t, |ui| {
+            if let Some(path) = config::rules_path() {
+                let full = path.display().to_string();
+                ui.add(
+                    Label::new(
+                        RichText::new(&full)
                             .size(11.0)
                             .monospace()
                             .color(t.text_muted),
-                    );
-                }
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    if secondary_button(ui, s.open_rules, t) {
-                        self.open_rules();
-                    }
-                    ui.label(
-                        RichText::new(s.rules_restart)
-                            .size(11.0)
-                            .color(t.text_muted),
-                    );
-                });
-                if let Some(error) = &self.rules_error {
-                    ui.add_space(8.0);
-                    ui.label(
-                        RichText::new(format!("{} {error}", s.rules_error))
-                            .size(12.0)
-                            .color(t.danger),
-                    );
-                }
-            });
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(full);
+            }
+            ui.add_space(8.0);
+            if secondary_button(ui, s.open_rules, t) {
+                self.open_rules();
+            }
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(s.rules_restart)
+                    .size(11.0)
+                    .color(t.text_muted),
+            );
+            if let Some(error) = &self.rules_error {
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(format!("{} {error}", s.rules_error))
+                        .size(12.0)
+                        .color(t.danger),
+                );
+            }
+        });
     }
 
     fn content(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings, visible: &[usize]) {
@@ -1489,7 +1541,17 @@ impl eframe::App for DevSweepApp {
                         let button = Button::new(RichText::new(s.abort).size(11.0))
                             .frame(false)
                             .stroke(Stroke::new(1.0, t.border));
-                        if ui.add_enabled(!aborting, button).clicked() {
+                        let stopped = ui
+                            .scope(|ui| {
+                                paint_states(
+                                    ui,
+                                    (Color32::TRANSPARENT, Stroke::NONE, t.text),
+                                    (Color32::TRANSPARENT, Stroke::NONE, t.text_strong),
+                                );
+                                ui.add_enabled(!aborting, button).clicked()
+                            })
+                            .inner;
+                        if stopped {
                             self.stop_execution();
                         }
                     }
@@ -1523,7 +1585,6 @@ impl eframe::App for DevSweepApp {
             .show(ui, |ui| match self.view {
                 View::Projects => self.content(ui, t, s, &visible),
                 View::Caches => self.caches_content(ui, t, s),
-                View::Settings => self.settings_content(ui, t, s),
             });
 
         self.clean_panel(ui.ctx(), t, s);
@@ -1543,6 +1604,7 @@ impl eframe::App for DevSweepApp {
             self.confirm_dialog(ui.ctx(), t, s, &pending_plan, known, cleanup);
         }
         self.failures_dialog(ui.ctx(), t, s);
+        self.settings_dialog(ui.ctx(), t, s);
     }
 
     fn on_exit(&mut self) {
@@ -1550,19 +1612,48 @@ impl eframe::App for DevSweepApp {
     }
 }
 
-fn nav_button<'a>(label: RichText, active: bool, t: &Tokens) -> Button<'a> {
-    // The chosen one is a well with a stronger hairline; craft inverts on hover, not on state.
-    Button::new(label)
-        .fill(if active {
-            t.sunken
-        } else {
-            Color32::TRANSPARENT
-        })
-        .stroke(if active {
-            Stroke::new(1.0, t.border_strong)
-        } else {
-            Stroke::NONE
-        })
+/// How one control paints at rest and under the pointer.
+type Look = (Color32, Stroke, Color32);
+
+/// A nav or filter row: the chosen one inverts, the rest lift under the pointer.
+fn nav_button(
+    ui: &mut Ui,
+    label: RichText,
+    active: bool,
+    size: egui::Vec2,
+    t: &Tokens,
+) -> Response {
+    ui.scope(|ui| {
+        paint_states(
+            ui,
+            (Color32::TRANSPARENT, Stroke::NONE, t.text_muted),
+            (t.sunken, Stroke::new(1.0, t.border_strong), t.text_strong),
+        );
+        // A selected button paints from `selection`, so one row can invert without
+        // turning every text selection in the app white.
+        let selection = &mut ui.visuals_mut().selection;
+        selection.bg_fill = t.invert_bg;
+        selection.stroke = Stroke::new(1.0, t.invert_fg);
+        ui.add_sized(size, Button::new(label).selected(active))
+    })
+    .inner
+}
+
+/// Set how the buttons drawn inside `ui` look at rest and under the pointer;
+/// pressed and focused take the hovered look, as in the reference.
+fn paint_states(ui: &mut Ui, rest: Look, hot: Look) {
+    let widgets = &mut ui.visuals_mut().widgets;
+    for (slot, (fill, stroke, ink)) in [
+        (&mut widgets.inactive, rest),
+        (&mut widgets.hovered, hot),
+        (&mut widgets.active, hot),
+        (&mut widgets.open, hot),
+    ] {
+        slot.bg_fill = fill;
+        slot.weak_bg_fill = fill;
+        slot.bg_stroke = stroke;
+        slot.fg_stroke = Stroke::new(1.0, ink);
+    }
 }
 
 /// Which of the reference's button variants.
@@ -1570,10 +1661,34 @@ fn nav_button<'a>(label: RichText, active: bool, t: &Tokens) -> Button<'a> {
 enum Kind {
     /// A solid block in the inverted colours: the main, non-destructive action.
     Primary,
-    /// Outlined: opens something, or cancels.
+    /// Outlined at rest, inverted under the pointer: opens something, or cancels.
     Secondary,
     /// Solid red: the click that deletes.
     Danger,
+    /// A hairline square, inverted under the pointer: close, overflow.
+    Icon,
+}
+
+/// The rest and hovered looks of each variant.
+fn look(kind: Kind, t: &Tokens) -> (Look, Look) {
+    match kind {
+        Kind::Primary => (
+            (t.invert_bg, Stroke::NONE, t.invert_fg),
+            (t.invert_bg.gamma_multiply(0.8), Stroke::NONE, t.invert_fg),
+        ),
+        Kind::Secondary => (
+            (t.bg, Stroke::new(1.0, t.border_strong), t.text),
+            (t.invert_bg, Stroke::NONE, t.invert_fg),
+        ),
+        Kind::Danger => (
+            (t.danger, Stroke::NONE, Color32::WHITE),
+            (t.danger.gamma_multiply(0.8), Stroke::NONE, Color32::WHITE),
+        ),
+        Kind::Icon => (
+            (Color32::TRANSPARENT, t.hairline(), t.text_muted),
+            (t.invert_bg, Stroke::NONE, t.invert_fg),
+        ),
+    }
 }
 
 fn action_button(
@@ -1584,25 +1699,42 @@ fn action_button(
     enabled: bool,
     min_size: egui::Vec2,
 ) -> bool {
-    let (fill, ink, stroke) = match kind {
-        Kind::Primary => (t.invert_bg, t.invert_fg, Stroke::NONE),
-        Kind::Secondary => (t.bg, t.text, t.hairline()),
-        Kind::Danger => (t.danger, Color32::WHITE, Stroke::NONE),
-    };
-    // Disabled fades the whole button, the way the reference does it.
-    let (fill, ink) = if enabled {
-        (fill, ink)
-    } else {
-        (fill.gamma_multiply(0.5), ink.gamma_multiply(0.5))
-    };
-    ui.add_enabled(
-        enabled,
-        Button::new(theme::button_text(label, ink))
-            .fill(fill)
-            .stroke(stroke)
-            .min_size(min_size),
-    )
-    .clicked()
+    let (rest, hot) = look(kind, t);
+    ui.scope(|ui| {
+        paint_states(ui, rest, hot);
+        // `add_enabled` fades the whole button at half strength, the reference's
+        // disabled look.
+        ui.add_enabled(
+            enabled,
+            Button::new(theme::button_text(label)).min_size(min_size),
+        )
+        .clicked()
+    })
+    .inner
+}
+
+/// A square glyph button: a hairline at rest, inverted under the pointer.
+fn icon_button(ui: &mut Ui, glyph: &str, t: &Tokens) -> bool {
+    let (rest, hot) = look(Kind::Icon, t);
+    ui.scope(|ui| {
+        paint_states(ui, rest, hot);
+        ui.add(Button::new(RichText::new(glyph)).min_size(egui::vec2(CELL_H, CELL_H)))
+            .clicked()
+    })
+    .inner
+}
+
+/// A frameless label button: the text lifts under the pointer, nothing else.
+fn text_button(ui: &mut Ui, text: RichText, rest: Color32, hot: Color32) -> Response {
+    ui.scope(|ui| {
+        paint_states(
+            ui,
+            (Color32::TRANSPARENT, Stroke::NONE, rest),
+            (Color32::TRANSPARENT, Stroke::NONE, hot),
+        );
+        ui.add(Button::new(text).frame(false))
+    })
+    .inner
 }
 
 fn secondary_button(ui: &mut Ui, label: &str, t: &Tokens) -> bool {
@@ -1617,8 +1749,7 @@ fn sort_header(ui: &mut Ui, label: &str, arrow: &str, active: bool, t: &Tokens) 
         label.to_string()
     };
     let color = if active { t.text } else { t.text_muted };
-    ui.add(Button::new(theme::hud(text, color)).frame(false))
-        .clicked()
+    text_button(ui, theme::hud(text, color), color, t.text_strong).clicked()
 }
 
 fn stat_row(ui: &mut Ui, label: &str, value: &str, t: &Tokens) {
@@ -1735,21 +1866,29 @@ fn project_table_row(
 
 /// The referto-style overflow trigger: a square "…" button with a two-item menu.
 fn more_menu(ui: &mut Ui, t: &Tokens, s: &Strings) -> Option<RowAction> {
-    let button = Button::new(RichText::new("…").size(15.0).color(t.text_muted))
-        .min_size(egui::vec2(34.0, 34.0));
-    let (response, open) = egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
-        ui.set_min_width(200.0);
-        let mut action = None;
-        if ui.button(s.open_folder).clicked() {
-            action = Some(RowAction::Folder);
-            ui.close();
-        }
-        if ui.button(s.open_terminal).clicked() {
-            action = Some(RowAction::Terminal);
-            ui.close();
-        }
-        action
-    });
+    let saved = ui.visuals().clone();
+    let (rest, hot) = look(Kind::Icon, t);
+    let button = Button::new(RichText::new("…").size(15.0)).min_size(egui::vec2(CELL_H, CELL_H));
+    let (response, open) = ui
+        .scope(|ui| {
+            paint_states(ui, rest, hot);
+            egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
+                // The popup inherits this scope's icon colours; its items keep the page ones.
+                *ui.visuals_mut() = saved.clone();
+                ui.set_min_width(200.0);
+                let mut action = None;
+                if ui.button(s.open_folder).clicked() {
+                    action = Some(RowAction::Folder);
+                    ui.close();
+                }
+                if ui.button(s.open_terminal).clicked() {
+                    action = Some(RowAction::Terminal);
+                    ui.close();
+                }
+                action
+            })
+        })
+        .inner;
     response.on_hover_text(s.more);
     open.and_then(|open| open.inner)
 }
@@ -1827,11 +1966,15 @@ fn cache_row(
                         action = Some((path.clone(), choice));
                     }
                     ui.add_space(8.0);
-                    let button = Button::new(theme::button_text(s.clean, t.text))
-                        .fill(t.bg)
-                        .stroke(t.hairline());
                     let armed = exists && !row.cleaned && !busy && row.size.is_some();
-                    if ui.add_enabled(armed, button).clicked() {
+                    if action_button(
+                        ui,
+                        s.clean,
+                        Kind::Secondary,
+                        t,
+                        armed,
+                        egui::vec2(0.0, CELL_H),
+                    ) {
                         clean = true;
                     }
                     ui.add_space(8.0);
@@ -1863,17 +2006,142 @@ fn project_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-/// A hairline badge around a mono label. Painted rather than framed: a `Frame`
-/// inside a table cell stretches to the cell's height.
-fn chip(ui: &mut Ui, text: &str, t: &Tokens) {
+/// A small caps label laid out by hand, for painting into an allocated rect.
+fn hud_galley(ui: &Ui, text: &str, color: Color32) -> Arc<egui::Galley> {
     let format = egui::TextFormat {
         font_id: egui::FontId::new(theme::HUD_SIZE, theme::mono_family()),
-        color: t.text_muted,
+        color,
         extra_letter_spacing: theme::HUD_SPACING,
         ..Default::default()
     };
-    let job = egui::text::LayoutJob::single_section(text.to_uppercase(), format);
-    let galley = ui.painter().layout_job(job);
+    ui.painter()
+        .layout_job(egui::text::LayoutJob::single_section(
+            text.to_uppercase(),
+            format,
+        ))
+}
+
+/// A segmented control: one hairline around the row, a rule between neighbours,
+/// and the chosen cell in the inverted colours. Returns whether the value changed.
+fn cells<T: Copy + PartialEq>(
+    ui: &mut Ui,
+    value: &mut T,
+    options: &[(T, &'static str)],
+    t: &Tokens,
+) -> bool {
+    let mut changed = false;
+    let mut rects = Vec::with_capacity(options.len());
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for (option, label) in options {
+            let on = *value == *option;
+            let width = hud_galley(ui, label, t.text).size().x + 24.0;
+            let (rect, response) =
+                ui.allocate_exact_size(egui::vec2(width, CELL_H), Sense::click());
+            let (fill, ink) = match (on, response.hovered()) {
+                (true, _) => (t.invert_bg, t.invert_fg),
+                (false, true) => (t.sunken, t.text_strong),
+                (false, false) => (Color32::TRANSPARENT, t.text_muted),
+            };
+            let painter = ui.painter();
+            painter.rect_filled(rect, CornerRadius::ZERO, fill);
+            let galley = hud_galley(ui, label, ink);
+            painter.galley(
+                egui::pos2(rect.left() + 12.0, rect.center().y - galley.size().y / 2.0),
+                galley,
+                ink,
+            );
+            response
+                .widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, on, *label));
+            if response
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+                && !on
+            {
+                *value = *option;
+                changed = true;
+            }
+            rects.push(rect);
+        }
+    });
+    if let (Some(first), Some(last)) = (rects.first(), rects.last()) {
+        let painter = ui.painter();
+        painter.rect_stroke(
+            first.union(*last),
+            CornerRadius::ZERO,
+            t.hairline(),
+            StrokeKind::Inside,
+        );
+        for rect in rects.iter().skip(1) {
+            painter.vline(rect.left(), first.top()..=first.bottom(), t.hairline());
+        }
+    }
+    changed
+}
+
+/// A group box in the settings sheet: a hairline frame and a small caps heading.
+fn settings_panel(ui: &mut Ui, title: &str, t: &Tokens, body: impl FnOnce(&mut Ui)) {
+    Frame::new()
+        .stroke(t.hairline())
+        .inner_margin(egui::Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(theme::hud(title, t.text_muted));
+            ui.add_space(8.0);
+            body(ui);
+        });
+    ui.add_space(14.0);
+}
+
+/// The sheet's header: the title and version over an accent wash, under a 2 px
+/// rule along the card's top edge. Returns its height.
+fn sheet_hero(ui: &mut Ui, s: &Strings, t: &Tokens) -> f32 {
+    let top = ui.cursor().top();
+    let shown = Frame::new()
+        .fill(theme::tint(t.accent, 0.08))
+        .inner_margin(egui::Margin::symmetric(24, 18))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.label(theme::title(s.settings, 26.0, t.text));
+                ui.label(theme::hud(
+                    concat!("DevSweep ", env!("CARGO_PKG_VERSION")),
+                    t.text_muted,
+                ));
+            });
+        });
+    let rect = shown.response.rect;
+    let painter = ui.painter();
+    painter.rect_filled(
+        egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), 2.0)),
+        CornerRadius::ZERO,
+        t.accent,
+    );
+    painter.hline(rect.x_range(), rect.bottom() - 0.5, t.hairline());
+    ui.cursor().top() - top
+}
+
+fn language_choices(s: &Strings) -> [(LanguageChoice, &'static str); 3] {
+    [
+        (LanguageChoice::System, s.system),
+        (LanguageChoice::Zh, s.lang_zh),
+        (LanguageChoice::En, s.lang_en),
+    ]
+}
+
+fn language_label(choice: LanguageChoice, s: &Strings) -> &'static str {
+    language_choices(s)
+        .into_iter()
+        .find(|(option, _)| *option == choice)
+        .map(|(_, label)| label)
+        .unwrap_or(s.system)
+}
+
+/// A hairline badge around a mono label. Painted rather than framed: a `Frame`
+/// inside a table cell stretches to the cell's height.
+fn chip(ui: &mut Ui, text: &str, t: &Tokens) {
+    let galley = hud_galley(ui, text, t.text_muted);
     let (rect, _) = ui.allocate_exact_size(galley.size() + egui::vec2(16.0, 6.0), Sense::hover());
     ui.painter()
         .rect_stroke(rect, CornerRadius::ZERO, t.hairline(), StrokeKind::Inside);
@@ -1960,6 +2228,7 @@ mod tests {
             flash: None,
             failures_open: false,
             failures: Vec::new(),
+            settings_open: false,
         }
     }
 
@@ -2100,5 +2369,245 @@ mod tests {
         assert_eq!(size::total_size(&targets), Some(2048));
         targets[1].checked = true;
         assert_eq!(size::total_size(&targets), Some(2048));
+    }
+
+    /// Every rect fill in the frame, including the ones grouped inside a shape
+    /// vector (layers and clip groups nest them).
+    fn painted_rects(output: &egui::FullOutput) -> Vec<(egui::Rect, Color32)> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<(egui::Rect, Color32)>) {
+            match shape {
+                egui::Shape::Rect(rect) => out.push((rect.rect, rect.fill)),
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        walk(shape, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut rects = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut rects);
+        }
+        rects
+    }
+
+    /// Every painted label and the colour it was laid out in.
+    fn painted_text(output: &egui::FullOutput) -> Vec<(String, Color32)> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<(String, Color32)>) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    let color = text
+                        .galley
+                        .job
+                        .sections
+                        .first()
+                        .map_or(Color32::PLACEHOLDER, |section| section.format.color);
+                    let color = if color == Color32::PLACEHOLDER {
+                        text.override_text_color.unwrap_or(text.fallback_color)
+                    } else {
+                        color
+                    };
+                    out.push((text.galley.job.text.clone(), color));
+                }
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        walk(shape, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut texts);
+        }
+        texts
+    }
+
+    fn painted_fills(output: &egui::FullOutput) -> Vec<Color32> {
+        painted_rects(output)
+            .into_iter()
+            .map(|(_, fill)| fill)
+            .collect()
+    }
+
+    /// The chosen row is the inverted block; the others are flat until the pointer
+    /// reaches them, then they take the hover well.
+    #[test]
+    fn the_chosen_nav_row_inverts_and_the_rest_lift_on_hover() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        theme::apply(&ctx, ThemeChoice::Dark);
+        let t = theme::tokens(egui::Theme::Dark);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 200.0));
+        let other = std::cell::Cell::new(egui::Rect::NOTHING);
+        let draw = |pointer: Option<egui::Pos2>| {
+            let events = pointer
+                .map(|pos| vec![egui::Event::PointerMoved(pos)])
+                .unwrap_or_default();
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    nav_button(
+                        ui,
+                        RichText::new("Build").size(14.0),
+                        true,
+                        egui::vec2(120.0, 30.0),
+                        t,
+                    );
+                    let row = nav_button(
+                        ui,
+                        RichText::new("Other").size(14.0),
+                        false,
+                        egui::vec2(120.0, 30.0),
+                        t,
+                    );
+                    other.set(row.rect);
+                },
+            );
+            output.textures_delta.clear();
+            output
+        };
+
+        let idle = painted_fills(&draw(None));
+        assert!(idle.contains(&t.invert_bg), "the chosen row must invert");
+        assert!(
+            !idle.contains(&t.sunken),
+            "a row without the pointer must not hover: {idle:?}"
+        );
+
+        let hot = draw(Some(other.get().center()));
+        let hovered = painted_fills(&hot);
+        assert!(
+            hovered.contains(&t.sunken),
+            "the row under the pointer must lift: {hovered:?}"
+        );
+        assert!(
+            painted_text(&hot)
+                .iter()
+                .any(|(text, color)| text.starts_with("Other") && *color == t.text_strong),
+            "the hovered label must brighten, not only its fill"
+        );
+    }
+
+    /// Text on an inverted fill must use the inverted ink, not the page ink:
+    /// white on white made the chosen row and the primary button unreadable.
+    #[test]
+    fn inverted_controls_keep_their_text_readable() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        theme::apply(&ctx, ThemeChoice::Dark);
+        let t = theme::tokens(egui::Theme::Dark);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            nav_button(
+                ui,
+                RichText::new("Build").size(14.0),
+                true,
+                egui::vec2(120.0, 30.0),
+                t,
+            );
+            primary_button(ui, "Done", t, true);
+        });
+        output.textures_delta.clear();
+
+        let texts = painted_text(&output);
+        let ink = |prefix: &str| {
+            texts
+                .iter()
+                .find(|(text, _)| text.starts_with(prefix))
+                .map(|(_, color)| *color)
+                .unwrap_or_else(|| panic!("{prefix:?} was never painted: {texts:?}"))
+        };
+        assert_eq!(
+            ink("Build"),
+            t.invert_fg,
+            "the chosen row's label must not match its fill"
+        );
+        assert_eq!(
+            ink("DONE"),
+            t.invert_fg,
+            "the primary button's label must not match its fill"
+        );
+    }
+
+    /// The settings sheet lays out its two columns and marks the chosen theme cell
+    /// with the inverted block.
+    #[test]
+    fn the_settings_sheet_marks_the_chosen_theme() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        // Areas fade in; without the animation the sheet is opaque on its second frame.
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let mut app = app_with_rows(1);
+        app.settings_open = true;
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 600.0));
+        let draw = |app: &mut DevSweepApp| {
+            let s = app.strings();
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| app.settings_dialog(ui.ctx(), theme::tokens(egui::Theme::Dark), s),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        // A modal's area only paints from the frame after it appears.
+        draw(&mut app);
+        let output = draw(&mut app);
+
+        let fills = painted_fills(&output);
+        assert!(
+            fills.contains(&theme::DARK.invert_bg),
+            "the chosen theme cell must invert: {fills:?}"
+        );
+
+        // The cells and the dropdown are one row each, not one control per line.
+        let tall: Vec<egui::Rect> = painted_rects(&output)
+            .into_iter()
+            .map(|(rect, _)| rect)
+            .filter(|rect| (rect.height() - CELL_H).abs() < 0.5)
+            .collect();
+        let side_by_side = tall.iter().any(|left| {
+            tall.iter().any(|right| {
+                left != right
+                    && (left.top() - right.top()).abs() < 0.5
+                    && (left.left() - right.left()).abs() > 0.5
+            })
+        });
+        assert!(
+            side_by_side,
+            "the cells must share one line, not one per line: {tall:?}"
+        );
+
+        // The sheet fits the window, and the footer closes just under its button.
+        let rects = painted_rects(&output);
+        let card = rects
+            .iter()
+            .filter(|(rect, fill)| *fill == theme::DARK.bg && rect.width() > 300.0)
+            .max_by(|a, b| a.0.width().total_cmp(&b.0.width()))
+            .map(|(rect, _)| *rect)
+            .expect("the sheet has a card");
+        assert!(
+            screen.contains_rect(card),
+            "the sheet must fit the window, card {card:?}"
+        );
+        let done = rects
+            .iter()
+            .filter(|(rect, fill)| *fill == theme::DARK.invert_bg && rect.height() < 40.0)
+            .max_by(|a, b| a.0.top().total_cmp(&b.0.top()))
+            .map(|(rect, _)| *rect)
+            .expect("the footer has a primary button");
+        assert!(
+            card.bottom() - done.bottom() <= 18.0,
+            "the footer must not leave a gap under Done: card {card:?}, button {done:?}"
+        );
+        assert!(app.settings_open, "the sheet stays open without a close");
     }
 }

@@ -25,6 +25,8 @@ pub struct Tokens {
     pub border_strong: Color32,
     /// Body text.
     pub text: Color32,
+    /// Headings, and text lifted by the pointer.
+    pub text_strong: Color32,
     /// Secondary text.
     pub text_muted: Color32,
     /// The brand blue, for surfaces.
@@ -57,6 +59,7 @@ pub const DARK: Tokens = Tokens {
     border: ink_alpha(0xf2f1ee, 38),
     border_strong: ink_alpha(0xf2f1ee, 102),
     text: hex(0xf2f1ee),
+    text_strong: hex(0xffffff),
     text_muted: ink_alpha(0xf2f1ee, 153),
     accent: hex(0x2d81ff),
     accent_ink: hex(0x74aaff),
@@ -74,6 +77,7 @@ pub const LIGHT: Tokens = Tokens {
     border: ink_alpha(0x101014, 41),
     border_strong: ink_alpha(0x101014, 102),
     text: hex(0x101014),
+    text_strong: hex(0x000000),
     text_muted: ink_alpha(0x101014, 158),
     accent: hex(0x2d81ff),
     accent_ink: hex(0x1659c4),
@@ -95,6 +99,11 @@ impl Tokens {
     pub fn hairline(&self) -> Stroke {
         Stroke::new(1.0, self.border)
     }
+}
+
+/// `color` at `alpha` (0–1), laid over whatever is behind it.
+pub fn tint(color: Color32, alpha: f32) -> Color32 {
+    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), (alpha * 255.0) as u8)
 }
 
 /// Apply the saved preference; `ThemeChoice::System` follows the OS.
@@ -145,13 +154,13 @@ pub fn hud(text: impl Into<String>, color: Color32) -> RichText {
         .color(color)
 }
 
-/// A button's label: 12 px mono bold, upper case, 0.12 em apart.
-pub fn button_text(text: impl Into<String>, color: Color32) -> RichText {
+/// A button's label: 12 px mono bold, upper case, 0.12 em apart. The colour comes
+/// from the button's own state, so it can follow the pointer.
+pub fn button_text(text: impl Into<String>) -> RichText {
     RichText::new(text.into().to_uppercase())
         .size(12.0)
         .family(mono_bold_family())
         .extra_letter_spacing(1.4)
-        .color(color)
 }
 
 /// Geist Mono 500: labels drawn by hand rather than through `RichText`.
@@ -264,18 +273,35 @@ fn visuals(theme: Theme, t: &Tokens) -> Visuals {
     v.menu_corner_radius = CornerRadius::ZERO;
     v.window_shadow = shadow(theme == Theme::Dark);
     v.popup_shadow = shadow(theme == Theme::Dark);
-    v.override_text_color = Some(t.text);
+    // No `override_text_color`: it outranks a widget's own state colour, and the
+    // selected/inverted controls need their text to follow the state.
     v.hyperlink_color = t.accent_ink;
     v.selection.bg_fill = t.accent;
     v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
     v.warn_fg_color = t.warn;
     v.error_fg_color = t.danger;
     for (w, fill, stroke, fg) in [
-        (&mut v.widgets.noninteractive, t.bg, t.border, t.text_muted),
+        // Body text lives here: plain labels take the non-interactive colour.
+        (&mut v.widgets.noninteractive, t.bg, t.border, t.text),
         (&mut v.widgets.inactive, t.bg, t.border, t.text),
-        (&mut v.widgets.hovered, t.sunken, t.border_strong, t.text),
-        (&mut v.widgets.active, t.sunken, t.border_strong, t.text),
-        (&mut v.widgets.open, t.sunken, t.border_strong, t.text),
+        (
+            &mut v.widgets.hovered,
+            t.sunken,
+            t.border_strong,
+            t.text_strong,
+        ),
+        (
+            &mut v.widgets.active,
+            t.sunken,
+            t.border_strong,
+            t.text_strong,
+        ),
+        (
+            &mut v.widgets.open,
+            t.sunken,
+            t.border_strong,
+            t.text_strong,
+        ),
     ] {
         w.bg_fill = fill;
         w.weak_bg_fill = fill;
