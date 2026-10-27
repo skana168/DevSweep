@@ -18,7 +18,7 @@ A local GUI for finding and cleaning development caches on macOS and Windows.
 - 默认把内容移入**废纸篓**（macOS）/ 回收站（Windows），可在设置中改为直接删除
 - **全局缓存**页列出 npm、Gradle、pnpm、bun、Yarn、pub、CocoaPods、Playwright、Xcode DerivedData、Cargo registry、pip 等缓存的路径与体积，逐条清理
 - 中文 / English 界面（默认跟随系统），深色 / 浅色主题
-- 清理规则可用 `rules.toml` 关闭、改默认勾选、追加自定义目录
+- 项目内的清理规则可用 `rules.toml` 关闭、改默认勾选、追加自定义目录；全局缓存清单固定，不受其影响
 
 ### 安装
 
@@ -107,7 +107,7 @@ cargo build --release  # Windows 便携 exe：target\release\devsweep.exe
 - Cleaning moves things to the **Trash** by default (Recycle Bin on Windows); switch to permanent deletion in settings
 - A **Global caches** view lists npm, Gradle, pnpm, bun, Yarn, pub, CocoaPods, Playwright, Xcode DerivedData, Cargo registry and pip caches with sizes, cleared one entry at a time
 - Chinese / English UI (follows the system by default), dark / light theme
-- Rules can be disabled, re-defaulted or extended with `rules.toml`
+- Project rules can be disabled, re-defaulted or extended with `rules.toml`; the global cache list is fixed and unaffected
 
 ### Install
 
