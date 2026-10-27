@@ -15,14 +15,19 @@ use devsweep::size::{self, SizeEvent, SizeRequest};
 use eframe::CreationContext;
 use eframe::egui::{
     self, Align, Button, Checkbox, Color32, CornerRadius, Frame, Key, KeyboardShortcut, Label,
-    Layout, Modifiers, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit, Ui, UiBuilder,
+    Layout, Modifiers, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit, Ui,
 };
+use egui_extras::{Column, TableBuilder, TableRow};
 
 use crate::i18n::{Lang, Strings};
 use crate::theme::{self, Tokens};
 
 /// A window that spent this long in the background gets a fresh scan on focus.
 const REFRESH_AFTER: Duration = Duration::from_secs(30);
+
+/// A project row carries a name and a path; a target row carries one line.
+const PROJECT_ROW_H: f32 = 56.0;
+const TARGET_ROW_H: f32 = 30.0;
 
 fn search_id() -> egui::Id {
     egui::Id::unique("project_search")
@@ -94,7 +99,36 @@ struct CacheRow {
 struct ProjectEntry {
     targets: Vec<Target>,
     expanded: bool,
-    selected: bool,
+}
+
+/// A project's checked state, derived from its targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TriState {
+    Off,
+    Partial,
+    On,
+}
+
+impl ProjectEntry {
+    fn state(&self) -> TriState {
+        let checked = self.targets.iter().filter(|target| target.checked).count();
+        if checked == 0 {
+            TriState::Off
+        } else if checked == self.targets.len() {
+            TriState::On
+        } else {
+            TriState::Partial
+        }
+    }
+
+    /// The parent's checkbox: check the safe targets. Risky ones stay out unless the
+    /// project has nothing else, so the row can never dead-end; clearing always clears.
+    fn set_checked(&mut self, checked: bool) {
+        let safe_only = checked && self.targets.iter().any(|target| !target.dangerous);
+        for target in &mut self.targets {
+            target.checked = checked && !(safe_only && target.dangerous);
+        }
+    }
 }
 
 struct Measurement {
@@ -220,7 +254,6 @@ impl DevSweepApp {
                 .or_insert_with(|| ProjectEntry {
                     targets: rules::expand_targets(project, rules),
                     expanded: false,
-                    selected: false,
                 });
         }
     }
@@ -368,39 +401,39 @@ impl DevSweepApp {
         self.projects
             .iter()
             .filter_map(|project| self.entries.get(&project.path))
-            .filter(|entry| entry.selected)
+            .filter(|entry| entry.state() != TriState::Off)
             .all(|entry| size::checked_size(&entry.targets).is_some())
     }
 
-    /// Shift extends the selection from the anchor, in the visible list order.
-    fn toggle_selection(&mut self, visible: &[usize], position: usize, extend: bool) {
+    /// Sets a project's targets, and with Shift the whole range from the anchor, in the
+    /// visible list order.
+    fn toggle_selection(
+        &mut self,
+        visible: &[usize],
+        position: usize,
+        extend: bool,
+        checked: bool,
+    ) {
         let path = self.projects[visible[position]].path.clone();
-        // The checkbox already flipped this row; use the new value for the range.
-        let Some(selected) = self.entries.get(&path).map(|entry| entry.selected) else {
-            return;
-        };
 
-        if extend {
-            if let Some(anchor) = self.selection_anchor.as_ref().and_then(|anchor| {
+        if extend
+            && let Some(anchor) = self.selection_anchor.as_ref().and_then(|anchor| {
                 visible
                     .iter()
                     .position(|&index| &self.projects[index].path == anchor)
-            }) {
-                let (from, to) = (anchor.min(position), anchor.max(position));
-                for &index in &visible[from..=to] {
-                    let path = &self.projects[index].path;
-                    if let Some(entry) = self.entries.get_mut(path) {
-                        if !entry.targets.is_empty() {
-                            entry.selected = selected;
-                        }
-                    }
+            })
+        {
+            let (from, to) = (anchor.min(position), anchor.max(position));
+            for &index in &visible[from..=to] {
+                if let Some(entry) = self.entries.get_mut(&self.projects[index].path) {
+                    entry.set_checked(checked);
                 }
-                return;
             }
+            return;
         }
 
         if let Some(entry) = self.entries.get_mut(&path) {
-            entry.selected = selected;
+            entry.set_checked(checked);
         }
         self.selection_anchor = Some(path);
     }
@@ -419,24 +452,43 @@ impl DevSweepApp {
             .collect()
     }
 
-    fn all_selected(&self, paths: &[PathBuf]) -> bool {
-        !paths.is_empty()
-            && paths
-                .iter()
-                .all(|path| self.entries.get(path).is_some_and(|entry| entry.selected))
+    /// The header checkbox over `paths`: one state if they all agree, mixed otherwise.
+    fn bulk_state(&self, paths: &[PathBuf]) -> TriState {
+        let mut states = paths
+            .iter()
+            .filter_map(|path| self.entries.get(path))
+            .map(ProjectEntry::state);
+        let Some(first) = states.next() else {
+            return TriState::Off;
+        };
+        if states.all(|state| state == first) {
+            first
+        } else {
+            TriState::Partial
+        }
     }
 
-    /// ⌘/Ctrl+A: select every visible project when not all are selected, otherwise clear.
+    /// Whether every project already has something chosen; the bulk toggle fills when not.
+    fn all_chosen(&self, paths: &[PathBuf]) -> bool {
+        !paths.is_empty()
+            && paths.iter().all(|path| {
+                self.entries
+                    .get(path)
+                    .is_some_and(|entry| entry.state() != TriState::Off)
+            })
+    }
+
+    /// ⌘/Ctrl+A: fill every visible project, or clear them when all are already chosen.
     fn toggle_select_all(&mut self, visible: &[usize]) {
         let selectable = self.selectable(visible);
-        let selected = !self.all_selected(&selectable);
-        self.set_selected(&selectable, selected);
+        let checked = !self.all_chosen(&selectable);
+        self.set_selected(&selectable, checked);
     }
 
     fn set_selected(&mut self, paths: &[PathBuf], selected: bool) {
         for path in paths {
             if let Some(entry) = self.entries.get_mut(path) {
-                entry.selected = selected;
+                entry.set_checked(selected);
             }
         }
         self.selection_anchor = None;
@@ -448,7 +500,7 @@ impl DevSweepApp {
             .iter()
             .filter_map(|project| {
                 let entry = self.entries.get(&project.path)?;
-                entry.selected.then_some(PlanProject {
+                (entry.state() != TriState::Off).then_some(PlanProject {
                     path: &project.path,
                     stack: project.stack,
                     targets: &entry.targets,
@@ -541,7 +593,7 @@ impl DevSweepApp {
                         entry
                             .targets
                             .retain(|target| !deleted.contains(&target.path));
-                        entry.selected = false;
+                        entry.set_checked(false);
                         entry.expanded = false;
                     }
                     for row in &mut self.caches {
@@ -589,41 +641,47 @@ impl DevSweepApp {
         }
     }
 
-    fn preview_panel(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings, plan: &DeletePlan) {
+    /// The dry-run preview: what the next cleanup would delete, before the confirm dialog.
+    fn preview_dialog(&mut self, ctx: &egui::Context, t: &Tokens, s: &Strings, plan: &DeletePlan) {
         if !self.preview_open {
             return;
         }
         let mut close = false;
 
-        egui::Panel::right("preview")
-            .exact_size(360.0)
-            .resizable(false)
-            .frame(Frame::new().fill(t.surface).inner_margin(16))
-            .show(ui, |ui| {
+        let modal = egui::Modal::new(egui::Id::unique("preview"))
+            .frame(
+                Frame::new()
+                    .fill(t.bg)
+                    .stroke(Stroke::new(1.0, t.border_strong))
+                    .shadow(theme::shadow(ctx.theme() == egui::Theme::Dark))
+                    .inner_margin(24),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(640.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(s.preview).size(16.0).strong().color(t.text));
+                    ui.label(theme::title(s.preview, 20.0, t.text));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let button =
                             Button::new(RichText::new("×").color(t.text_muted)).frame(false);
                         if ui.add(button).clicked() {
                             close = true;
                         }
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new(size::format_size(plan.total_bytes))
+                                .size(16.0)
+                                .monospace()
+                                .color(t.good),
+                        );
                     });
                 });
-                ui.add_space(8.0);
-                ui.label(
-                    RichText::new(format!(
-                        "{} {}",
-                        s.preview_total,
-                        size::format_size(plan.total_bytes)
-                    ))
-                    .size(13.0)
-                    .color(t.text_muted),
-                );
-                ui.add_space(8.0);
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(6.0);
 
                 ScrollArea::vertical()
-                    .auto_shrink([false, false])
+                    .max_height(420.0)
+                    .auto_shrink([false, true])
                     .show(ui, |ui| {
                         let mut current: Option<&Path> = None;
                         for item in &plan.items {
@@ -690,9 +748,16 @@ impl DevSweepApp {
                             }
                         }
                     });
+
+                ui.add_space(20.0);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if secondary_button(ui, s.close, t) {
+                        close = true;
+                    }
+                });
             });
 
-        if close {
+        if close || modal.should_close() {
             self.preview_open = false;
         }
     }
@@ -719,13 +784,11 @@ impl DevSweepApp {
         let mut show_failures = false;
 
         Frame::new()
-            .fill(t.accent.gamma_multiply(0.12))
-            .stroke(Stroke::new(1.0, t.accent))
-            .corner_radius(10)
+            .stroke(t.hairline())
             .inner_margin(egui::Margin::symmetric(16, 10))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(label).size(14.0).strong().color(t.accent));
+                    ui.label(RichText::new(label).size(14.0).color(t.good));
                     if failure_count > 0 {
                         let button = Button::new(
                             RichText::new(format!("{} ({failure_count})", s.failures))
@@ -792,14 +855,13 @@ impl DevSweepApp {
         let modal = egui::Modal::new(egui::Id::unique("confirm_delete"))
             .frame(
                 Frame::new()
-                    .fill(t.surface)
-                    .stroke(Stroke::new(1.0, t.border))
-                    .corner_radius(16)
+                    .fill(t.bg)
+                    .stroke(Stroke::new(1.0, t.border_strong))
                     .inner_margin(24),
             )
             .show(ctx, |ui| {
                 ui.set_width(440.0);
-                ui.label(RichText::new(title).size(18.0).strong().color(t.text));
+                ui.label(theme::title(title, 20.0, t.text));
                 ui.add_space(12.0);
                 if let Cleanup::Projects = cleanup {
                     stat_row(ui, s.projects, &projects.to_string(), t);
@@ -829,7 +891,7 @@ impl DevSweepApp {
                 ui.add_space(20.0);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     // Unknown sizes could hide a > 5 GB target, so wait for them.
-                    if primary_button(ui, s.confirm, t, known && (large.is_empty() || ack)) {
+                    if danger_button(ui, s.confirm, t, known && (large.is_empty() || ack)) {
                         confirm = true;
                     }
                     ui.add_space(4.0);
@@ -860,19 +922,17 @@ impl DevSweepApp {
         let modal = egui::Modal::new(egui::Id::unique("delete_failures"))
             .frame(
                 Frame::new()
-                    .fill(t.surface)
-                    .stroke(Stroke::new(1.0, t.border))
-                    .corner_radius(16)
+                    .fill(t.bg)
+                    .stroke(Stroke::new(1.0, t.border_strong))
                     .inner_margin(24),
             )
             .show(ctx, |ui| {
                 ui.set_width(560.0);
-                ui.label(
-                    RichText::new(format!("{} ({})", s.failures, self.failures.len()))
-                        .size(18.0)
-                        .strong()
-                        .color(t.danger),
-                );
+                ui.label(theme::title(
+                    format!("{} ({})", s.failures, self.failures.len()),
+                    20.0,
+                    t.danger,
+                ));
                 ui.add_space(12.0);
                 ScrollArea::vertical()
                     .max_height(320.0)
@@ -923,24 +983,16 @@ impl DevSweepApp {
     }
 
     fn sidebar(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings) {
-        ui.label(RichText::new("DevSweep").size(20.0).strong().color(t.text));
+        ui.label(theme::title("DevSweep", 22.0, t.text));
         ui.add_space(16.0);
-        ui.label(
-            RichText::new(s.roots.to_uppercase())
-                .size(11.0)
-                .color(t.text_muted),
-        );
+        ui.label(theme::hud(s.roots, t.text_muted));
         ui.add_space(4.0);
 
         self.roots_editor(ui, t, s);
 
         ui.add_space(20.0);
         let width = ui.available_width();
-        ui.label(
-            RichText::new(s.type_filter.to_uppercase())
-                .size(11.0)
-                .color(t.text_muted),
-        );
+        ui.label(theme::hud(s.type_filter, t.text_muted));
         ui.add_space(4.0);
         let filters = std::iter::once((None, s.all)).chain(
             [Stack::Flutter, Stack::Android, Stack::Ios, Stack::Node]
@@ -958,7 +1010,7 @@ impl DevSweepApp {
             let active = self.view == View::Projects && self.filter == filter;
             let label = RichText::new(format!("{label}  {count}")).size(14.0);
             if ui
-                .add_sized([width, 30.0], Button::selectable(active, label))
+                .add_sized([width, 30.0], nav_button(label, active, t))
                 .clicked()
             {
                 self.view = View::Projects;
@@ -974,9 +1026,10 @@ impl DevSweepApp {
         if ui
             .add_sized(
                 [width, 32.0],
-                Button::selectable(
-                    self.view == View::Caches,
+                nav_button(
                     RichText::new(format!("{}  {total}", s.global_caches)).size(14.0),
+                    self.view == View::Caches,
+                    t,
                 ),
             )
             .clicked()
@@ -988,9 +1041,10 @@ impl DevSweepApp {
         if ui
             .add_sized(
                 [width, 32.0],
-                Button::selectable(
-                    self.view == View::Settings,
+                nav_button(
                     RichText::new(s.settings).size(14.0),
+                    self.view == View::Settings,
+                    t,
                 ),
             )
             .clicked()
@@ -1039,10 +1093,9 @@ impl DevSweepApp {
 
         ui.add_space(8.0);
         let width = ui.available_width();
-        let button = Button::new(RichText::new(format!("+ {}", s.add_directory)).size(14.0))
+        let button = Button::new(theme::button_text(format!("+ {}", s.add_directory), t.text))
             .fill(t.bg)
-            .stroke(Stroke::new(1.0, t.border))
-            .corner_radius(8);
+            .stroke(t.hairline());
         if ui.add_sized([width, 34.0], button).clicked() {
             self.add_directory(ui.ctx());
         }
@@ -1089,14 +1142,10 @@ impl DevSweepApp {
         ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.label(RichText::new(s.settings).size(18.0).strong().color(t.text));
+                ui.label(theme::title(s.settings, 26.0, t.text));
                 ui.add_space(16.0);
 
-                ui.label(
-                    RichText::new(s.language.to_uppercase())
-                        .size(11.0)
-                        .color(t.text_muted),
-                );
+                ui.label(theme::hud(s.language, t.text_muted));
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     for (choice, label) in [
@@ -1105,10 +1154,11 @@ impl DevSweepApp {
                         (LanguageChoice::En, s.lang_en),
                     ] {
                         if ui
-                            .selectable_label(
-                                self.config.language == choice,
+                            .add(nav_button(
                                 RichText::new(label).size(14.0),
-                            )
+                                self.config.language == choice,
+                                t,
+                            ))
                             .clicked()
                         {
                             self.config.language = choice;
@@ -1119,11 +1169,7 @@ impl DevSweepApp {
                 });
                 ui.add_space(20.0);
 
-                ui.label(
-                    RichText::new(s.theme.to_uppercase())
-                        .size(11.0)
-                        .color(t.text_muted),
-                );
+                ui.label(theme::hud(s.theme, t.text_muted));
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     for (choice, label) in [
@@ -1132,10 +1178,11 @@ impl DevSweepApp {
                         (ThemeChoice::Light, s.light),
                     ] {
                         if ui
-                            .selectable_label(
-                                self.config.theme == choice,
+                            .add(nav_button(
                                 RichText::new(label).size(14.0),
-                            )
+                                self.config.theme == choice,
+                                t,
+                            ))
                             .clicked()
                         {
                             self.config.theme = choice;
@@ -1146,11 +1193,7 @@ impl DevSweepApp {
                 });
                 ui.add_space(20.0);
 
-                ui.label(
-                    RichText::new(s.delete_mode.to_uppercase())
-                        .size(11.0)
-                        .color(t.text_muted),
-                );
+                ui.label(theme::hud(s.delete_mode, t.text_muted));
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     for (mode, label) in [
@@ -1158,10 +1201,11 @@ impl DevSweepApp {
                         (DeleteMode::Direct, s.delete_direct),
                     ] {
                         if ui
-                            .selectable_label(
-                                self.config.delete_mode == mode,
+                            .add(nav_button(
                                 RichText::new(label).size(14.0),
-                            )
+                                self.config.delete_mode == mode,
+                                t,
+                            ))
                             .clicked()
                         {
                             self.config.delete_mode = mode;
@@ -1171,20 +1215,12 @@ impl DevSweepApp {
                 });
                 ui.add_space(20.0);
 
-                ui.label(
-                    RichText::new(s.roots.to_uppercase())
-                        .size(11.0)
-                        .color(t.text_muted),
-                );
+                ui.label(theme::hud(s.roots, t.text_muted));
                 ui.add_space(4.0);
                 self.roots_editor(ui, t, s);
                 ui.add_space(20.0);
 
-                ui.label(
-                    RichText::new(s.rules_file.to_uppercase())
-                        .size(11.0)
-                        .color(t.text_muted),
-                );
+                ui.label(theme::hud(s.rules_file, t.text_muted));
                 ui.add_space(4.0);
                 if let Some(path) = config::rules_path() {
                     ui.label(
@@ -1234,12 +1270,11 @@ impl DevSweepApp {
         self.flash_banner(ui, t, s);
 
         ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(format!("{} · {}", s.projects, visible.len()))
-                    .size(18.0)
-                    .strong()
-                    .color(t.text),
-            );
+            ui.label(theme::title(
+                format!("{} · {}", s.projects, visible.len()),
+                26.0,
+                t.text,
+            ));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let count = plan.items.len();
                 let label = if count == 0 {
@@ -1253,18 +1288,21 @@ impl DevSweepApp {
                     format!("{} {} {} · {}", s.clean, count, s.items, total)
                 };
                 let running = self.execution.is_some();
-                if primary_button(ui, &label, t, count > 0 && !running) {
+                if danger_button(ui, &label, t, count > 0 && !running) {
                     self.pending = Some(Cleanup::Projects);
                     self.confirm_large_ack = false;
+                    self.preview_open = false;
                 }
 
                 ui.add_space(4.0);
-                let button = Button::new(RichText::new(s.preview).size(14.0))
-                    .fill(t.bg)
-                    .stroke(Stroke::new(1.0, t.border))
-                    .corner_radius(8)
-                    .min_size(egui::vec2(96.0, 38.0));
-                if ui.add_enabled(count > 0, button).clicked() {
+                if action_button(
+                    ui,
+                    s.preview,
+                    Kind::Secondary,
+                    t,
+                    count > 0,
+                    egui::vec2(96.0, 38.0),
+                ) {
                     self.preview_open = true;
                 }
 
@@ -1275,7 +1313,10 @@ impl DevSweepApp {
                     TextEdit::singleline(&mut search)
                         .id(search_id())
                         .hint_text(s.search_hint)
-                        .desired_width(190.0),
+                        .desired_width(190.0)
+                        .min_size(egui::vec2(0.0, 38.0))
+                        .margin(egui::Margin::symmetric(10, 0))
+                        .align(egui::Align2::LEFT_CENTER),
                 );
                 self.search = search;
             });
@@ -1301,52 +1342,116 @@ impl DevSweepApp {
         }
 
         let selectable = self.selectable(visible);
-        let all_selected = self.all_selected(&selectable);
-        let mut all = all_selected;
+        let bulk = self.bulk_state(&selectable);
+        let all_chosen = self.all_chosen(&selectable);
         let mut select_all = false;
-        ui.horizontal(|ui| {
-            select_all = ui
-                .add_enabled(!selectable.is_empty(), Checkbox::without_text(&mut all))
-                .on_hover_text(s.select_all)
-                .clicked();
-            if sort_header(ui, s.projects, "↑", self.sort == Sort::Name, t) {
-                self.sort = Sort::Name;
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if sort_header(ui, s.reclaimable, "↓", self.sort == Sort::Size, t) {
-                    self.sort = Sort::Size;
-                }
-            });
-        });
-        if select_all {
-            self.set_selected(&selectable, !all_selected);
-        }
-        ui.add_space(4.0);
-
+        let mut sort_clicked = None;
         let mut toggled = None;
-        ScrollArea::vertical()
-            .auto_shrink([false, false])
+
+        // Rules run across the whole table, padding included.
+        let span = ui.available_rect_before_wrap().x_range();
+        let show_items = ui.available_width() >= 700.0;
+        let sort = self.sort;
+
+        Frame::new()
+            .stroke(t.hairline())
+            .inner_margin(egui::Margin::symmetric(16, 0))
             .show(ui, |ui| {
-                let entries = &mut self.entries;
-                for (position, &index) in visible.iter().enumerate() {
-                    let project = &self.projects[index];
-                    let Some(entry) = entries.get_mut(&project.path) else {
-                        continue;
-                    };
-                    if project_row(ui, project, entry, t, s) {
-                        toggled = Some(position);
-                    }
-                    if entry.expanded {
-                        for target in &mut entry.targets {
-                            target_row(ui, project, target, t, s);
-                        }
-                    }
-                    ui.add_space(6.0);
+                let mut table = TableBuilder::new(ui)
+                    .striped(false)
+                    .cell_layout(Layout::left_to_right(Align::Center))
+                    .column(Column::exact(40.0))
+                    .column(Column::remainder().at_least(220.0).clip(true))
+                    .column(Column::exact(120.0));
+                if show_items {
+                    table = table.column(Column::exact(80.0));
                 }
+                table
+                    .column(Column::exact(120.0))
+                    .header(42.0, |mut header| {
+                        header.col(|ui| {
+                            select_all = tri_checkbox(ui, t, bulk, !selectable.is_empty())
+                                .on_hover_text(s.select_all)
+                                .clicked();
+                            row_rule(ui, t, span);
+                        });
+                        header.col(|ui| {
+                            if sort_header(ui, s.project_column, "↑", sort == Sort::Name, t) {
+                                sort_clicked = Some(Sort::Name);
+                            }
+                        });
+                        header.col(|ui| {
+                            ui.label(theme::hud(s.stack_column, t.text_muted));
+                        });
+                        if show_items {
+                            header.col(|ui| {
+                                ui.label(theme::hud(s.items, t.text_muted));
+                            });
+                        }
+                        header.col(|ui| {
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if sort_header(ui, s.reclaimable, "↓", sort == Sort::Size, t) {
+                                    sort_clicked = Some(Sort::Size);
+                                }
+                            });
+                        });
+                    })
+                    .body(|mut body| {
+                        let projects = &self.projects;
+                        let entries = &mut self.entries;
+                        for (position, &index) in visible.iter().enumerate() {
+                            let project = &projects[index];
+                            let Some(entry) = entries.get_mut(&project.path) else {
+                                continue;
+                            };
+                            let last_project = position + 1 == visible.len();
+                            let children = entry.expanded && !entry.targets.is_empty();
+
+                            let mut toggle = None;
+                            body.row(PROJECT_ROW_H, |mut row| {
+                                toggle = project_table_row(
+                                    &mut row,
+                                    project,
+                                    entry,
+                                    last_project && !children,
+                                    show_items,
+                                    t,
+                                    s,
+                                    span,
+                                );
+                            });
+                            toggled = toggle.map(|checked| (position, checked));
+                            if children {
+                                let targets = &mut entry.targets;
+                                let last_target = targets.len() - 1;
+                                for (i, target) in targets.iter_mut().enumerate() {
+                                    body.row(TARGET_ROW_H, |mut row| {
+                                        target_table_row(
+                                            &mut row,
+                                            project,
+                                            target,
+                                            last_project && i == last_target,
+                                            show_items,
+                                            t,
+                                            s,
+                                            span,
+                                        );
+                                    });
+                                }
+                            }
+                        }
+                    });
             });
-        if let Some(position) = toggled {
+
+        if select_all {
+            self.set_selected(&selectable, !all_chosen);
+        }
+        if let Some(key) = sort_clicked {
+            self.sort = key;
+        }
+        if let Some((position, checked)) = toggled {
             let extend = ui.input(|input| input.modifiers.shift);
-            self.toggle_selection(visible, position, extend);
+            self.toggle_selection(visible, position, extend, checked);
         }
     }
 
@@ -1354,18 +1459,13 @@ impl DevSweepApp {
         self.flash_banner(ui, t, s);
 
         ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(s.global_caches)
-                    .size(18.0)
-                    .strong()
-                    .color(t.text),
-            );
+            ui.label(theme::title(s.global_caches, 26.0, t.text));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let total = self
                     .cache_total()
                     .map(size::format_size)
                     .unwrap_or_else(|| "…".to_string());
-                ui.label(RichText::new(total).size(16.0).monospace().color(t.accent));
+                ui.label(RichText::new(total).size(18.0).monospace().color(t.good));
             });
         });
         ui.add_space(4.0);
@@ -1388,11 +1488,7 @@ impl DevSweepApp {
                     let mut heading = false;
                     for row in self.caches.iter_mut().filter(|row| row.rule.group == group) {
                         if !heading {
-                            ui.label(
-                                RichText::new(title.to_uppercase())
-                                    .size(11.0)
-                                    .color(t.text_muted),
-                            );
+                            ui.label(theme::hud(title, t.text_muted));
                             ui.add_space(6.0);
                             heading = true;
                         }
@@ -1419,13 +1515,12 @@ impl DevSweepApp {
             ui.add_space((ui.available_height() * 0.18).clamp(24.0, 140.0));
             Frame::new()
                 .fill(t.surface)
-                .stroke(Stroke::new(1.0, t.border))
-                .corner_radius(16)
+                .stroke(t.hairline())
                 .inner_margin(32)
                 .show(ui, |ui| {
                     ui.set_width(440.0);
                     ui.vertical_centered(|ui| {
-                        ui.label(RichText::new(title).size(20.0).strong().color(t.text));
+                        ui.label(theme::title(title, 22.0, t.text));
                         ui.add_space(8.0);
                         ui.label(RichText::new(body).size(14.0).color(t.text_muted));
                         if let Some(action) = action {
@@ -1472,7 +1567,6 @@ impl eframe::App for DevSweepApp {
         egui::Panel::bottom("status_bar")
             .exact_size(24.0)
             .resizable(false)
-            .show_separator_line(false)
             .frame(
                 Frame::new()
                     .fill(t.surface)
@@ -1511,11 +1605,10 @@ impl eframe::App for DevSweepApp {
                         }
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(concat!("DevSweep ", env!("CARGO_PKG_VERSION")))
-                                .size(11.0)
-                                .color(t.text_muted),
-                        );
+                        ui.label(theme::hud(
+                            concat!("DevSweep ", env!("CARGO_PKG_VERSION")),
+                            t.text_muted,
+                        ));
                     });
                 });
             });
@@ -1523,7 +1616,6 @@ impl eframe::App for DevSweepApp {
         egui::Panel::left("scan_roots")
             .exact_size(220.0)
             .resizable(false)
-            .show_separator_line(false)
             .frame(Frame::new().fill(t.surface).inner_margin(16))
             .show(ui, |ui| self.sidebar(ui, t, s));
 
@@ -1548,9 +1640,6 @@ impl eframe::App for DevSweepApp {
         }
 
         let plan = self.build_plan();
-        if self.view == View::Projects {
-            self.preview_panel(ui, t, s, &plan);
-        }
 
         egui::CentralPanel::default()
             .frame(Frame::new().fill(t.bg).inner_margin(24))
@@ -1559,6 +1648,8 @@ impl eframe::App for DevSweepApp {
                 View::Caches => self.caches_content(ui, t, s),
                 View::Settings => self.settings_content(ui, t, s),
             });
+
+        self.preview_dialog(ui.ctx(), t, s, &plan);
 
         if let Some(cleanup) = self.pending {
             let pending_plan = self.plan_for(cleanup);
@@ -1576,15 +1667,63 @@ impl eframe::App for DevSweepApp {
     }
 }
 
-fn secondary_button(ui: &mut Ui, label: &str, t: &Tokens) -> bool {
-    ui.add(
-        Button::new(RichText::new(label).size(14.0))
-            .fill(t.bg)
-            .stroke(Stroke::new(1.0, t.border))
-            .corner_radius(8)
-            .min_size(egui::vec2(88.0, 34.0)),
+fn nav_button<'a>(label: RichText, active: bool, t: &Tokens) -> Button<'a> {
+    // The chosen one is a well with a stronger hairline; craft inverts on hover, not on state.
+    Button::new(label)
+        .fill(if active {
+            t.sunken
+        } else {
+            Color32::TRANSPARENT
+        })
+        .stroke(if active {
+            Stroke::new(1.0, t.border_strong)
+        } else {
+            Stroke::NONE
+        })
+}
+
+/// Which of the reference's button variants.
+#[derive(Clone, Copy)]
+enum Kind {
+    /// A solid block in the inverted colours: the main, non-destructive action.
+    Primary,
+    /// Outlined: opens something, or cancels.
+    Secondary,
+    /// Solid red: the click that deletes.
+    Danger,
+}
+
+fn action_button(
+    ui: &mut Ui,
+    label: &str,
+    kind: Kind,
+    t: &Tokens,
+    enabled: bool,
+    min_size: egui::Vec2,
+) -> bool {
+    let (fill, ink, stroke) = match kind {
+        Kind::Primary => (t.invert_bg, t.invert_fg, Stroke::NONE),
+        Kind::Secondary => (t.bg, t.text, t.hairline()),
+        Kind::Danger => (t.danger, Color32::WHITE, Stroke::NONE),
+    };
+    // Disabled fades the whole button, the way the reference does it.
+    let (fill, ink) = if enabled {
+        (fill, ink)
+    } else {
+        (fill.gamma_multiply(0.5), ink.gamma_multiply(0.5))
+    };
+    ui.add_enabled(
+        enabled,
+        Button::new(theme::button_text(label, ink))
+            .fill(fill)
+            .stroke(stroke)
+            .min_size(min_size),
     )
     .clicked()
+}
+
+fn secondary_button(ui: &mut Ui, label: &str, t: &Tokens) -> bool {
+    action_button(ui, label, Kind::Secondary, t, true, egui::vec2(88.0, 34.0))
 }
 
 /// A clickable column label; the active column carries a direction arrow.
@@ -1595,7 +1734,7 @@ fn sort_header(ui: &mut Ui, label: &str, arrow: &str, active: bool, t: &Tokens) 
         label.to_string()
     };
     let color = if active { t.text } else { t.text_muted };
-    ui.add(Button::new(RichText::new(text).size(12.0).color(color)).frame(false))
+    ui.add(Button::new(theme::hud(text, color)).frame(false))
         .clicked()
 }
 
@@ -1609,132 +1748,228 @@ fn stat_row(ui: &mut Ui, label: &str, value: &str, t: &Tokens) {
 }
 
 fn primary_button(ui: &mut Ui, label: &str, t: &Tokens, enabled: bool) -> bool {
-    let text = RichText::new(label)
-        .size(15.0)
-        .strong()
-        .color(Color32::from_rgb(0x0F, 0x17, 0x2A));
-    ui.add_enabled(
+    action_button(
+        ui,
+        label,
+        Kind::Primary,
+        t,
         enabled,
-        Button::new(text)
-            .fill(t.accent)
-            .stroke(Stroke::NONE)
-            .corner_radius(8)
-            .min_size(egui::vec2(160.0, 38.0)),
+        egui::vec2(160.0, 38.0),
     )
-    .clicked()
 }
 
-fn project_row(
-    ui: &mut Ui,
+fn danger_button(ui: &mut Ui, label: &str, t: &Tokens, enabled: bool) -> bool {
+    action_button(ui, label, Kind::Danger, t, enabled, egui::vec2(160.0, 38.0))
+}
+
+/// One project row: checkbox, name + path, stack, target count and reclaimable size.
+/// Returns the state its checkbox should be set to when it was clicked.
+///
+/// The checker's "last row" flag skips the rule under the final row, where the
+/// table's own frame already draws one.
+#[allow(clippy::too_many_arguments)]
+fn project_table_row(
+    row: &mut TableRow<'_, '_>,
     project: &Project,
     entry: &mut ProjectEntry,
+    last: bool,
+    show_items: bool,
     t: &Tokens,
     s: &Strings,
-) -> bool {
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.0), Sense::click());
-    ui.painter().rect(
-        rect,
-        CornerRadius::same(10),
-        t.surface,
-        Stroke::new(1.0, t.border),
-        StrokeKind::Inside,
-    );
-
-    // The row senses clicks first so the checkbox, added below, wins the hit test.
-    let mut row = ui.new_child(
-        UiBuilder::new()
-            .max_rect(rect.shrink2(egui::vec2(16.0, 0.0)))
-            .layout(Layout::left_to_right(Align::Center)),
-    );
-
-    let has_targets = !entry.targets.is_empty();
-    let checkbox = row.add_enabled(has_targets, Checkbox::without_text(&mut entry.selected));
-
-    row.vertical(|ui| {
-        ui.set_max_width((ui.available_width() - 200.0).max(120.0));
-        ui.label(
-            RichText::new(&project.name)
-                .size(15.0)
-                .strong()
-                .color(t.text),
-        );
-        let path = Label::new(
-            RichText::new(project.path.display().to_string())
-                .size(12.0)
-                .monospace()
-                .color(t.text_muted),
-        )
-        .truncate();
-        ui.add(path)
-            .on_hover_text(project.path.display().to_string());
-    });
-
-    row.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        let (text, color) = match size::checked_size(&entry.targets) {
-            Some(bytes) => (size::format_size(bytes), t.accent),
-            None => ("…".to_string(), t.text_muted),
-        };
-        // Fixed width keeps rows from shifting when the number arrives.
-        ui.allocate_ui_with_layout(
-            egui::vec2(96.0, 18.0),
-            Layout::right_to_left(Align::Center),
-            |ui| {
-                ui.label(RichText::new(text).size(14.0).monospace().color(color));
-            },
-        );
-        ui.add_space(8.0);
-        chip(ui, s.stack(project.stack), t);
-        if !has_targets {
-            ui.label(RichText::new(s.no_targets).size(12.0).color(t.text_muted));
+    span: egui::Rangef,
+) -> Option<bool> {
+    let state = entry.state();
+    let mut toggle = None;
+    row.col(|ui| {
+        if !last {
+            row_rule(ui, t, span);
+        }
+        let response = tri_checkbox(ui, t, state, !entry.targets.is_empty());
+        if response.clicked() {
+            // A full parent clears; anything less fills.
+            toggle = Some(state != TriState::On);
         }
     });
 
-    if response.clicked() && has_targets && !checkbox.clicked() {
+    let mut expand = false;
+    row.col(|ui| {
+        // The whole cell is the target; the labels inside take no clicks.
+        let open = ui.interact(
+            ui.max_rect(),
+            ui.scope_id().with("row-open"),
+            Sense::click(),
+        );
+        ui.vertical(|ui| {
+            ui.label(RichText::new(&project.name).size(15.0).color(t.text));
+            let path = Label::new(
+                RichText::new(project.path.display().to_string())
+                    .size(12.0)
+                    .monospace()
+                    .color(t.text_muted),
+            )
+            .truncate();
+            ui.add(path)
+                .on_hover_text(project.path.display().to_string());
+        });
+        if !entry.targets.is_empty() {
+            expand = open
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked();
+        }
+    });
+    row.col(|ui| {
+        chip(ui, s.stack(project.stack), t);
+    });
+    if show_items {
+        row.col(|ui| {
+            let count = entry.targets.len();
+            let color = if count == 0 { t.text_muted } else { t.text };
+            ui.label(
+                RichText::new(count.to_string())
+                    .size(13.0)
+                    .monospace()
+                    .color(color),
+            );
+        });
+    }
+    row.col(|ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let (text, color) = match size::checked_size(&entry.targets) {
+                Some(bytes) => (size::format_size(bytes), t.good),
+                None => ("…".to_string(), t.text_muted),
+            };
+            ui.label(RichText::new(text).size(14.0).monospace().color(color));
+        });
+    });
+
+    if expand {
         entry.expanded = !entry.expanded;
     }
-
-    checkbox.clicked()
+    toggle
 }
 
-fn target_row(ui: &mut Ui, project: &Project, target: &mut Target, t: &Tokens, s: &Strings) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), Sense::hover());
-    let mut row = ui.new_child(
-        UiBuilder::new()
-            .max_rect(egui::Rect::from_min_max(
-                rect.min + egui::vec2(44.0, 0.0),
-                rect.max - egui::vec2(16.0, 0.0),
-            ))
-            .layout(Layout::left_to_right(Align::Center)),
-    );
+/// A checkbox with a third, "some children are checked" state: filled with a check,
+/// filled with a dash, or empty.
+fn tri_checkbox(ui: &mut Ui, t: &Tokens, state: TriState, enabled: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::click());
+    let fade = |color: Color32| {
+        if enabled {
+            color
+        } else {
+            color.gamma_multiply(0.5)
+        }
+    };
+    let on = state != TriState::Off;
+    let hovered = response.hovered() && enabled;
+    let border = if hovered { t.border_strong } else { t.border };
+    let (fill, stroke) = if on {
+        (fade(t.accent), Stroke::NONE)
+    } else {
+        (Color32::TRANSPARENT, Stroke::new(1.0, fade(border)))
+    };
+    let painter = ui.painter();
+    painter.rect(rect, CornerRadius::ZERO, fill, stroke, StrokeKind::Inside);
+    let ink = fade(Color32::WHITE);
+    match state {
+        TriState::On => {
+            painter.line_segment(
+                [
+                    rect.lerp_inside(egui::vec2(0.2, 0.52)),
+                    rect.lerp_inside(egui::vec2(0.42, 0.74)),
+                ],
+                Stroke::new(2.0, ink),
+            );
+            painter.line_segment(
+                [
+                    rect.lerp_inside(egui::vec2(0.42, 0.74)),
+                    rect.lerp_inside(egui::vec2(0.8, 0.28)),
+                ],
+                Stroke::new(2.0, ink),
+            );
+        }
+        TriState::Partial => {
+            painter.hline(
+                rect.shrink2(egui::vec2(4.0, 0.0)).x_range(),
+                rect.center().y,
+                Stroke::new(2.0, ink),
+            );
+        }
+        TriState::Off => {}
+    }
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, enabled, on, ""));
+    if enabled {
+        response.on_hover_cursor(egui::CursorIcon::Default)
+    } else {
+        response
+    }
+}
 
-    row.add(Checkbox::without_text(&mut target.checked));
-
-    // Risky entries stay visually weak until the user checks them on purpose.
+/// One of a project's targets, indented under its project row.
+#[allow(clippy::too_many_arguments)]
+fn target_table_row(
+    row: &mut TableRow<'_, '_>,
+    project: &Project,
+    target: &mut Target,
+    last: bool,
+    show_items: bool,
+    t: &Tokens,
+    s: &Strings,
+    span: egui::Rangef,
+) {
     let dimmed = target.dangerous && !target.checked;
-    let color = if dimmed { t.text_muted } else { t.text };
-    let rel = target
-        .path
-        .strip_prefix(&project.path)
-        .unwrap_or(&target.path);
-    let text = target
-        .label
-        .clone()
-        .unwrap_or_else(|| rel.display().to_string());
-    let label = Label::new(RichText::new(text).size(13.0).monospace().color(color)).truncate();
-    row.add(label)
-        .on_hover_text(target.path.display().to_string());
-
-    row.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        let text = match target.size {
-            Some(bytes) => size::format_size(bytes),
-            None => "…".to_string(),
-        };
-        ui.label(RichText::new(text).size(13.0).monospace().color(color));
+    row.col(|ui| {
+        if !last {
+            row_rule(ui, t, span);
+        }
+        ui.add_space(20.0);
+        ui.add(Checkbox::without_text(&mut target.checked));
+    });
+    row.col(|ui| {
+        // Risky entries stay visually weak until the user checks them on purpose.
+        let color = if dimmed { t.text_muted } else { t.text };
+        let rel = target
+            .path
+            .strip_prefix(&project.path)
+            .unwrap_or(&target.path);
+        let text = target
+            .label
+            .clone()
+            .unwrap_or_else(|| rel.display().to_string());
+        let label = Label::new(RichText::new(text).size(13.0).monospace().color(color)).truncate();
+        ui.add_space(24.0);
+        ui.add(label)
+            .on_hover_text(target.path.display().to_string());
+    });
+    row.col(|ui| {
         if dimmed {
-            ui.label(RichText::new(s.unchecked).size(11.0).color(t.text_muted));
+            ui.label(theme::hud(s.unchecked, t.text_muted));
         }
     });
+    if show_items {
+        row.col(|_| {});
+    }
+    row.col(|ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let text = match target.size {
+                Some(bytes) => size::format_size(bytes),
+                None => "…".to_string(),
+            };
+            let color = if dimmed { t.text_muted } else { t.text };
+            ui.label(RichText::new(text).size(13.0).monospace().color(color));
+        });
+    });
+}
+
+/// The hairline under the row `ui` is drawing, across the whole table. It sits on
+/// the row's last pixel and keeps the cell's own vertical clip, so a row scrolled
+/// under the sticky header draws nothing instead of striping the header.
+fn row_rule(ui: &Ui, t: &Tokens, span: egui::Rangef) {
+    let y = ui.max_rect().bottom() - 0.5;
+    let clip = egui::Rect::from_x_y_ranges(span, ui.clip_rect().y_range());
+    ui.ctx()
+        .layer_painter(ui.layer_id())
+        .with_clip_rect(clip)
+        .hline(span, y, t.hairline());
 }
 
 fn cache_row(
@@ -1750,8 +1985,7 @@ fn cache_row(
 
     Frame::new()
         .fill(t.surface)
-        .stroke(Stroke::new(1.0, t.border))
-        .corner_radius(10)
+        .stroke(t.hairline())
         .inner_margin(egui::Margin::symmetric(16, 10))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -1787,10 +2021,9 @@ fn cache_row(
                 });
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let button = Button::new(RichText::new(s.clean).size(12.0))
+                    let button = Button::new(theme::button_text(s.clean, t.text))
                         .fill(t.bg)
-                        .stroke(Stroke::new(1.0, t.border))
-                        .corner_radius(6);
+                        .stroke(t.hairline());
                     let armed =
                         exists && !row.cleaned && !busy && row.size.is_some() && row.checked;
                     if ui.add_enabled(armed, button).clicked() {
@@ -1801,7 +2034,7 @@ fn cache_row(
                         (s.cache_not_found.to_string(), t.danger)
                     } else {
                         match row.size {
-                            Some(bytes) => (size::format_size(bytes), t.accent),
+                            Some(bytes) => (size::format_size(bytes), t.good),
                             None => ("…".to_string(), t.text_muted),
                         }
                     };
@@ -1825,13 +2058,77 @@ fn project_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// A hairline badge around a mono label. Painted rather than framed: a `Frame`
+/// inside a table cell stretches to the cell's height.
 fn chip(ui: &mut Ui, text: &str, t: &Tokens) {
-    Frame::new()
-        .fill(t.accent.gamma_multiply(0.15))
-        .stroke(Stroke::new(1.0, t.accent))
-        .corner_radius(CornerRadius::same(10))
-        .inner_margin(egui::Margin::symmetric(10, 3))
-        .show(ui, |ui| {
-            ui.label(RichText::new(text).size(12.0).color(t.accent));
-        });
+    let format = egui::TextFormat {
+        font_id: egui::FontId::new(theme::HUD_SIZE, theme::mono_family()),
+        color: t.text_muted,
+        extra_letter_spacing: theme::HUD_SPACING,
+        ..Default::default()
+    };
+    let job = egui::text::LayoutJob::single_section(text.to_uppercase(), format);
+    let galley = ui.painter().layout_job(job);
+    let (rect, _) = ui.allocate_exact_size(galley.size() + egui::vec2(16.0, 6.0), Sense::hover());
+    ui.painter()
+        .rect_stroke(rect, CornerRadius::ZERO, t.hairline(), StrokeKind::Inside);
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, t.text_muted);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(dangerous: bool, checked: bool) -> Target {
+        Target {
+            rule_id: if dangerous { "risky" } else { "safe" }.to_string(),
+            path: PathBuf::from("build"),
+            size: Some(1024),
+            checked,
+            dangerous,
+            label: None,
+        }
+    }
+
+    fn entry(targets: Vec<Target>) -> ProjectEntry {
+        ProjectEntry {
+            targets,
+            expanded: false,
+        }
+    }
+
+    #[test]
+    fn the_parent_state_comes_from_the_children() {
+        assert_eq!(entry(vec![]).state(), TriState::Off);
+        assert_eq!(entry(vec![target(false, false)]).state(), TriState::Off);
+        assert_eq!(entry(vec![target(false, true)]).state(), TriState::On);
+        assert_eq!(
+            entry(vec![target(false, true), target(false, false)]).state(),
+            TriState::Partial
+        );
+    }
+
+    /// Filling a project leaves its risky targets alone, so the parent reads as partial;
+    /// a project with nothing safe to clean still fills, and clearing always clears.
+    #[test]
+    fn filling_skips_risky_targets_but_never_dead_ends() {
+        let mut mixed = entry(vec![target(false, false), target(true, false)]);
+        mixed.set_checked(true);
+        assert_eq!(mixed.state(), TriState::Partial);
+        assert!(mixed.targets[0].checked);
+        assert!(!mixed.targets[1].checked);
+
+        mixed.set_checked(false);
+        assert_eq!(mixed.state(), TriState::Off);
+
+        let mut risky_only = entry(vec![target(true, false)]);
+        risky_only.set_checked(true);
+        assert_eq!(risky_only.state(), TriState::On);
+        assert!(risky_only.targets[0].checked);
+
+        let mut checked_risky = entry(vec![target(false, true), target(true, true)]);
+        checked_risky.set_checked(false);
+        assert!(checked_risky.targets.iter().all(|target| !target.checked));
+    }
 }

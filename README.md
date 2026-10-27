@@ -88,7 +88,11 @@ cargo build --release  # Windows 便携 exe：target\release\devsweep.exe
 
 图标：`assets/icon.svg` 是源文件，由 `scripts/make-icons.sh` 渲染为 `assets/icon.icns`（macOS bundle 用）与 `assets/icon.ico`（构建期由 `build.rs` 嵌入 exe）。渲染结果已提交，常规构建不需要 rsvg 或 ImageMagick。
 
-测试边界：自动化测试只覆盖 `src/` 里的 core（扫描、规则匹配、体积、计划、删除、配置），UI 层不放测试。
+测试边界：自动化测试只覆盖 `src/` 里的 core（扫描、规则匹配、体积、计划、删除、配置）；UI 层只测一件事——中文字形在每套字体里都画得出来（`src/theme.rs`）。
+
+### 字体与致谢
+
+界面视觉取自 [Craft Launcher](https://github.com/storytold/craft-launcher) 的 ArtCraft 设计（Apache-2.0），字体为 Archivo、Inter、Geist Mono，中文字形是 [Maple Mono](https://github.com/subframe7536/maple-font) CN 的 GB2312 子集，均由 [SIL OFL 1.1](assets/fonts/) 授权。详见 [NOTICE](NOTICE) 与 [ADR 0002](docs/adr/0002-craft-theme-and-bundled-cjk-font.md)。
 
 ### 许可
 
@@ -176,7 +180,11 @@ cargo build --release       # Windows portable exe: target\release\devsweep.exe
 
 Icons: `assets/icon.svg` is the source, rendered by `scripts/make-icons.sh` into `assets/icon.icns` (macOS app bundle) and `assets/icon.ico` (embedded into the exe by `build.rs`). The rendered files are committed, so normal builds need neither rsvg nor ImageMagick.
 
-Testing boundary: automated tests cover the core in `src/` (scan, rule matching, sizing, plan, delete, config). The UI layer has no tests.
+Testing boundary: automated tests cover the core in `src/` (scan, rule matching, sizing, plan, delete, config). The UI layer has one test: that every font family can draw Chinese (`src/theme.rs`).
+
+### Theme and credits
+
+The interface follows Craft Launcher's ArtCraft design (Apache-2.0). Fonts: Archivo, Inter and Geist Mono, with Chinese from a GB2312 subset of [Maple Mono](https://github.com/subframe7536/maple-font) CN — all under the [SIL OFL 1.1](assets/fonts/). See [NOTICE](NOTICE) and [ADR 0002](docs/adr/0002-craft-theme-and-bundled-cjk-font.md).
 
 ### License
 

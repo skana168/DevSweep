@@ -1,0 +1,20 @@
+DevSweep
+Copyright (c) 2026 dualskana
+
+Visual design
+-------------
+src/theme.rs is adapted from Craft Launcher's egui theme
+(https://github.com/storytold/craft-launcher, crates/ui-egui/src/theme.rs),
+Copyright Storytold, licensed under the Apache License 2.0 (docs/third-party/LICENSE-APACHE.txt).
+The window layout is DevSweep's own.
+
+Bundled fonts
+-------------
+All four faces are under the SIL Open Font License 1.1; each license ships next
+to the file in assets/fonts/.
+
+- Archivo, Omnibus-Type            assets/fonts/Archivo-Variable.ttf
+- Inter, The Inter Project Authors assets/fonts/Inter-Variable.ttf
+- Geist Mono, Vercel               assets/fonts/GeistMono-Variable.ttf
+- Maple Mono CN, The Maple Mono Project Authors, v7.9. The bundled file is a
+  GB2312 subset built by scripts/subset-maple.sh, not the original release.
