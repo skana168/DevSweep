@@ -32,6 +32,16 @@ const ROW_H: f32 = 56.0;
 /// The height of a segmented cell and of the settings sheet's controls.
 const CELL_H: f32 = 34.0;
 
+/// The header band. It is the title bar: on macOS the system's traffic lights sit over it, and
+/// everywhere else it draws the window's own buttons.
+const HEADER_H: f32 = 48.0;
+
+/// Room macOS's traffic lights take at the left of the header.
+const TRAFFIC_LIGHTS_W: f32 = 72.0;
+
+/// How far in from the window's edges a window without decorations resizes.
+const RESIZE_EDGE: f32 = 5.0;
+
 /// The search box's width and its inner horizontal padding. The width must fit
 /// the longest hint; `every_search_hint_fits_the_box` holds it to that.
 const SEARCH_W: f32 = 210.0;
@@ -944,9 +954,52 @@ impl DevSweepApp {
         }
     }
 
+    /// The header, which is also the window's title bar: the brand at the left after room for
+    /// macOS's traffic lights, the settings entry and (elsewhere) the window's buttons at the
+    /// right. The empty space in between drags the window.
+    fn header(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings) {
+        title_bar_drag(ui);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            let lights = if cfg!(target_os = "macos") {
+                TRAFFIC_LIGHTS_W
+            } else {
+                0.0
+            };
+            ui.add_space(lights);
+            // Painted into a full-height cell so the wordmark sits on the band's centre line, the
+            // way the reference's logo does; a bare label would ride at the top of the row.
+            let wordmark: egui::WidgetText = theme::title("DevSweep", 22.0, t.text).into();
+            let wordmark = wordmark.into_galley(
+                ui,
+                Some(egui::TextWrapMode::Extend),
+                f32::INFINITY,
+                egui::TextStyle::Body,
+            );
+            let (cell, _) = ui.allocate_exact_size(
+                egui::vec2(wordmark.size().x + 32.0, HEADER_H),
+                Sense::hover(),
+            );
+            ui.painter().galley(
+                egui::pos2(
+                    cell.left() + 16.0,
+                    cell.center().y - wordmark.size().y / 2.0,
+                ),
+                wordmark,
+                t.text,
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if !cfg!(target_os = "macos") {
+                    window_buttons(ui, t, s);
+                }
+                if settings_icon(ui, t, s.settings, self.settings_open) {
+                    self.settings_open = true;
+                }
+            });
+        });
+    }
+
     fn sidebar(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings) {
-        ui.label(theme::title("DevSweep", 22.0, t.text));
-        ui.add_space(16.0);
         ui.label(theme::hud(s.roots, t.text_muted));
         ui.add_space(4.0);
 
@@ -993,12 +1046,6 @@ impl DevSweepApp {
         .clicked()
         {
             self.view = View::Caches;
-        }
-
-        ui.add_space(8.0);
-        let label = RichText::new(s.settings).size(14.0);
-        if nav_button(ui, label, self.settings_open, egui::vec2(width, 32.0), t).clicked() {
-            self.settings_open = true;
         }
     }
 
@@ -1542,6 +1589,12 @@ impl eframe::App for DevSweepApp {
         let t = theme::tokens(ui.ctx().theme());
         let s = self.strings();
 
+        egui::Panel::top("header")
+            .exact_size(HEADER_H)
+            .resizable(false)
+            .frame(Frame::new().fill(t.bg))
+            .show(ui, |ui| self.header(ui, t, s));
+
         egui::Panel::bottom("status_bar")
             .exact_size(24.0)
             .resizable(false)
@@ -1642,6 +1695,9 @@ impl eframe::App for DevSweepApp {
         }
         self.failures_dialog(ui.ctx(), t, s);
         self.settings_dialog(ui.ctx(), t, s);
+        if !cfg!(target_os = "macos") {
+            window_edges(ui.ctx(), t);
+        }
     }
 
     fn on_exit(&mut self) {
@@ -1690,6 +1746,236 @@ fn paint_states(ui: &mut Ui, rest: Look, hot: Look) {
         slot.weak_bg_fill = fill;
         slot.bg_stroke = stroke;
         slot.fg_stroke = Stroke::new(1.0, ink);
+    }
+}
+
+/// Custom title bars: dragging the header's empty space moves the window, and double-clicking it
+/// maximizes or restores it. Call before drawing the header, so its controls stay on top.
+fn title_bar_drag(ui: &mut Ui) {
+    let r = ui.max_rect();
+    let band = resize_band(ui.ctx());
+    let rect = egui::Rect::from_min_max(
+        r.min + egui::vec2(band, band),
+        r.max - egui::vec2(band, 0.0),
+    );
+    let resp = ui.interact(
+        rect,
+        ui.scope_id().with("title-bar"),
+        Sense::click_and_drag(),
+    );
+    if resp.drag_started_by(egui::PointerButton::Primary) {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
+    if resp.double_clicked() {
+        let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+    }
+}
+
+/// How wide the resize band along the window's edges is right now: nothing while the window is
+/// maximized or full screen, when the controls may reach all the way to the corner.
+fn resize_band(ctx: &egui::Context) -> f32 {
+    let (maximized, fullscreen) = ctx.input(|i| {
+        (
+            i.viewport().maximized.unwrap_or(false),
+            i.viewport().fullscreen.unwrap_or(false),
+        )
+    });
+    if maximized || fullscreen {
+        0.0
+    } else {
+        RESIZE_EDGE
+    }
+}
+
+/// A window button in a custom title bar.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WindowButton {
+    Minimize,
+    Maximize,
+    Restore,
+    Close,
+}
+
+/// Minimize, maximize (or restore) and close, right to left: close ends up at the right.
+fn window_buttons(ui: &mut Ui, t: &Tokens, s: &Strings) {
+    let ctx = ui.ctx().clone();
+    let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+    if window_button(ui, t, s, WindowButton::Close).clicked() {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+    let size = if maximized {
+        WindowButton::Restore
+    } else {
+        WindowButton::Maximize
+    };
+    if window_button(ui, t, s, size).clicked() {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+    }
+    if window_button(ui, t, s, WindowButton::Minimize).clicked() {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+    }
+    // The hairline between the window's buttons and the rest of the header.
+    let (rule, _) = ui.allocate_exact_size(egui::vec2(1.0, HEADER_H), Sense::hover());
+    ui.painter()
+        .vline(rule.center().x, rule.y_range(), t.hairline());
+}
+
+/// One caption button. Hit-testing leaves the top resize band alone (and, for close, the right
+/// edge), so the window's edges stay resizable.
+fn window_button(ui: &mut Ui, t: &Tokens, s: &Strings, button: WindowButton) -> Response {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(46.0, HEADER_H), Sense::hover());
+    let band = resize_band(ui.ctx());
+    let right = if button == WindowButton::Close {
+        band
+    } else {
+        0.0
+    };
+    let hit = egui::Rect::from_min_max(
+        rect.min + egui::vec2(0.0, band),
+        rect.max - egui::vec2(right, 0.0),
+    );
+    let id = egui::Id::unique(("window-button", button as u8));
+    let resp = ui.interact(hit, id, Sense::click());
+    let (fill, ink) = match (button, resp.hovered()) {
+        (WindowButton::Close, true) => (t.danger, Color32::WHITE),
+        (_, true) => (t.border, t.text_strong),
+        (_, false) => (Color32::TRANSPARENT, t.text_muted),
+    };
+    let p = ui.painter();
+    p.rect_filled(rect, CornerRadius::ZERO, fill);
+    let c = rect.center();
+    let stroke = Stroke::new(1.0, ink);
+    let label = match button {
+        WindowButton::Minimize => s.minimize,
+        WindowButton::Maximize => s.maximize,
+        WindowButton::Restore => s.restore,
+        WindowButton::Close => s.close,
+    };
+    // Half the glyph's size: 10 px, like the system's own caption buttons.
+    let s = 5.0;
+    match button {
+        WindowButton::Minimize => {
+            p.hline(c.x - s..=c.x + s, c.y, stroke);
+        }
+        WindowButton::Maximize => {
+            p.rect_stroke(
+                egui::Rect::from_center_size(c, egui::vec2(2.0 * s, 2.0 * s)),
+                CornerRadius::ZERO,
+                stroke,
+                StrokeKind::Inside,
+            );
+        }
+        WindowButton::Restore => {
+            // A window in front of another.
+            let front = egui::Rect::from_min_size(
+                c + egui::vec2(-s, -s + 2.0),
+                egui::vec2(2.0 * s - 2.0, 2.0 * s - 2.0),
+            );
+            p.rect_stroke(front, CornerRadius::ZERO, stroke, StrokeKind::Inside);
+            p.hline(c.x - s + 2.0..=c.x + s, c.y - s, stroke);
+            p.vline(c.x + s, c.y - s..=c.y + s - 2.0, stroke);
+        }
+        WindowButton::Close => {
+            p.line_segment([c + egui::vec2(-s, -s), c + egui::vec2(s, s)], stroke);
+            p.line_segment([c + egui::vec2(-s, s), c + egui::vec2(s, -s)], stroke);
+        }
+    }
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    resp.on_hover_text(label)
+}
+
+/// The settings entry at the header's right end: the reference's vector gear in a square cell
+/// with a hairline on its left, inverted under the pointer and while the sheet is open.
+fn settings_icon(ui: &mut Ui, t: &Tokens, label: &str, active: bool) -> bool {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(HEADER_H, HEADER_H), Sense::hover());
+    let resp = ui.interact(rect, egui::Id::unique("header-settings"), Sense::click());
+    let hot = active || resp.hovered();
+    let p = ui.painter();
+    if hot {
+        p.rect_filled(rect, CornerRadius::ZERO, t.invert_bg);
+    }
+    p.vline(rect.left() + 0.5, rect.y_range(), t.hairline());
+    let ink = if hot { t.invert_fg } else { t.text_muted };
+    let c = rect.center();
+    let stroke = Stroke::new(1.5, ink);
+    p.circle_stroke(c, 3.2, stroke);
+    for i in 0..8 {
+        let angle = std::f32::consts::TAU * i as f32 / 8.0;
+        let (sin, cos) = angle.sin_cos();
+        p.line_segment(
+            [
+                c + egui::vec2(cos, sin) * 4.8,
+                c + egui::vec2(cos, sin) * 6.6,
+            ],
+            stroke,
+        );
+    }
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    resp.on_hover_text(label)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+}
+
+/// A window without decorations: a hairline round it, and resizing from its edges and corners.
+fn window_edges(ctx: &egui::Context, t: &Tokens) {
+    use egui::CursorIcon as C;
+    use egui::viewport::ResizeDirection as D;
+    let (maximized, fullscreen) = ctx.input(|i| {
+        (
+            i.viewport().maximized.unwrap_or(false),
+            i.viewport().fullscreen.unwrap_or(false),
+        )
+    });
+    if maximized || fullscreen {
+        return;
+    }
+    let r = ctx.content_rect();
+    ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::unique("window-border"),
+    ))
+    .rect_stroke(r, CornerRadius::ZERO, t.hairline(), StrokeKind::Inside);
+    let Some(p) = ctx
+        .input(|i| i.pointer.hover_pos())
+        .filter(|p| r.contains(*p))
+    else {
+        return;
+    };
+    let near = |d: f32| d < RESIZE_EDGE;
+    // A corner takes a little of each edge next to it.
+    let corner = |d: f32| d < 3.0 * RESIZE_EDGE;
+    let (left, right, top, bottom) = (
+        p.x - r.left(),
+        r.right() - p.x,
+        p.y - r.top(),
+        r.bottom() - p.y,
+    );
+    let hit = if (near(top) && corner(left)) || (near(left) && corner(top)) {
+        Some((D::NorthWest, C::ResizeNorthWest))
+    } else if (near(top) && corner(right)) || (near(right) && corner(top)) {
+        Some((D::NorthEast, C::ResizeNorthEast))
+    } else if (near(bottom) && corner(left)) || (near(left) && corner(bottom)) {
+        Some((D::SouthWest, C::ResizeSouthWest))
+    } else if (near(bottom) && corner(right)) || (near(right) && corner(bottom)) {
+        Some((D::SouthEast, C::ResizeSouthEast))
+    } else if near(top) {
+        Some((D::North, C::ResizeNorth))
+    } else if near(bottom) {
+        Some((D::South, C::ResizeSouth))
+    } else if near(left) {
+        Some((D::West, C::ResizeWest))
+    } else if near(right) {
+        Some((D::East, C::ResizeEast))
+    } else {
+        None
+    };
+    if let Some((direction, cursor)) = hit {
+        ctx.set_cursor_icon(cursor);
+        if ctx.input(|i| i.pointer.primary_pressed()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
+        }
     }
 }
 
@@ -2355,6 +2641,129 @@ mod tests {
         draw(app, ctx, input(pos, true));
         draw(app, ctx, input(pos, true));
         draw(app, ctx, input(pos, false));
+    }
+
+    /// One frame of the header alone, in the panel it draws in.
+    fn header_frame(
+        app: &mut DevSweepApp,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        let t = theme::tokens(egui::Theme::Dark);
+        let s = Lang::En.strings();
+        let mut output = ctx.run_ui(raw_input(events), |ui| {
+            egui::Panel::top("header")
+                .exact_size(HEADER_H)
+                .resizable(false)
+                .frame(Frame::new().fill(t.bg))
+                .show(ui, |ui| app.header(ui, t, s));
+        });
+        output.textures_delta.clear();
+        output
+    }
+
+    fn viewport_commands(output: &egui::FullOutput) -> Vec<&egui::ViewportCommand> {
+        output
+            .viewport_output
+            .values()
+            .flat_map(|viewport| &viewport.commands)
+            .collect()
+    }
+
+    /// Hover, press and release at `pos` in the header, returning the release frame.
+    fn header_click(
+        app: &mut DevSweepApp,
+        ctx: &egui::Context,
+        pos: egui::Pos2,
+    ) -> egui::FullOutput {
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        header_frame(app, ctx, vec![egui::Event::PointerMoved(pos)]);
+        header_frame(app, ctx, vec![egui::Event::PointerMoved(pos), button(true)]);
+        header_frame(
+            app,
+            ctx,
+            vec![egui::Event::PointerMoved(pos), button(false)],
+        )
+    }
+
+    /// The header's settings entry opens the sheet the sidebar item used to.
+    #[test]
+    fn the_header_opens_settings() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut app = app_with_rows(0);
+        header_frame(&mut app, &ctx, Vec::new());
+        let cell = ctx
+            .read_response(egui::Id::unique("header-settings"))
+            .expect("the header draws a settings cell")
+            .rect;
+        header_click(&mut app, &ctx, cell.center());
+        assert!(app.settings_open);
+    }
+
+    /// Dragging the header's empty space moves the window, the way a title bar does.
+    #[test]
+    fn dragging_the_header_moves_the_window() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut app = app_with_rows(0);
+        let start = egui::pos2(400.0, HEADER_H / 2.0);
+        header_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(start)]);
+        header_frame(
+            &mut app,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        let output = header_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(start + egui::vec2(20.0, 0.0))],
+        );
+        let commands = viewport_commands(&output);
+        assert!(
+            commands
+                .iter()
+                .any(|c| matches!(c, egui::ViewportCommand::StartDrag)),
+            "{commands:?}"
+        );
+    }
+
+    /// Windows and Linux have no decorations, so the header's close button is the way out.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_close_button_closes_the_window() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut app = app_with_rows(0);
+        header_frame(&mut app, &ctx, Vec::new());
+        let close = ctx
+            .read_response(egui::Id::unique((
+                "window-button",
+                WindowButton::Close as u8,
+            )))
+            .expect("the header draws a close button")
+            .rect;
+        let output = header_click(&mut app, &ctx, close.center());
+        let commands = viewport_commands(&output);
+        assert!(
+            commands
+                .iter()
+                .any(|c| matches!(c, egui::ViewportCommand::Close)),
+            "{commands:?}"
+        );
     }
 
     /// Drives the "…" menu: click the trigger, then click at `item`. Returns the
