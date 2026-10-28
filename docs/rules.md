@@ -24,7 +24,7 @@ disable = ["node.dist", "ios.pods"]
 [defaults]
 "node.dist" = true
 
-# 3. add a directory of your own (stack: flutter / android / ios / java / node / python / "*", label optional)
+# 3. add a directory of your own (stack: flutter / android / ios / java / node / python / rust / "*", label optional)
 [[extra]]
 stack = "*"
 path = ".cache"
@@ -78,8 +78,9 @@ Extras are always checked by default and are never marked dangerous. Their ids a
 | Python | `python.dot_venv` | `.venv` | **no** (dangerous) |
 | Python | `python.venv` | `venv` | **no** (dangerous) |
 | Python | `python.env` | `env` | **no** (dangerous) |
+| Rust | `rust.target` | `target` | **no** (dangerous) |
 
-A project carries one stack, chosen by priority Flutter > iOS > Android > Java > Node > Python, so only that
+A project carries one stack, chosen by priority Flutter > iOS > Android > Java > Node > Python > Rust, so only that
 stack's rules apply to it (see [ADR 0001](adr/0001-stack-is-one-product-type.md)). A `pom.xml`
 marks a Java project; a Gradle project counts as Android even when it builds plain JVM code.
 
@@ -120,6 +121,29 @@ mandatory checks are unaffected by `[defaults]`; explicitly setting a dangerous 
 to true counts as opting in, but retains the dangerous label. `disable` can remove the rule.
 Extra rules keep their existing user-defined behavior. No Python command is executed and
 DevSweep does not detect whether an environment is currently in use.
+
+## Rust projects
+
+A `Cargo.toml` file marks a Rust project without parsing its contents, including workspace-only
+manifests. A lone `.rs`, `Cargo.lock`, `target/`, or directory named `Cargo.toml` does not qualify.
+Existing stack markers take priority in the same directory. Workspace roots and independent
+member directories appear separately within the existing scan depth; membership is not resolved.
+
+The `rust.target` rule includes only the whole real root `target/` directory, dangerous and
+unchecked by default. Its size includes build caches and final binaries, documentation or packages.
+A workspace's shared root target belongs to the root Project; members only match their own root
+target, never an ancestor's. Members without targets stay visible. Scanning only a member never
+claims output outside that scan root. Nested arbitrary target directories are not matched.
+
+Files and symbolic links are skipped at discovery and checked again in the final Delete plan.
+`disable` can remove the rule; `[defaults]` can opt in by setting `"rust.target" = true`, retaining
+the dangerous label and mandatory validation. Extra rules keep their existing behavior, including
+Rust-scoped extras. Existing protected-path and overlap checks and both delete modes still apply.
+
+No Cargo command is executed, custom target-dir/build-dir settings are not resolved, and source,
+`Cargo.lock` and project `.cargo/` are outside this built-in rule. Global caches are unchanged.
+Stop builds before cleaning: active builds are not detected or locked, and the existing filesystem
+race between validation and deletion is not eliminated.
 
 ## Paths
 

@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>找出项目里悄悄吃掉几十 GB 的构建产物和依赖缓存，勾选不需要的部分，一次清掉。</b><br>
-  macOS 与 Windows 上的本地应用：Flutter、Android、iOS、Java、Node、Python 项目，加上它们背后的全局缓存。
+  macOS 与 Windows 上的本地应用：Flutter、Android、iOS、Java、Node、Python、Rust 项目，加上它们背后的全局缓存。
   没有云端，没有账号，数据不出本机。
 </p>
 
@@ -35,7 +35,7 @@
 
 ## 它做什么
 
-DevSweep 查找 Flutter、Android、iOS、Java、Node 和 Python 项目中的构建产物、依赖和缓存，以及共用的工具缓存。查看大小，选择要清理的内容，确认后执行。
+DevSweep 查找 Flutter、Android、iOS、Java、Node、Python 和 Rust 项目中的构建产物、依赖和缓存，以及共用的工具缓存。查看大小，选择要清理的内容，确认后执行。
 
 ## 功能
 
@@ -100,13 +100,22 @@ DevSweep 查找 Flutter、Android、iOS、Java、Node 和 Python 项目中的构
 删除默认进入 **废纸篓**（Windows 为回收站），误删可恢复；设置里可改为直接删除。窗口重新获得
 焦点且距上次扫描超过 30 秒会自动刷新：已有的体积会保留，面板里的勾选不跨次保留。
 
-### Cargo 项目识别
+### Cargo 项目
 
 目录中存在 `Cargo.toml` 文件即识别为 Rust 项目，不解析清单内容，包括自身没有包的 Workspace 根。
 Workspace 根与成员目录分别展示，没有可清理项时也保留；不解析成员关系。项目发现限定在扫描根内，
 最多向下五层，并跳过构建和依赖目录。每个项目只归一种类型，优先级为
 Flutter > iOS > Android > Java > Node > Python > Rust；同目录有其它类型标记时，保留已有类型，
 独立 Rust 子目录仍可单独出现。
+
+Rust 清理仅覆盖每个 Rust 项目根目录下真实的整个 `target/`，标为危险项且默认不勾选：其中可能有
+最终二进制、文档和打包产物，也有构建缓存。Workspace 共享的根 `target/` 归根项目；成员只清自身
+本地的 `target/`，不向上查找。普通文件和符号链接被排除，最终清理计划再次检查；规则覆盖不能
+绕过这些检查或移除危险标记。
+
+DevSweep 不运行 Cargo，也不解析自定义 target-dir/build-dir 设置。Rust 内置清理不会删除源码、
+`Cargo.lock` 和 `.cargo/`；Cargo registry 全局缓存行为不变。请停止构建后再清理：不检测或锁定
+正在进行的构建，最终检查与删除之间仍可能发生文件系统变化。
 
 ## 自定义规则
 

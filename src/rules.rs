@@ -207,6 +207,8 @@ pub fn builtin_rules() -> Vec<Rule> {
         rule("python.dot_venv", Some(Stack::Python), ".venv", false, true),
         rule("python.venv", Some(Stack::Python), "venv", false, true),
         rule("python.env", Some(Stack::Python), "env", false, true),
+        // shortcut: only root target; resolve custom output paths when Cargo configuration enters scope.
+        rule("rust.target", Some(Stack::Rust), "target", false, true),
     ]
 }
 
@@ -221,7 +223,7 @@ pub const TEMPLATE: &str = r#"# DevSweep rule overrides.
 # [defaults]
 # "node.dist" = true
 #
-# Add a directory of your own. stack is "flutter", "android", "ios", "java", "node", "python",
+# Add a directory of your own. stack is "flutter", "android", "ios", "java", "node", "python", "rust",
 # or "*" for every project type. label is optional.
 # [[extra]]
 # stack = "*"
@@ -330,6 +332,7 @@ fn parse_stack(stack: &str) -> Option<Option<Stack>> {
         "java" => Some(Some(Stack::Java)),
         "node" => Some(Some(Stack::Node)),
         "python" => Some(Some(Stack::Python)),
+        "rust" => Some(Some(Stack::Rust)),
         _ => None,
     }
 }
@@ -379,7 +382,7 @@ pub fn expand_targets(project: &Project, rules: &[Rule]) -> Vec<Target> {
 }
 
 pub(crate) fn valid_builtin_target(rule: &Rule, path: &Path) -> bool {
-    if !rule.id.starts_with("python.") {
+    if !rule.id.starts_with("python.") && rule.id != "rust.target" {
         return true;
     }
     fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
@@ -655,12 +658,12 @@ mod tests {
         let loaded = parse(
             "[[extra]]\nstack = \"node\"\npath = \"../escape\"\n\n\
              [[extra]]\nstack = \"node\"\npath = \"/etc\"\n\n\
-             [[extra]]\nstack = \"rust\"\npath = \".cache\"\n\n\
+             [[extra]]\nstack = \"unknown\"\npath = \".cache\"\n\n\
              [[extra]]\nstack = \"node\"\npath = \"\"",
         );
 
         let error = loaded.error.expect("invalid extras are reported");
-        assert!(error.contains("unknown stack \"rust\""), "{error}");
+        assert!(error.contains("unknown stack \"unknown\""), "{error}");
         assert!(error.contains("must stay inside the project"), "{error}");
         assert_eq!(loaded.rules.len(), builtin_rules().len());
         assert!(

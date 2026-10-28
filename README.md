@@ -7,7 +7,7 @@
 <p align="center">
   <b>Find the tens of gigabytes your build folders and package caches are quietly eating, tick what you
   don't need, and clear it in one go.</b><br>
-  A local desktop app for macOS and Windows: Flutter, Android, iOS, Java, Node and Python projects, plus the global
+  A local desktop app for macOS and Windows: Flutter, Android, iOS, Java, Node, Python and Rust projects, plus the global
   caches behind them. No cloud, no account, nothing leaves your machine.
 </p>
 
@@ -36,7 +36,7 @@
 
 ## What it does
 
-DevSweep finds build artifacts, dependencies, and caches in Flutter, Android, iOS, Java, Node, and Python projects, plus shared tool caches. Review their sizes, choose what to clean, and confirm.
+DevSweep finds build artifacts, dependencies, and caches in Flutter, Android, iOS, Java, Node, Python, and Rust projects, plus shared tool caches. Review their sizes, choose what to clean, and confirm.
 
 ## Features
 
@@ -102,7 +102,7 @@ Deletions go to the **Trash** (Recycle Bin on Windows) by default, so a mistake 
 Settings can switch to permanent deletion. The list refreshes when the window regains focus after
 more than 30 seconds away: measured sizes survive that refresh, the panel's ticks do not.
 
-### Cargo project discovery
+### Cargo projects
 
 A directory containing a `Cargo.toml` file is recognized as a Rust project without parsing the
 manifest. This includes workspace roots with no package of their own. Workspace roots and member
@@ -110,6 +110,18 @@ directories appear separately, even when they have no cleanable items; membershi
 Discovery stays within the scan roots, up to five levels deep, and skips build and dependency folders.
 Each project has one stack: Flutter > iOS > Android > Java > Node > Python > Rust. Existing markers
 win when they share a directory with `Cargo.toml`; independent Rust subdirectories can still appear.
+
+Rust cleanup covers the whole real `target/` directory directly under each Rust project. It is
+marked dangerous and starts unchecked: it can contain final binaries, documentation and packages
+as well as build caches. A workspace's shared root `target/` belongs to the root project; members
+only clean their own local `target/`, without searching ancestors. Files and symbolic links are
+excluded, and these checks run again in the final delete plan. Rule overrides retain these checks
+and the dangerous label.
+
+DevSweep does not run Cargo or resolve custom target-dir/build-dir settings. Rust built-in cleanup
+leaves source, `Cargo.lock` and `.cargo/` untouched; Cargo registry global cache behavior is unchanged.
+Stop builds before cleaning: active builds are not detected or locked, and filesystem changes
+between the final check and deletion remain possible.
 
 ## Custom rules
 
