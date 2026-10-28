@@ -188,6 +188,22 @@ pub fn builtin_rules() -> Vec<Rule> {
             true,
             false,
         ),
+        rule("python.build", Some(Stack::Python), "build", false, true),
+        rule("python.dist", Some(Stack::Python), "dist", false, true),
+        rule(
+            "python.egg_info",
+            Some(Stack::Python),
+            "*.egg-info",
+            false,
+            true,
+        ),
+        rule(
+            "python.src_egg_info",
+            Some(Stack::Python),
+            "src/*.egg-info",
+            false,
+            true,
+        ),
     ]
 }
 
@@ -360,7 +376,12 @@ pub fn expand_targets(project: &Project, rules: &[Rule]) -> Vec<Target> {
 }
 
 pub(crate) fn valid_builtin_target(rule: &Rule, path: &Path) -> bool {
-    !rule.id.starts_with("python.") || fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
+    !rule.id.starts_with("python.")
+        || (fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
+            && (rule.id != "python.src_egg_info"
+                || path.parent().is_some_and(|parent| {
+                    fs::symlink_metadata(parent).is_ok_and(|meta| meta.is_dir())
+                })))
 }
 
 pub(crate) fn is_recursive_cache_rule(rule: &Rule) -> bool {

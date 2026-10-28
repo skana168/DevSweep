@@ -91,7 +91,10 @@ fn bytecode_caches_follow_project_environment_and_platform_boundaries() {
     let projects = scan(std::slice::from_ref(&root));
     let project = projects.iter().find(|project| project.path == app).unwrap();
     assert!(!projects.iter().any(|project| project.name == "nested"));
-    let targets = expand_targets(project, &rules);
+    let targets: Vec<_> = expand_targets(project, &rules)
+        .into_iter()
+        .filter(|target| target.rule_id == "python.pycache")
+        .collect();
     let mut paths: Vec<_> = targets.iter().map(|target| target.path.clone()).collect();
     paths.sort();
     assert_eq!(

@@ -46,7 +46,9 @@ Python cleanup covers root-level `.pytest_cache/`, `.mypy_cache/`, `.ruff_cache/
 `__pycache__/` directories. Bytecode cache discovery skips virtual environments, generated
 directories, symbolic links, and independent child projects, even beyond the five-level project
 discovery limit. Add a nearer scan root to discover and clean those deep child projects.
-Environment cleanup, build outputs, and coverage reports are not included yet.
+Root-level `build/`, `dist/`, `*.egg-info/`, and `src/*.egg-info/` are also listed as dangerous
+items, unchecked by default: their contents may include files you saved manually.
+Environment cleanup and coverage reports are not included yet.
 
 It never deletes anything on its own: nothing is touched until you confirm a plan, and nothing
 outside the rules (`.git`, your home folder, the project root, paths outside the project) can ever
