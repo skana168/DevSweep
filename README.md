@@ -68,7 +68,7 @@ what it needs. The list is fixed: `rules.toml` does not extend or disable it.
 
 ## Install
 
-Download the build for your computer from the [latest release](https://github.com/skana168/DevSweep/releases/latest), or browse [all releases](https://github.com/skana168/DevSweep/releases). `<version>` is the version number, for example `0.2.0`.
+Download the build for your computer from the [latest release](https://github.com/skana168/DevSweep/releases/latest), or browse [all releases](https://github.com/skana168/DevSweep/releases). `<version>` is the version number, for example `0.3.0`.
 
 | Platform | File | What it is |
 |---|---|---|

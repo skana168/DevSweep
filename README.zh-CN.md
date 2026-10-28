@@ -68,7 +68,7 @@ DevSweep 查找 Flutter、Android、iOS、Java、Node、Python 和 Rust 项目�
 ## 安装
 
 从 [Releases](https://github.com/skana168/DevSweep/releases/latest) 下载对应文件，或在
-[全部版本](https://github.com/skana168/DevSweep/releases) 里挑选。`<版本>` 是版本号，例如 `0.2.0`。
+[全部版本](https://github.com/skana168/DevSweep/releases) 里挑选。`<版本>` 是版本号，例如 `0.3.0`。
 
 | 平台 | 文件 | 用法 |
 |---|---|---|
