@@ -1010,8 +1010,14 @@ impl DevSweepApp {
         ui.label(theme::hud(s.type_filter, t.text_muted));
         ui.add_space(4.0);
         let filters = std::iter::once((None, s.all)).chain(
-            [Stack::Flutter, Stack::Android, Stack::Ios, Stack::Node]
-                .map(|stack| (Some(stack), s.stack(stack))),
+            [
+                Stack::Flutter,
+                Stack::Android,
+                Stack::Ios,
+                Stack::Java,
+                Stack::Node,
+            ]
+            .map(|stack| (Some(stack), s.stack(stack))),
         );
         for (filter, label) in filters {
             let count = match filter {

@@ -7,7 +7,7 @@
 <p align="center">
   <b>Find the tens of gigabytes your build folders and package caches are quietly eating, tick what you
   don't need, and clear it in one go.</b><br>
-  A local desktop app for macOS and Windows: Flutter, Android, iOS and Node projects, plus the global
+  A local desktop app for macOS and Windows: Flutter, Android, iOS, Java and Node projects, plus the global
   caches behind them. No cloud, no account, nothing leaves your machine.
 </p>
 
@@ -35,11 +35,11 @@
 
 ## What it does
 
-Every Flutter, Android, iOS and Node project leaves something behind: `build/`, `node_modules/`,
-`.dart_tool/`, `Pods/`, `.next/`. DevSweep walks the folders you choose, recognises each project,
-and shows how much of it is expendable in one table. Open a project, tick the entries you want gone,
-confirm the panel, and the space comes back. The same window also lists the global caches that have
-nothing to do with any single project.
+Every Flutter, Android, iOS, Java and Node project leaves something behind: `build/`, `node_modules/`,
+`.dart_tool/`, `Pods/`, `.next/`, `target/`. DevSweep walks the folders you choose, recognises each
+project, and shows how much of it is expendable in one table. Open a project, tick the entries you
+want gone, confirm the panel, and the space comes back. The same window also lists the global caches
+that have nothing to do with any single project.
 
 It never deletes anything on its own: nothing is touched until you confirm a plan, and nothing
 outside the rules (`.git`, your home folder, the project root, paths outside the project) can ever
@@ -68,7 +68,7 @@ be part of that plan.
 
 | Dependency cache | Toolchain cache |
 |---|---|
-| Gradle caches, Gradle distributions, npm, pnpm, bun, Yarn, pub, CocoaPods | Playwright, Xcode DerivedData, Cargo registry, pip |
+| Gradle caches, Gradle distributions, Maven local repository, npm, pnpm, bun, Yarn, pub, CocoaPods | Playwright, Xcode DerivedData, Cargo registry, pip |
 
 Clearing one of these frees space for every project at once, and the next build downloads or rebuilds
 what it needs. The list is fixed: `rules.toml` does not extend or disable it.

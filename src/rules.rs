@@ -119,6 +119,7 @@ pub fn builtin_rules() -> Vec<Rule> {
             true,
             false,
         ),
+        rule("java.target", Some(Stack::Java), "target", true, false),
         rule("ios.pods", Some(Stack::Ios), "Pods", true, false),
         rule("ios.build", Some(Stack::Ios), "build", true, false),
         rule(
@@ -170,7 +171,7 @@ pub const TEMPLATE: &str = r#"# DevSweep rule overrides.
 # [defaults]
 # "node.dist" = true
 #
-# Add a directory of your own. stack is "flutter", "android", "ios", "node",
+# Add a directory of your own. stack is "flutter", "android", "ios", "java", "node",
 # or "*" for every project type. label is optional.
 # [[extra]]
 # stack = "*"
@@ -276,6 +277,7 @@ fn parse_stack(stack: &str) -> Option<Option<Stack>> {
         "flutter" => Some(Some(Stack::Flutter)),
         "android" => Some(Some(Stack::Android)),
         "ios" => Some(Some(Stack::Ios)),
+        "java" => Some(Some(Stack::Java)),
         "node" => Some(Some(Stack::Node)),
         _ => None,
     }
@@ -424,6 +426,26 @@ mod tests {
         assert!(!find("node.dist").checked);
         assert!(find("node.dist").dangerous);
         assert!(targets.iter().all(|target| target.size.is_none()));
+    }
+
+    #[test]
+    fn java_targets_expand_and_stay_scoped_to_java() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("target/classes")).unwrap();
+        fs::create_dir_all(root.join("node_modules")).unwrap();
+
+        let mut java = project(root);
+        java.stack = Stack::Java;
+        let targets = expand_targets(&java, &builtin_rules());
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].rule_id, "java.target");
+        assert!(targets[0].checked);
+        assert!(!targets[0].dangerous);
+
+        let android = expand_targets(&project(root), &builtin_rules());
+        assert!(android.iter().all(|target| target.rule_id != "java.target"));
     }
 
     #[test]

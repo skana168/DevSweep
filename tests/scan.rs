@@ -223,3 +223,44 @@ fn scan_finds_realistic_tree_with_types_and_sorted_names() {
         ]
     );
 }
+
+#[test]
+fn maven_modules_are_java_projects_of_their_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    // Aggregator plus two modules, each with its own build output.
+    write(&root.join("repo/pom.xml"));
+    write(&root.join("repo/target/generated/pom.properties"));
+    write(&root.join("repo/core/pom.xml"));
+    write(&root.join("repo/core/target/classes/App.class"));
+    write(&root.join("repo/service/pom.xml"));
+    write(&root.join("repo/service/target/service.jar"));
+
+    let projects = scan(&[root.to_path_buf()]);
+    let found: Vec<(&str, Stack)> = projects
+        .iter()
+        .map(|project| (project.name.as_str(), project.stack))
+        .collect();
+
+    assert_eq!(
+        found,
+        vec![
+            ("core", Stack::Java),
+            ("repo", Stack::Java),
+            ("service", Stack::Java),
+        ]
+    );
+
+    for project in &projects {
+        let targets = devsweep::rules::expand_targets(project, &devsweep::rules::builtin_rules());
+        assert_eq!(
+            targets.len(),
+            1,
+            "{} should only see its own target",
+            project.name
+        );
+        assert_eq!(targets[0].rule_id, "java.target");
+        assert_eq!(targets[0].path, project.path.join("target"));
+    }
+}

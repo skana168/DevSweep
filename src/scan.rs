@@ -10,6 +10,7 @@ pub enum Stack {
     Flutter,
     Android,
     Ios,
+    Java,
     Node,
 }
 
@@ -155,6 +156,7 @@ fn classify(names: impl IntoIterator<Item = String>) -> Option<Stack> {
     let mut flutter = false;
     let mut ios = false;
     let mut android = false;
+    let mut java = false;
     let mut node = false;
 
     for name in names {
@@ -163,6 +165,7 @@ fn classify(names: impl IntoIterator<Item = String>) -> Option<Stack> {
             "settings.gradle" | "settings.gradle.kts" | "build.gradle" | "build.gradle.kts" => {
                 android = true
             }
+            "pom.xml" => java = true,
             "package.json" => node = true,
             any if any.ends_with(".xcodeproj") => ios = true,
             _ => {}
@@ -175,6 +178,8 @@ fn classify(names: impl IntoIterator<Item = String>) -> Option<Stack> {
         Some(Stack::Ios)
     } else if android {
         Some(Stack::Android)
+    } else if java {
+        Some(Stack::Java)
     } else if node {
         Some(Stack::Node)
     } else {
@@ -198,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_uses_flutter_ios_android_node_priority() {
+    fn classify_uses_flutter_ios_android_java_node_priority() {
         assert_eq!(
             classify(names(&["pubspec.yaml", "package.json"])),
             Some(Stack::Flutter)
@@ -210,6 +215,14 @@ mod tests {
         assert_eq!(
             classify(names(&["settings.gradle.kts", "package.json"])),
             Some(Stack::Android)
+        );
+        assert_eq!(
+            classify(names(&["build.gradle", "pom.xml"])),
+            Some(Stack::Android)
+        );
+        assert_eq!(
+            classify(names(&["pom.xml", "package.json"])),
+            Some(Stack::Java)
         );
         assert_eq!(classify(names(&["package.json"])), Some(Stack::Node));
         assert_eq!(classify(names(&[])), None);

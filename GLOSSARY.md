@@ -17,11 +17,11 @@ _Avoid_: 无效根、重复根
 _Avoid_: 仓库、代码库、模块
 
 **Marker（项目标记）**：
-让一个目录被认作 Project 的文件：`pubspec.yaml`、`settings.gradle(.kts)` / `build.gradle(.kts)`、`*.xcodeproj`、`package.json`。
+让一个目录被认作 Project 的文件：`pubspec.yaml`、`settings.gradle(.kts)` / `build.gradle(.kts)`、`*.xcodeproj`、`pom.xml`、`package.json`。
 _Avoid_: 项目文件、特征
 
 **Stack（项目类型）**：
-Project 所属的、唯一的产品技术栈家族：Flutter / iOS / Android / Node。一个目录带多种标记时按 Flutter > iOS > Android > Node 取其一；它决定哪些 Rule 适用。
+Project 所属的、唯一的产品技术栈家族：Flutter / iOS / Android / Java / Node。一个目录带多种标记时按 Flutter > iOS > Android > Java > Node 取其一；它决定哪些 Rule 适用。
 _Avoid_: 框架、平台、子项目类型
 
 **Platform directory（平台子目录）**：

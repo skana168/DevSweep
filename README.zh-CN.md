@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>找出项目里悄悄吃掉几十 GB 的构建产物和依赖缓存，勾选不需要的部分，一次清掉。</b><br>
-  macOS 与 Windows 上的本地应用：Flutter、Android、iOS、Node 项目，加上它们背后的全局缓存。
+  macOS 与 Windows 上的本地应用：Flutter、Android、iOS、Java、Node 项目，加上它们背后的全局缓存。
   没有云端，没有账号，数据不出本机。
 </p>
 
@@ -34,10 +34,10 @@
 
 ## 它做什么
 
-每个 Flutter、Android、iOS、Node 项目都会留下东西：`build/`、`node_modules/`、`.dart_tool/`、
-`Pods/`、`.next/`。DevSweep 遍历你指定的目录，认出每个项目，并用一张表告诉你其中有多少是可以
-丢掉的。打开某个项目，勾选要删的条目，确认面板，空间就回来了。同一个窗口里还列着与单个项目无关
-的全局缓存。
+每个 Flutter、Android、iOS、Java、Node 项目都会留下东西：`build/`、`node_modules/`、
+`.dart_tool/`、`Pods/`、`.next/`、`target/`。DevSweep 遍历你指定的目录，认出每个项目，并用一张表
+告诉你其中有多少是可以丢掉的。打开某个项目，勾选要删的条目，确认面板，空间就回来了。同一个窗口里
+还列着与单个项目无关的全局缓存。
 
 它从不自作主张地删东西：你不确认清理计划，就什么都不会动；而项目外的路径、`.git`、家目录、
 规则之外的东西永远不会进入这份计划。
@@ -65,7 +65,7 @@
 
 | 依赖缓存 | 工具链缓存 |
 |---|---|
-| Gradle caches、Gradle distributions、npm、pnpm、bun、Yarn、pub、CocoaPods | Playwright、Xcode DerivedData、Cargo registry、pip |
+| Gradle caches、Gradle distributions、Maven local repository、npm、pnpm、bun、Yarn、pub、CocoaPods | Playwright、Xcode DerivedData、Cargo registry、pip |
 
 清理其中一条会同时为所有项目腾出空间，下一次构建会重新下载或重建它需要的东西。这份清单固定，
 `rules.toml` 不能扩展也不能关闭它。

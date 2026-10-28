@@ -62,13 +62,13 @@ const fn local(rel: &'static str) -> Option<PathSpec> {
     })
 }
 
-/// The whitelist: these twelve entries are the only paths a global-cache
+/// The whitelist: these thirteen entries are the only paths a global-cache
 /// cleanup can touch. `id`s are stable once released.
 pub fn builtin_caches() -> &'static [CacheRule] {
     &CACHES
 }
 
-static CACHES: [CacheRule; 12] = [
+static CACHES: [CacheRule; 13] = [
     CacheRule {
         id: "gradle.caches",
         name: "Gradle caches",
@@ -83,6 +83,14 @@ static CACHES: [CacheRule; 12] = [
         group: CacheGroup::Dependency,
         mac: home(".gradle/wrapper/dists"),
         win: home(".gradle/wrapper/dists"),
+        dangerous: false,
+    },
+    CacheRule {
+        id: "maven.repository",
+        name: "Maven local repository",
+        group: CacheGroup::Dependency,
+        mac: home(".m2/repository"),
+        win: home(".m2/repository"),
         dangerous: false,
     },
     CacheRule {
@@ -228,7 +236,7 @@ pub struct CacheEntry {
     pub path: Option<PathBuf>,
 }
 
-/// All twelve entries with their path on this machine. Paths are not checked
+/// All thirteen entries with their path on this machine. Paths are not checked
 /// for existence here; the UI renders missing ones as "not found".
 pub fn entries() -> Vec<CacheEntry> {
     let env = Env::current();
@@ -288,18 +296,18 @@ mod tests {
     }
 
     #[test]
-    fn table_has_twelve_unique_entries_and_one_dangerous_one() {
+    fn table_has_thirteen_unique_entries_and_one_dangerous_one() {
         let rules = builtin_caches();
         let ids: HashSet<&str> = rules.iter().map(|rule| rule.id).collect();
 
-        assert_eq!(rules.len(), 12);
-        assert_eq!(ids.len(), 12);
+        assert_eq!(rules.len(), 13);
+        assert_eq!(ids.len(), 13);
         assert_eq!(
             rules
                 .iter()
                 .filter(|rule| rule.group == CacheGroup::Dependency)
                 .count(),
-            8
+            9
         );
         assert_eq!(
             rules
@@ -315,7 +323,7 @@ mod tests {
     fn every_entry_resolves_to_its_documented_path() {
         let home = Path::new("/home/dev");
         let local = Path::new("/win/local");
-        let expected: [(&str, PathBuf, Option<PathBuf>); 12] = [
+        let expected: [(&str, PathBuf, Option<PathBuf>); 13] = [
             (
                 "gradle.caches",
                 home.join(".gradle/caches"),
@@ -325,6 +333,11 @@ mod tests {
                 "gradle.dists",
                 home.join(".gradle/wrapper/dists"),
                 Some(home.join(".gradle/wrapper/dists")),
+            ),
+            (
+                "maven.repository",
+                home.join(".m2/repository"),
+                Some(home.join(".m2/repository")),
             ),
             (
                 "npm.cacache",

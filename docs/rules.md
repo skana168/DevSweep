@@ -24,7 +24,7 @@ disable = ["node.dist", "ios.pods"]
 [defaults]
 "node.dist" = true
 
-# 3. add a directory of your own (stack: flutter / android / ios / node / "*", label optional)
+# 3. add a directory of your own (stack: flutter / android / ios / java / node / "*", label optional)
 [[extra]]
 stack = "*"
 path = ".cache"
@@ -53,6 +53,7 @@ Extras are always checked by default and are never marked dangerous. Their ids a
 | Android | `android.gradle` | `.gradle` | yes |
 | Android | `android.cxx` | `.cxx` | yes |
 | Android | `android.captures` | `captures` | yes |
+| Java | `java.target` | `target` | yes |
 | iOS | `ios.pods` | `Pods` | yes |
 | iOS | `ios.build` | `build` | yes |
 | iOS | `ios.xcuserdata` | `*.xcodeproj/xcuserdata` | yes |
@@ -67,8 +68,9 @@ Extras are always checked by default and are never marked dangerous. Their ids a
 | Node | `node.coverage` | `coverage` | yes |
 | Node | `node.dist` | `dist` | **no** (dangerous) |
 
-A project carries one stack, chosen by priority Flutter > iOS > Android > Node, so only that
-stack's rules apply to it (see [ADR 0001](adr/0001-stack-is-one-product-type.md)).
+A project carries one stack, chosen by priority Flutter > iOS > Android > Java > Node, so only that
+stack's rules apply to it (see [ADR 0001](adr/0001-stack-is-one-product-type.md)). A `pom.xml`
+marks a Java project; a Gradle project counts as Android even when it builds plain JVM code.
 
 ## Paths
 
