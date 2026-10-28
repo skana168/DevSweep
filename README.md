@@ -43,8 +43,10 @@ that have nothing to do with any single project.
 
 Python projects are recognised by `pyproject.toml`, `setup.py`, `requirements.txt`, or `Pipfile`.
 Python cleanup currently covers root-level `.pytest_cache/`, `.mypy_cache/`, and `.ruff_cache/`.
-Virtual environments are excluded from project discovery; environment cleanup, build outputs,
-bytecode caches, and coverage reports are not included yet.
+Root-level `build/`, `dist/`, `*.egg-info/`, and `src/*.egg-info/` are also listed as dangerous
+items, unchecked by default: their contents may include files you saved manually. Virtual
+environments are excluded from project discovery; environment cleanup, bytecode caches, and
+coverage reports are not included yet.
 
 It never deletes anything on its own: nothing is touched until you confirm a plan, and nothing
 outside the rules (`.git`, your home folder, the project root, paths outside the project) can ever
