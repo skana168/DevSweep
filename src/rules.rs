@@ -1,11 +1,14 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
+use walkdir::WalkDir;
 
-use crate::scan::{Project, Stack};
+use crate::scan::{
+    Project, Stack, detect_stack, is_platform_subdir, is_pruned_name, is_virtualenv,
+};
 
 #[derive(Clone)]
 pub struct Rule {
@@ -178,6 +181,13 @@ pub fn builtin_rules() -> Vec<Rule> {
             true,
             false,
         ),
+        rule(
+            "python.pycache",
+            Some(Stack::Python),
+            "__pycache__",
+            true,
+            false,
+        ),
     ]
 }
 
@@ -320,7 +330,18 @@ pub fn expand_targets(project: &Project, rules: &[Rule]) -> Vec<Target> {
         if rule.stack.is_some_and(|stack| stack != project.stack) {
             continue;
         }
-        for path in resolve(&project.path, &rule.rel) {
+        let paths = if is_recursive_cache_rule(rule) {
+            WalkDir::new(&project.path)
+                .into_iter()
+                .filter_entry(|entry| recursive_cache_directory(&project.path, entry.path()))
+                .filter_map(Result::ok)
+                .filter(|entry| valid_recursive_cache(&project.path, entry.path()))
+                .map(|entry| entry.into_path())
+                .collect()
+        } else {
+            resolve(&project.path, &rule.rel)
+        };
+        for path in paths {
             if !valid_builtin_target(rule, &path) {
                 continue;
             }
@@ -340,6 +361,32 @@ pub fn expand_targets(project: &Project, rules: &[Rule]) -> Vec<Target> {
 
 pub(crate) fn valid_builtin_target(rule: &Rule, path: &Path) -> bool {
     !rule.id.starts_with("python.") || fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
+}
+
+pub(crate) fn is_recursive_cache_rule(rule: &Rule) -> bool {
+    rule.id == "python.pycache" && rule.stack == Some(Stack::Python)
+}
+
+pub(crate) fn valid_recursive_cache(root: &Path, path: &Path) -> bool {
+    path != root
+        && path.starts_with(root)
+        && path.file_name().is_some_and(|name| name == "__pycache__")
+        && path
+            .ancestors()
+            .take_while(|ancestor| ancestor.starts_with(root))
+            .all(|ancestor| recursive_cache_directory(root, ancestor))
+}
+
+fn recursive_cache_directory(root: &Path, path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
+        && !is_virtualenv(path)
+        && (path == root
+            || (!path.file_name().is_some_and(is_pruned_name)
+                && path.parent().is_none_or(|parent| {
+                    parent == root || parent.file_name().is_none_or(|name| name != "__pycache__")
+                })
+                && (detect_stack(path).is_none()
+                    || is_platform_subdir(path, &HashSet::from([root.to_path_buf()])))))
 }
 
 /// One `*` inside a segment, matching a literal name otherwise.
