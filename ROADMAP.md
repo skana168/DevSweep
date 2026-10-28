@@ -1,14 +1,14 @@
 # 开发计划（Roadmap）
 
-本文记录 DevSweep 后续支持的项目类型与配套能力，以下所有条目均为**待开发**。
-优先级是建议顺序，不代表发布日期承诺；具体清理规则需在实现前验证误删边界。
+本文记录 DevSweep 项目类型与配套能力的开发状态；Rust / Cargo 已随 **v0.3.0** 发布，其余条目仍为**待开发**。
+优先级是待开发条目的建议顺序，不代表发布日期承诺；具体清理规则需在实现前验证误删边界。
 当前已支持的能力见 [README](README.zh-CN.md)，现有清理行为见[规则参考](docs/rules.md)。
 
 ## 优先：Rust / Cargo 与 .NET
 
 | 项目类型 | 状态 | 识别标记 | 初步清理目标与价值 | 安全边界 |
 |---|---|---|---|---|
-| Rust / Cargo | 待开发 | `Cargo.toml` | 项目内默认 `target/`；集中清理构建产物，补齐已有 Cargo 全局缓存之外的项目支持 | Workspace 成员通常共用根目录的输出，避免重复归属；首版不追踪自定义输出位置，不清理项目外路径 |
+| Rust / Cargo | 已发布（[v0.3.0](https://github.com/skana168/DevSweep/releases/tag/v0.3.0)） | `Cargo.toml` | 已支持识别、筛选、体积统计与项目根目录真实 `target/` 的清理 | 危险项默认不勾选；Workspace 共享产物归根项目，成员只处理自身 `target/`；发现与最终计划均拒绝文件和符号链接；不追踪自定义输出位置，不清理项目外路径 |
 | .NET / C# / F# / Visual Basic | 待开发 | `*.csproj`、`*.fsproj`、`*.vbproj` | 具体项目内的 `bin/`、`obj/`；覆盖最终输出与中间产物，补充 Windows 开发场景 | 按项目标记限定清理范围，不因发现解决方案文件就递归删除所有同名目录；目录中的手工内容风险需在实现前验证 |
 
 参考：[Cargo 构建缓存](https://doc.rust-lang.org/cargo/reference/build-cache.html)、
@@ -39,9 +39,9 @@
 | 能力 | 状态 | 初步范围与价值 | 边界 |
 |---|---|---|---|
 | Go 全局缓存 | 待开发 | 优先评估 `GOCACHE` 构建缓存与 `GOMODCACHE` 模块缓存 | 暂不承诺新增 Go 项目类型；需验证自定义路径、模块缓存只读权限及清理后的重新下载行为 |
-| 混合项目覆盖 | 待开发 | 补齐 React Native 的原生目录规则，并验证未来 Tauri 的 Node 与 Rust 清理覆盖 | 遵循 [ADR 0001](docs/adr/0001-stack-is-one-product-type.md)：每个 Project 只有一个 Stack；补充有条件的规则并验证独立子项目的归属与去重，不改为同时应用多种类型的全部规则 |
+| 混合项目覆盖 | 待开发 | 补齐 React Native 的原生目录规则，并验证 Tauri 的 Node 与 Rust 清理覆盖 | 遵循 [ADR 0001](docs/adr/0001-stack-is-one-product-type.md)：每个 Project 只有一个 Stack；Rust 支持发布不代表同目录 Node 与 Rust 规则自动叠加；补充有条件的规则并验证独立子项目的归属与去重，不改为同时应用多种类型的全部规则 |
 
 参考：[Go 缓存位置与清理](https://go.dev/doc/manage-install)、
 [Go 模块缓存与权限](https://go.dev/ref/mod#module-cache)。
 
-以上顺序尚未通过实际项目的空间收益测量验证；清理目标、默认勾选和验证条件应在各项实现前明确。
+以上待开发条目的顺序尚未通过实际项目的空间收益测量验证；清理目标、默认勾选和验证条件应在各项实现前明确。
