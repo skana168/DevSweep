@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/icon.png" width="112" alt="DevSweep icon: an electric-blue D with a diagonal sweep cut on an ink-black tile">
+  <img src="assets/icon.png" width="128" height="128" alt="DevSweep icon: an electric-blue D with a diagonal sweep cut on an ink-black tile">
 </p>
 
 <h1 align="center">DevSweep</h1>
@@ -134,9 +134,11 @@ cargo build --release        # Windows portable exe: target\release\devsweep.exe
 ```
 
 CI runs `cargo test` on macOS and Windows for every push. Icons: `assets/icon.svg` is the source,
-rendered by `scripts/make-icons.sh` into `assets/icon.png` (README preview), `assets/icon.icns`
-(macOS bundle) and `assets/icon.ico` (embedded into the exe by `build.rs`). The rendered files are committed, so normal builds need
-neither rsvg nor ImageMagick.
+rendered by `scripts/make-icons.sh` into `assets/icon.png` (256 px, displayed at 128×128 in this
+README), `assets/icon-macos.png` (1024 px, with a centered 824 px tile), `assets/icon.icns`
+(macOS bundle) and `assets/icon.ico` (nine sizes from 16–256 px, embedded by `build.rs`). macOS
+bundles keep their system icon; direct development launches use the macOS PNG. The script checks
+sizes, transparency and margins. Rendered files are committed, so normal builds need no icon tools.
 
 Testing boundary: automated tests cover the core in `src/` (scan, rule matching, sizing, plan,
 delete, config). The UI layer has one test: that every font family can draw Chinese (`src/theme.rs`).
