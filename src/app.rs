@@ -1326,7 +1326,7 @@ impl DevSweepApp {
                     .column(Column::remainder().at_least(160.0).clip(true))
                     .column(Column::exact(90.0))
                     .column(Column::exact(100.0))
-                    .column(Column::exact(96.0))
+                    .column(Column::exact(108.0))
                     .column(Column::exact(44.0))
                     .header(42.0, |mut header| {
                         header.col(|ui| {
@@ -1862,6 +1862,8 @@ fn project_table_row(
         });
     });
     row.col(|ui| {
+        // Keep the clean button off the size column's right-aligned numbers.
+        ui.add_space(12.0);
         // Projects with nothing to clean keep only the folder actions.
         if cleanable
             && action_button(
