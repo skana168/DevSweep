@@ -25,6 +25,7 @@
   <a href="https://github.com/skana168/DevSweep/releases">全部版本</a> ·
   <a href="#从源码构建">从源码构建</a> ·
   <a href="docs/rules.md">规则参考</a> ·
+  <a href="ROADMAP.md">开发计划（Roadmap）</a> ·
   <a href="README.md">English</a>
 </p>
 
