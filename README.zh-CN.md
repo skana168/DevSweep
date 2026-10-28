@@ -34,22 +34,7 @@
 
 ## 它做什么
 
-每个 Flutter、Android、iOS、Java、Node、Python 项目都会留下东西：`build/`、`node_modules/`、
-`.dart_tool/`、`Pods/`、`.next/`、`target/`。DevSweep 遍历你指定的目录，认出每个项目，并用一张表
-告诉你其中有多少是可以丢掉的。打开某个项目，勾选要删的条目，确认面板，空间就回来了。同一个窗口里
-还列着与单个项目无关的全局缓存。
-
-Python 项目由 `pyproject.toml`、`setup.py`、`requirements.txt` 或 `Pipfile` 识别。当前支持清理
-项目根目录的 `.pytest_cache/`、`.mypy_cache/`、`.ruff_cache/`，以及递归发现的 `__pycache__/`。
-字节码缓存发现会避开虚拟环境、生成目录、符号链接与独立子项目，不受项目发现五层深度的限制。
-即使独立子项目超过五层也不会被父项目代清，需要添加更近的扫描根后单独发现并清理。
-根目录的 `build/`、`dist/`、`*.egg-info/` 及 `src/*.egg-info/` 也可清理，均为危险项、
-默认不勾选，需自行判断其中是否有人工保存的内容。根目录中含 `pyvenv.cfg` 的 `.venv/`、
-`venv/`、`env/` 虚拟环境也列为危险项，默认不勾选：手工安装的依赖可能无法完整重建。
-项目发现会跳过环境内部。暂不包含覆盖率报告。
-
-它从不自作主张地删东西：你不确认清理计划，就什么都不会动；而项目外的路径、`.git`、家目录、
-规则之外的东西永远不会进入这份计划。
+DevSweep 查找 Flutter、Android、iOS、Java、Node 和 Python 项目中的构建产物、依赖和缓存，以及共用的工具缓存。查看大小，选择要清理的内容，确认后执行。
 
 ## 功能
 

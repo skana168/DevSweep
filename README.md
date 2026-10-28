@@ -35,26 +35,7 @@
 
 ## What it does
 
-Every Flutter, Android, iOS, Java, Node and Python project leaves something behind: `build/`, `node_modules/`,
-`.dart_tool/`, `Pods/`, `.next/`, `target/`. DevSweep walks the folders you choose, recognises each
-project, and shows how much of it is expendable in one table. Open a project, tick the entries you
-want gone, confirm the panel, and the space comes back. The same window also lists the global caches
-that have nothing to do with any single project.
-
-Python projects are recognised by `pyproject.toml`, `setup.py`, `requirements.txt`, or `Pipfile`.
-Python cleanup covers root-level `.pytest_cache/`, `.mypy_cache/`, `.ruff_cache/`, and recursive
-`__pycache__/` directories. Bytecode cache discovery skips virtual environments, generated
-directories, symbolic links, and independent child projects, even beyond the five-level project
-discovery limit. Add a nearer scan root to discover and clean those deep child projects.
-Root-level `build/`, `dist/`, `*.egg-info/`, and `src/*.egg-info/` are also listed as dangerous
-items, unchecked by default: their contents may include files you saved manually.
-Root-level `.venv/`, `venv/`, and `env/` environments containing `pyvenv.cfg` are also listed
-as dangerous and start unchecked: manually installed dependencies may not be reproducible.
-Their contents are excluded from project discovery. Coverage reports are not included.
-
-It never deletes anything on its own: nothing is touched until you confirm a plan, and nothing
-outside the rules (`.git`, your home folder, the project root, paths outside the project) can ever
-be part of that plan.
+DevSweep finds build artifacts, dependencies, and caches in Flutter, Android, iOS, Java, Node, and Python projects, plus shared tool caches. Review their sizes, choose what to clean, and confirm.
 
 ## Features
 
