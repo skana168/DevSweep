@@ -24,7 +24,7 @@ disable = ["node.dist", "ios.pods"]
 [defaults]
 "node.dist" = true
 
-# 3. add a directory of your own (stack: flutter / android / ios / java / node / "*", label optional)
+# 3. add a directory of your own (stack: flutter / android / ios / java / node / python / "*", label optional)
 [[extra]]
 stack = "*"
 path = ".cache"
@@ -67,10 +67,29 @@ Extras are always checked by default and are never marked dangerous. Their ids a
 | Node | `node.vite` | `.vite` | yes |
 | Node | `node.coverage` | `coverage` | yes |
 | Node | `node.dist` | `dist` | **no** (dangerous) |
+| Python | `python.pytest_cache` | `.pytest_cache` | yes |
+| Python | `python.mypy_cache` | `.mypy_cache` | yes |
+| Python | `python.ruff_cache` | `.ruff_cache` | yes |
 
-A project carries one stack, chosen by priority Flutter > iOS > Android > Java > Node, so only that
+A project carries one stack, chosen by priority Flutter > iOS > Android > Java > Node > Python, so only that
 stack's rules apply to it (see [ADR 0001](adr/0001-stack-is-one-product-type.md)). A `pom.xml`
 marks a Java project; a Gradle project counts as Android even when it builds plain JVM code.
+
+## Python projects
+
+A `pyproject.toml`, `setup.py`, `requirements.txt`, or `Pipfile` file marks a Python project.
+A lone `.py`, `setup.cfg`, or environment directory does not. A tooling-only `pyproject.toml`
+also qualifies; an existing stack such as Node wins when its marker is in the same directory.
+
+Python currently cleans only the three root-level tool cache directories listed above.
+Virtual environments, build outputs, bytecode caches, and coverage reports are not included.
+Directories containing `pyvenv.cfg` are excluded from project discovery, including environments
+with custom names, so installed packages do not become projects. Ordinary source directories
+named `env` or `venv` without that marker are still scanned.
+
+Python built-in targets must be real directories when discovered and when the final delete plan
+is built; files and symbolic links are skipped. This mandatory validation is unaffected by
+`[defaults]`. Extra rules keep their existing user-defined behavior.
 
 ## Paths
 

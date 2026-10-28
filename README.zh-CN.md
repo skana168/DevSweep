@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>找出项目里悄悄吃掉几十 GB 的构建产物和依赖缓存，勾选不需要的部分，一次清掉。</b><br>
-  macOS 与 Windows 上的本地应用：Flutter、Android、iOS、Java、Node 项目，加上它们背后的全局缓存。
+  macOS 与 Windows 上的本地应用：Flutter、Android、iOS、Java、Node、Python 项目，加上它们背后的全局缓存。
   没有云端，没有账号，数据不出本机。
 </p>
 
@@ -34,10 +34,14 @@
 
 ## 它做什么
 
-每个 Flutter、Android、iOS、Java、Node 项目都会留下东西：`build/`、`node_modules/`、
+每个 Flutter、Android、iOS、Java、Node、Python 项目都会留下东西：`build/`、`node_modules/`、
 `.dart_tool/`、`Pods/`、`.next/`、`target/`。DevSweep 遍历你指定的目录，认出每个项目，并用一张表
 告诉你其中有多少是可以丢掉的。打开某个项目，勾选要删的条目，确认面板，空间就回来了。同一个窗口里
 还列着与单个项目无关的全局缓存。
+
+Python 项目由 `pyproject.toml`、`setup.py`、`requirements.txt` 或 `Pipfile` 识别。当前支持清理
+项目根目录的 `.pytest_cache/`、`.mypy_cache/`、`.ruff_cache/`；项目发现会跳过虚拟环境，
+暂不包含环境清理、构建产物、字节码缓存和覆盖率报告。
 
 它从不自作主张地删东西：你不确认清理计划，就什么都不会动；而项目外的路径、`.git`、家目录、
 规则之外的东西永远不会进入这份计划。

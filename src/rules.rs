@@ -157,6 +157,27 @@ pub fn builtin_rules() -> Vec<Rule> {
         rule("node.vite", Some(Stack::Node), ".vite", true, false),
         rule("node.coverage", Some(Stack::Node), "coverage", true, false),
         rule("node.dist", Some(Stack::Node), "dist", false, true),
+        rule(
+            "python.pytest_cache",
+            Some(Stack::Python),
+            ".pytest_cache",
+            true,
+            false,
+        ),
+        rule(
+            "python.mypy_cache",
+            Some(Stack::Python),
+            ".mypy_cache",
+            true,
+            false,
+        ),
+        rule(
+            "python.ruff_cache",
+            Some(Stack::Python),
+            ".ruff_cache",
+            true,
+            false,
+        ),
     ]
 }
 
@@ -171,7 +192,7 @@ pub const TEMPLATE: &str = r#"# DevSweep rule overrides.
 # [defaults]
 # "node.dist" = true
 #
-# Add a directory of your own. stack is "flutter", "android", "ios", "java", "node",
+# Add a directory of your own. stack is "flutter", "android", "ios", "java", "node", "python",
 # or "*" for every project type. label is optional.
 # [[extra]]
 # stack = "*"
@@ -279,6 +300,7 @@ fn parse_stack(stack: &str) -> Option<Option<Stack>> {
         "ios" => Some(Some(Stack::Ios)),
         "java" => Some(Some(Stack::Java)),
         "node" => Some(Some(Stack::Node)),
+        "python" => Some(Some(Stack::Python)),
         _ => None,
     }
 }
@@ -299,6 +321,9 @@ pub fn expand_targets(project: &Project, rules: &[Rule]) -> Vec<Target> {
             continue;
         }
         for path in resolve(&project.path, &rule.rel) {
+            if !valid_builtin_target(rule, &path) {
+                continue;
+            }
             targets.push(Target {
                 rule_id: rule.id.clone(),
                 path,
@@ -311,6 +336,10 @@ pub fn expand_targets(project: &Project, rules: &[Rule]) -> Vec<Target> {
         }
     }
     targets
+}
+
+pub(crate) fn valid_builtin_target(rule: &Rule, path: &Path) -> bool {
+    !rule.id.starts_with("python.") || fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
 }
 
 /// One `*` inside a segment, matching a literal name otherwise.

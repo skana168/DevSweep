@@ -86,6 +86,7 @@ pub struct Strings {
     pub stack_ios: &'static str,
     pub stack_java: &'static str,
     pub stack_node: &'static str,
+    pub stack_python: &'static str,
     pub global_caches: &'static str,
     pub cache_column: &'static str,
     pub group_column: &'static str,
@@ -131,6 +132,7 @@ impl Strings {
             Stack::Ios => self.stack_ios,
             Stack::Java => self.stack_java,
             Stack::Node => self.stack_node,
+            Stack::Python => self.stack_python,
         }
     }
 
@@ -215,6 +217,7 @@ static ZH: Strings = Strings {
     stack_ios: "iOS",
     stack_java: "Java",
     stack_node: "Node",
+    stack_python: "Python",
     global_caches: "全局缓存",
     cache_column: "缓存",
     group_column: "分组",
@@ -302,6 +305,7 @@ static EN: Strings = Strings {
     stack_ios: "iOS",
     stack_java: "Java",
     stack_node: "Node",
+    stack_python: "Python",
     global_caches: "Global caches",
     cache_column: "Cache",
     group_column: "Group",
