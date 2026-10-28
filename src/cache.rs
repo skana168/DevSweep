@@ -470,6 +470,21 @@ mod tests {
     }
 
     #[test]
+    fn the_table_lists_dependency_caches_before_toolchain_ones() {
+        let groups: Vec<CacheGroup> = builtin_caches().iter().map(|rule| rule.group).collect();
+        let first_toolchain = groups
+            .iter()
+            .position(|group| *group == CacheGroup::Toolchain)
+            .expect("at least one toolchain entry");
+        assert!(
+            groups[first_toolchain..]
+                .iter()
+                .all(|group| *group == CacheGroup::Toolchain),
+            "the cache table renders in table order, so groups must not interleave"
+        );
+    }
+
+    #[test]
     fn plan_only_accepts_directory_like_entries() {
         let dir = tempfile::tempdir().unwrap();
         let env = env(dir.path(), Platform::MacOs);

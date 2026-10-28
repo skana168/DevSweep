@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use devsweep::cache::{self, CacheGroup, CacheRule};
+use devsweep::cache::{self, CacheRule};
 use devsweep::config::{self, Config, LanguageChoice, ThemeChoice};
 use devsweep::delete::{self, DeleteEvent, DeleteMode, Failure};
 use devsweep::plan::{self, DeletePlan, PlanProject};
@@ -26,8 +26,8 @@ use crate::theme::{self, Tokens};
 /// A window that spent this long in the background gets a fresh scan on focus.
 const REFRESH_AFTER: Duration = Duration::from_secs(30);
 
-/// A project row carries a name, a path and its two row actions.
-const PROJECT_ROW_H: f32 = 56.0;
+/// A table row carries a name, a path and its two row actions.
+const ROW_H: f32 = 56.0;
 
 /// The height of a segmented cell and of the settings sheet's controls.
 const CELL_H: f32 = 34.0;
@@ -1358,7 +1358,7 @@ impl DevSweepApp {
                                 continue;
                             };
                             let last = Some(index) == last_index;
-                            body.row(PROJECT_ROW_H, |mut row| {
+                            body.row(ROW_H, |mut row| {
                                 let hit = project_table_row(
                                     &mut row, project, entry, last, running, t, s, span,
                                 )
@@ -1410,31 +1410,52 @@ impl DevSweepApp {
         let mut clean = None;
         let mut action = None;
         let busy = self.execution.is_some();
-        ScrollArea::vertical()
-            .auto_shrink([false, false])
+
+        // Rules run across the whole table, padding included.
+        let span = ui.available_rect_before_wrap().x_range();
+        let last_index = self.caches.len().checked_sub(1);
+
+        Frame::new()
+            .stroke(t.hairline())
+            .inner_margin(egui::Margin::symmetric(16, 0))
             .show(ui, |ui| {
-                for (group, title) in [
-                    (CacheGroup::Dependency, s.cache_group_dependency),
-                    (CacheGroup::Toolchain, s.cache_group_toolchain),
-                ] {
-                    let mut heading = false;
-                    for row in self.caches.iter_mut().filter(|row| row.rule.group == group) {
-                        if !heading {
-                            ui.label(theme::hud(title, t.text_muted));
-                            ui.add_space(6.0);
-                            heading = true;
+                TableBuilder::new(ui)
+                    .striped(false)
+                    .cell_layout(Layout::left_to_right(Align::Center))
+                    .column(Column::remainder().at_least(160.0).clip(true))
+                    .column(Column::exact(110.0))
+                    .column(Column::exact(100.0))
+                    .column(Column::exact(108.0))
+                    .column(Column::exact(44.0))
+                    .header(42.0, |mut header| {
+                        header.col(|ui| {
+                            ui.label(theme::hud(s.cache_column, t.text_muted));
+                            row_rule(ui, t, span);
+                        });
+                        header.col(|ui| {
+                            ui.label(theme::hud(s.group_column, t.text_muted));
+                        });
+                        header.col(|ui| {
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.label(theme::hud(s.size_column, t.text_muted));
+                            });
+                        });
+                        header.col(|_| {});
+                        header.col(|_| {});
+                    })
+                    .body(|mut body| {
+                        for (index, row) in self.caches.iter().enumerate() {
+                            let last = Some(index) == last_index;
+                            body.row(ROW_H, |mut table_row| {
+                                let (event, event_action) =
+                                    cache_table_row(&mut table_row, row, last, busy, t, s, span);
+                                clean = clean.or(event);
+                                if event_action.is_some() {
+                                    action = event_action;
+                                }
+                            });
                         }
-                        let (event, event_action) = cache_row(ui, row, t, s, busy);
-                        clean = clean.or(event);
-                        if event_action.is_some() {
-                            action = event_action;
-                        }
-                        ui.add_space(6.0);
-                    }
-                    if heading {
-                        ui.add_space(12.0);
-                    }
-                }
+                    });
             });
 
         if let Some(rule) = clean {
@@ -1914,90 +1935,95 @@ fn row_rule(ui: &Ui, t: &Tokens, span: egui::Rangef) {
         .hline(span, y, t.hairline());
 }
 
-fn cache_row(
-    ui: &mut Ui,
-    row: &mut CacheRow,
+/// One cache row: name + path, group, size, and the two row actions.
+///
+/// The "last row" flag skips the rule under the final row, where the table's own
+/// frame already draws one.
+#[allow(clippy::too_many_arguments)]
+fn cache_table_row(
+    row: &mut TableRow<'_, '_>,
+    cache: &CacheRow,
+    last: bool,
+    busy: bool,
     t: &Tokens,
     s: &Strings,
-    busy: bool,
+    span: egui::Rangef,
 ) -> (Option<&'static CacheRule>, Option<(PathBuf, RowAction)>) {
-    let exists = row.path.as_ref().is_some_and(|path| path.is_dir());
-    let missing = !exists && !row.cleaned;
+    let exists = cache.path.as_ref().is_some_and(|path| path.is_dir());
+    let missing = !exists && !cache.cleaned;
     let mut clean = false;
     let mut action = None;
 
-    Frame::new()
-        .fill(t.surface)
-        .stroke(t.hairline())
-        .inner_margin(egui::Margin::symmetric(16, 10))
-        .show(ui, |ui| {
+    row.col(|ui| {
+        if !last {
+            row_rule(ui, t, span);
+        }
+        ui.vertical(|ui| {
             ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.set_max_width((ui.available_width() - 240.0).max(120.0));
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(row.rule.name)
-                                .size(14.0)
-                                .strong()
-                                .color(t.text),
-                        );
-                        // Only the cargo registry carries a risk note today.
-                        if row.rule.id == "cargo.registry" {
-                            ui.label(RichText::new(s.cache_cargo_note).size(11.0).color(t.danger));
-                        }
-                    });
-                    if let Some(path) = &row.path {
-                        let label = Label::new(
-                            RichText::new(path.display().to_string())
-                                .size(11.0)
-                                .monospace()
-                                .color(t.text_muted),
-                        )
-                        .truncate();
-                        ui.add(label).on_hover_text(path.display().to_string());
-                    }
-                });
-
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    // Nothing to open when the entry is not on this machine.
-                    if let Some(path) = row.path.as_ref().filter(|_| exists)
-                        && let Some(choice) = more_menu(ui, t, s)
-                    {
-                        action = Some((path.clone(), choice));
-                    }
-                    ui.add_space(8.0);
-                    let armed = exists && !row.cleaned && !busy && row.size.is_some();
-                    if action_button(
-                        ui,
-                        s.clean,
-                        Kind::Secondary,
-                        t,
-                        armed,
-                        egui::vec2(0.0, CELL_H),
-                    ) {
-                        clean = true;
-                    }
-                    ui.add_space(8.0);
-                    let (text, color) = if missing {
-                        (s.cache_not_found.to_string(), t.danger)
-                    } else {
-                        match row.size {
-                            Some(bytes) => (size::format_size(bytes), t.good),
-                            None => ("…".to_string(), t.text_muted),
-                        }
-                    };
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(88.0, 18.0),
-                        Layout::right_to_left(Align::Center),
-                        |ui| {
-                            ui.label(RichText::new(text).size(13.0).monospace().color(color));
-                        },
-                    );
-                });
+                ui.label(
+                    RichText::new(cache.rule.name)
+                        .size(14.0)
+                        .strong()
+                        .color(t.text),
+                );
+                // Only the cargo registry carries a risk note today.
+                if cache.rule.id == "cargo.registry" {
+                    ui.label(RichText::new(s.cache_cargo_note).size(11.0).color(t.danger));
+                }
             });
+            if let Some(path) = &cache.path {
+                let label = Label::new(
+                    RichText::new(path.display().to_string())
+                        .size(11.0)
+                        .monospace()
+                        .color(t.text_muted),
+                )
+                .truncate();
+                ui.add(label).on_hover_text(path.display().to_string());
+            }
         });
+    });
+    row.col(|ui| {
+        chip(ui, s.cache_group(cache.rule.group), t);
+    });
+    row.col(|ui| {
+        let (text, color) = if missing {
+            (s.cache_not_found.to_string(), t.danger)
+        } else {
+            match cache.size {
+                Some(bytes) => (size::format_size(bytes), t.good),
+                None => ("…".to_string(), t.text_muted),
+            }
+        };
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(RichText::new(text).size(13.0).monospace().color(color));
+        });
+    });
+    row.col(|ui| {
+        // Keep the clean button off the size column's right-aligned numbers.
+        ui.add_space(12.0);
+        let armed = exists && !cache.cleaned && !busy && cache.size.is_some();
+        if action_button(
+            ui,
+            s.clean,
+            Kind::Secondary,
+            t,
+            armed,
+            egui::vec2(84.0, CELL_H),
+        ) {
+            clean = true;
+        }
+    });
+    row.col(|ui| {
+        // Nothing to open when the entry is not on this machine.
+        if let Some(path) = cache.path.as_ref().filter(|_| exists)
+            && let Some(choice) = more_menu(ui, t, s)
+        {
+            action = Some((path.clone(), choice));
+        }
+    });
 
-    (clean.then_some(row.rule), action)
+    (clean.then_some(cache.rule), action)
 }
 
 fn project_name(path: &Path) -> String {

@@ -1,3 +1,4 @@
+use devsweep::cache::CacheGroup;
 use devsweep::config::LanguageChoice;
 use devsweep::delete::FailureReason;
 use devsweep::plan::SkipReason;
@@ -85,6 +86,8 @@ pub struct Strings {
     pub stack_ios: &'static str,
     pub stack_node: &'static str,
     pub global_caches: &'static str,
+    pub cache_column: &'static str,
+    pub group_column: &'static str,
     pub cache_group_dependency: &'static str,
     pub cache_group_toolchain: &'static str,
     pub cache_not_found: &'static str,
@@ -124,6 +127,13 @@ impl Strings {
             Stack::Android => self.stack_android,
             Stack::Ios => self.stack_ios,
             Stack::Node => self.stack_node,
+        }
+    }
+
+    pub fn cache_group(&self, group: CacheGroup) -> &'static str {
+        match group {
+            CacheGroup::Dependency => self.cache_group_dependency,
+            CacheGroup::Toolchain => self.cache_group_toolchain,
         }
     }
 
@@ -201,8 +211,10 @@ static ZH: Strings = Strings {
     stack_ios: "iOS",
     stack_node: "Node",
     global_caches: "全局缓存",
-    cache_group_dependency: "依赖缓存",
-    cache_group_toolchain: "工具链缓存",
+    cache_column: "缓存",
+    group_column: "分组",
+    cache_group_dependency: "依赖",
+    cache_group_toolchain: "工具链",
     cache_not_found: "未找到",
     cache_redownload: "清理后需重新下载",
     cache_cargo_note: "清理会影响本机 Rust 构建",
@@ -283,8 +295,10 @@ static EN: Strings = Strings {
     stack_ios: "iOS",
     stack_node: "Node",
     global_caches: "Global caches",
-    cache_group_dependency: "Dependency caches",
-    cache_group_toolchain: "Toolchain caches",
+    cache_column: "Cache",
+    group_column: "Group",
+    cache_group_dependency: "Dependency",
+    cache_group_toolchain: "Toolchain",
     cache_not_found: "Not found",
     cache_redownload: "Downloads again next time",
     cache_cargo_note: "Affects Rust builds on this machine",
