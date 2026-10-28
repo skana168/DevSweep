@@ -1,21 +1,21 @@
 # 开发计划（Roadmap）
 
-本文记录 DevSweep 项目类型与配套能力的开发状态；Rust / Cargo 已随 **v0.3.0** 发布，.NET 已实现但尚未发布，其余条目仍为**待开发**。
+本文记录 DevSweep 项目类型与配套能力的开发状态；Rust / Cargo 已随 **v0.3.0** 发布，.NET 已实现并合入 `main`、尚未发布，其余条目仍为**待开发**。
 优先级是待开发条目的建议顺序，不代表发布日期承诺；具体清理规则需在实现前验证误删边界。
 当前已支持的能力见 [README](README.zh-CN.md)，现有清理行为见[规则参考](docs/rules.md)。
 
-## 优先：Rust / Cargo 与 .NET
+## 已完成：Rust / Cargo 与 .NET
 
 | 项目类型 | 状态 | 识别标记 | 初步清理目标与价值 | 安全边界 |
 |---|---|---|---|---|
 | Rust / Cargo | 已发布（[v0.3.0](https://github.com/skana168/DevSweep/releases/tag/v0.3.0)） | `Cargo.toml` | 已支持识别、筛选、体积统计与项目根目录真实 `target/` 的清理 | 危险项默认不勾选；Workspace 共享产物归根项目，成员只处理自身 `target/`；发现与最终计划均拒绝文件和符号链接；不追踪自定义输出位置，不清理项目外路径 |
-| .NET / C# / F# / Visual Basic | 已实现，未发布 | `*.csproj`、`*.fsproj`、`*.vbproj`（真实普通文件，扩展名大小写不敏感） | 已支持统一 .NET 类型识别、筛选、体积统计及项目根直属、精确小写的真实 `bin/`、`obj/` 整目录清理 | 两项独立、危险且默认不勾选；手工内容也会被删除；发现与最终计划拒绝文件、符号链接；解决方案不触发递归清理；不追踪自定义或集中输出，清理前应停止构建 |
+| .NET / C# / F# / Visual Basic | 已合入 `main`（`fdaf2c7`），未发布 | `*.csproj`、`*.fsproj`、`*.vbproj`（真实普通文件，扩展名大小写不敏感） | 已支持统一 .NET 类型识别、筛选、体积统计及项目根直属、精确小写的真实 `bin/`、`obj/` 整目录清理 | 两项独立、危险且默认不勾选；手工内容也会被删除；发现与最终计划拒绝文件、符号链接；解决方案不触发递归清理；不追踪自定义或集中输出，清理前应停止构建 |
 
 参考：[Cargo 构建缓存](https://doc.rust-lang.org/cargo/reference/build-cache.html)、
 [cargo clean](https://doc.rust-lang.org/cargo/commands/cargo-clean.html)、
 [dotnet clean](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-clean)。
 
-## 随后：Swift Package
+## 下一优先项：Swift Package
 
 | 项目类型 | 状态 | 识别标记 | 初步清理目标与价值 | 安全边界 |
 |---|---|---|---|---|
