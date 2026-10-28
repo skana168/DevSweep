@@ -42,12 +42,15 @@ want gone, confirm the panel, and the space comes back. The same window also lis
 that have nothing to do with any single project.
 
 Python projects are recognised by `pyproject.toml`, `setup.py`, `requirements.txt`, or `Pipfile`.
-Python cleanup covers root-level `.pytest_cache/`, `.mypy_cache/`, and `.ruff_cache/`, plus
-`.venv/`, `venv/`, and `env/` environments containing `pyvenv.cfg`. Environments are dangerous
-and start unchecked: manually installed dependencies may not be reproducible. Their contents
-are excluded from project discovery. Root-level `build/`, `dist/`, `*.egg-info/`, and
-`src/*.egg-info/` are also listed as dangerous items, unchecked by default: their contents may
-include files you saved manually. Bytecode caches and coverage reports are not included yet.
+Python cleanup covers root-level `.pytest_cache/`, `.mypy_cache/`, `.ruff_cache/`, and recursive
+`__pycache__/` directories. Bytecode cache discovery skips virtual environments, generated
+directories, symbolic links, and independent child projects, even beyond the five-level project
+discovery limit. Add a nearer scan root to discover and clean those deep child projects.
+Root-level `build/`, `dist/`, `*.egg-info/`, and `src/*.egg-info/` are also listed as dangerous
+items, unchecked by default: their contents may include files you saved manually.
+Root-level `.venv/`, `venv/`, and `env/` environments containing `pyvenv.cfg` are also listed
+as dangerous and start unchecked: manually installed dependencies may not be reproducible.
+Their contents are excluded from project discovery. Coverage reports are not included.
 
 It never deletes anything on its own: nothing is touched until you confirm a plan, and nothing
 outside the rules (`.git`, your home folder, the project root, paths outside the project) can ever

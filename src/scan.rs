@@ -129,7 +129,7 @@ fn is_pruned(entry: &DirEntry) -> bool {
     entry.file_type().is_dir() && is_pruned_name(entry.file_name())
 }
 
-fn is_pruned_name(name: &std::ffi::OsStr) -> bool {
+pub(crate) fn is_pruned_name(name: &std::ffi::OsStr) -> bool {
     name.to_str().is_some_and(|name| PRUNED.contains(&name))
 }
 
@@ -137,7 +137,7 @@ pub(crate) fn is_virtualenv(path: &Path) -> bool {
     path.join("pyvenv.cfg").is_file()
 }
 
-fn is_platform_subdir(path: &Path, registered: &HashSet<PathBuf>) -> bool {
+pub(crate) fn is_platform_subdir(path: &Path, registered: &HashSet<PathBuf>) -> bool {
     let mut current = path;
     while let Some(parent) = current.parent() {
         let is_platform = current
@@ -151,7 +151,7 @@ fn is_platform_subdir(path: &Path, registered: &HashSet<PathBuf>) -> bool {
     false
 }
 
-fn detect_stack(path: &Path) -> Option<Stack> {
+pub(crate) fn detect_stack(path: &Path) -> Option<Stack> {
     let names = fs::read_dir(path)
         .ok()?
         .filter_map(Result::ok)

@@ -70,6 +70,7 @@ Extras are always checked by default and are never marked dangerous. Their ids a
 | Python | `python.pytest_cache` | `.pytest_cache` | yes |
 | Python | `python.mypy_cache` | `.mypy_cache` | yes |
 | Python | `python.ruff_cache` | `.ruff_cache` | yes |
+| Python | `python.pycache` | `__pycache__` (recursive) | yes |
 | Python | `python.build` | `build` | **no** (dangerous) |
 | Python | `python.dist` | `dist` | **no** (dangerous) |
 | Python | `python.egg_info` | `*.egg-info` | **no** (dangerous) |
@@ -88,18 +89,29 @@ A `pyproject.toml`, `setup.py`, `requirements.txt`, or `Pipfile` file marks a Py
 A lone `.py`, `setup.cfg`, or environment directory does not. A tooling-only `pyproject.toml`
 also qualifies; an existing stack such as Node wins when its marker is in the same directory.
 
-Python cleans the three root-level tool cache directories and the scoped build outputs listed
-above, plus root-level `.venv/`, `venv/`, and `env/` environments containing a `pyvenv.cfg` file.
+Python cleans the three root-level tool caches, recursive `__pycache__` directories, and the
+scoped build outputs listed above, plus root-level `.venv/`, `venv/`, and `env/` environments
+containing a `pyvenv.cfg` file.
 Environments are dangerous and start unchecked; their entire size is shown even when they are
 not selected. The marker confirms environment identity, not that manually installed dependencies
 can be rebuilt. Custom environment names, nested environments, `.tox`, `.nox`, and Conda
 environments are not included in environment cleanup. Build outputs are also dangerous and
 unchecked by default: directory names do not prove the contents are reproducible or exclude
 manually saved files. Build output patterns do not recurse into arbitrary directories or match
-source-adjacent `.so` / `.pyd` files. Bytecode caches and coverage reports are not included yet.
+source-adjacent `.so` / `.pyd` files. Coverage reports are not included.
 Directories containing `pyvenv.cfg` are excluded from project discovery, including environments
 with custom names, so installed packages do not become projects. Ordinary source directories
 named `env` or `venv` without that marker are still scanned.
+
+The built-in `python.pycache` rule finds bytecode cache directories without a depth limit, while
+project discovery remains limited to five levels below each scan root. Recursion skips existing
+generated-directory exclusions, virtual environments, symbolic links, and independent child
+projects of any stack. Platform subdirectories retain their existing parent-project ownership.
+A child project stops traversal even when it is too deep to appear in the project list; add that
+directory or a nearer ancestor as a scan root to discover and clean it separately. Each cache is
+one Target, including its contents. These boundaries are checked again when building the final
+delete plan. This recursive behavior belongs only to the built-in rule; Extra rule syntax is
+unchanged and does not gain a `**` wildcard.
 
 Python built-in targets must be real directories when discovered and when the final delete plan
 is built; files and symbolic links are skipped. Environment identity is rechecked in the final
