@@ -13,6 +13,7 @@ pub enum Stack {
     Java,
     Node,
     Python,
+    Rust,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,12 +157,14 @@ pub(crate) fn detect_stack(path: &Path) -> Option<Stack> {
         .ok()?
         .filter_map(Result::ok)
         .map(|entry| entry.file_name().to_string_lossy().into_owned());
-    classify(names).or_else(|| {
-        ["pyproject.toml", "setup.py", "requirements.txt", "Pipfile"]
-            .iter()
-            .any(|marker| path.join(marker).is_file())
-            .then_some(Stack::Python)
-    })
+    classify(names)
+        .or_else(|| {
+            ["pyproject.toml", "setup.py", "requirements.txt", "Pipfile"]
+                .iter()
+                .any(|marker| path.join(marker).is_file())
+                .then_some(Stack::Python)
+        })
+        .or_else(|| path.join("Cargo.toml").is_file().then_some(Stack::Rust))
 }
 
 fn classify(names: impl IntoIterator<Item = String>) -> Option<Stack> {

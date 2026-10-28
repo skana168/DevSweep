@@ -102,6 +102,15 @@ Deletions go to the **Trash** (Recycle Bin on Windows) by default, so a mistake 
 Settings can switch to permanent deletion. The list refreshes when the window regains focus after
 more than 30 seconds away: measured sizes survive that refresh, the panel's ticks do not.
 
+### Cargo project discovery
+
+A directory containing a `Cargo.toml` file is recognized as a Rust project without parsing the
+manifest. This includes workspace roots with no package of their own. Workspace roots and member
+directories appear separately, even when they have no cleanable items; membership is not resolved.
+Discovery stays within the scan roots, up to five levels deep, and skips build and dependency folders.
+Each project has one stack: Flutter > iOS > Android > Java > Node > Python > Rust. Existing markers
+win when they share a directory with `Cargo.toml`; independent Rust subdirectories can still appear.
+
 ## Custom rules
 
 Project rules are built in; `rules.toml` turns them off, changes which ones start checked, or adds a

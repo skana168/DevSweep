@@ -9,6 +9,32 @@ fn write(path: &Path) {
 }
 
 #[test]
+fn cargo_marker_files_identify_projects_without_parsing_the_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for (name, manifest) in [
+        ("package", "[package]\nname = \"demo\"\nversion = \"0.1.0\""),
+        ("workspace", "[workspace]\nmembers = []"),
+        ("invalid", "this is not a Cargo manifest"),
+    ] {
+        write(&root.join(name).join("Cargo.toml"));
+        fs::write(root.join(name).join("Cargo.toml"), manifest).unwrap();
+    }
+    write(&root.join("source/main.rs"));
+    write(&root.join("lock/Cargo.lock"));
+    fs::create_dir_all(root.join("artifact/target")).unwrap();
+    fs::create_dir_all(root.join("not-a-file/Cargo.toml")).unwrap();
+
+    let projects = scan(&[root.to_path_buf()]);
+
+    assert_eq!(
+        projects.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+        vec!["invalid", "package", "workspace"]
+    );
+    assert!(projects.iter().all(|project| project.stack == Stack::Rust));
+}
+
+#[test]
 fn python_marker_files_identify_projects_without_treating_scripts_as_projects() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
@@ -325,4 +351,94 @@ fn maven_modules_are_java_projects_of_their_own() {
         assert_eq!(targets[0].rule_id, "java.target");
         assert_eq!(targets[0].path, project.path.join("target"));
     }
+}
+
+#[test]
+fn rust_marker_preserves_existing_stack_priority_and_independent_children() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for (name, marker) in [
+        ("flutter", "pubspec.yaml"),
+        ("ios", "App.xcodeproj/project.pbxproj"),
+        ("android", "build.gradle.kts"),
+        ("java", "pom.xml"),
+        ("node", "package.json"),
+        ("python", "pyproject.toml"),
+    ] {
+        write(&root.join(name).join(marker));
+        write(&root.join(name).join("Cargo.toml"));
+    }
+    write(&root.join("node/native/Cargo.toml"));
+
+    let projects = scan(&[root.to_path_buf()]);
+
+    assert_eq!(
+        projects
+            .iter()
+            .map(|project| (project.name.as_str(), project.stack))
+            .collect::<Vec<_>>(),
+        vec![
+            ("android", Stack::Android),
+            ("flutter", Stack::Flutter),
+            ("ios", Stack::Ios),
+            ("java", Stack::Java),
+            ("native", Stack::Rust),
+            ("node", Stack::Node),
+            ("python", Stack::Python),
+        ]
+    );
+}
+
+#[test]
+fn cargo_workspace_root_and_members_are_discovered_without_following_membership() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    write(&workspace.join("Cargo.toml"));
+    fs::write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"crates/member\"]",
+    )
+    .unwrap();
+    write(&workspace.join("crates/member/Cargo.toml"));
+    write(&workspace.join("excluded/Cargo.toml"));
+    write(&workspace.join("target/generated/Cargo.toml"));
+
+    let projects = scan(std::slice::from_ref(&workspace));
+    assert_eq!(
+        projects
+            .iter()
+            .map(|project| project.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["excluded", "member", "workspace"]
+    );
+    assert!(projects.iter().all(|project| project.stack == Stack::Rust));
+
+    let member_only = scan(&[workspace.join("crates/member")]);
+    assert_eq!(member_only.len(), 1);
+    assert_eq!(member_only[0].name, "member");
+}
+
+#[test]
+fn rust_discovery_keeps_depth_platform_merge_and_overlapping_root_boundaries() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(&root.join("app/Cargo.toml"));
+    write(&root.join("app/windows/Cargo.toml"));
+    write(&root.join("a/b/c/d/e/Cargo.toml"));
+    write(&root.join("a/b/c/d/e/f/Cargo.toml"));
+
+    let expected = scan(&[root.to_path_buf()]);
+    assert_eq!(
+        expected
+            .iter()
+            .map(|project| project.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["app", "e"]
+    );
+
+    let mut projects = scan(&[root.join("app/windows")]);
+    assert_eq!(projects.len(), 1);
+    merge_scan(&mut projects, scan(&[root.to_path_buf()]));
+    merge_scan(&mut projects, scan(&[root.join("app")]));
+    assert_eq!(projects, expected);
 }

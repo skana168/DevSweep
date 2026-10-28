@@ -1017,6 +1017,7 @@ impl DevSweepApp {
                 Stack::Java,
                 Stack::Node,
                 Stack::Python,
+                Stack::Rust,
             ]
             .map(|stack| (Some(stack), s.stack(stack))),
         );
