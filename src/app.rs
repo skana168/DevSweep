@@ -111,6 +111,12 @@ struct CacheRow {
     cleaned: bool,
 }
 
+/// Whether a cache row belongs in the list: its path is on disk, or it was just
+/// cleaned and still shows the result until the next rescan.
+fn cache_present(row: &CacheRow) -> bool {
+    row.cleaned || row.path.as_ref().is_some_and(|path| path.is_dir())
+}
+
 struct ProjectEntry {
     targets: Vec<Target>,
 }
@@ -435,7 +441,7 @@ impl DevSweepApp {
     fn cache_total(&self) -> Option<u64> {
         self.caches
             .iter()
-            .filter(|row| row.cleaned || row.path.as_ref().is_some_and(|path| path.is_dir()))
+            .filter(|row| cache_present(row))
             .try_fold(0, |sum, row| row.size.map(|size| sum + size))
     }
 
@@ -1413,7 +1419,7 @@ impl DevSweepApp {
 
         // Rules run across the whole table, padding included.
         let span = ui.available_rect_before_wrap().x_range();
-        let last_index = self.caches.len().checked_sub(1);
+        let shown = self.caches.iter().filter(|row| cache_present(row)).count();
 
         Frame::new()
             .stroke(t.hairline())
@@ -1444,8 +1450,13 @@ impl DevSweepApp {
                         header.col(|_| {});
                     })
                     .body(|mut body| {
-                        for (index, row) in self.caches.iter().enumerate() {
-                            let last = Some(index) == last_index;
+                        for (index, row) in self
+                            .caches
+                            .iter()
+                            .filter(|row| cache_present(row))
+                            .enumerate()
+                        {
+                            let last = index + 1 == shown;
                             body.row(ROW_H, |mut table_row| {
                                 let (event, event_action) =
                                     cache_table_row(&mut table_row, row, last, busy, t, s, span);
@@ -1952,7 +1963,6 @@ fn cache_table_row(
     span: egui::Rangef,
 ) -> (Option<&'static CacheRule>, Option<(PathBuf, RowAction)>) {
     let exists = cache.path.as_ref().is_some_and(|path| path.is_dir());
-    let missing = !exists && !cache.cleaned;
     let mut clean = false;
     let mut action = None;
 
@@ -1989,13 +1999,9 @@ fn cache_table_row(
         chip(ui, s.cache_group(cache.rule.group), t);
     });
     row.col(|ui| {
-        let (text, color) = if missing {
-            (s.cache_not_found.to_string(), t.danger)
-        } else {
-            match cache.size {
-                Some(bytes) => (size::format_size(bytes), t.good),
-                None => ("…".to_string(), t.text_muted),
-            }
+        let (text, color) = match cache.size {
+            Some(bytes) => (size::format_size(bytes), t.good),
+            None => ("…".to_string(), t.text_muted),
         };
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.label(RichText::new(text).size(13.0).monospace().color(color));
@@ -2209,8 +2215,25 @@ mod tests {
         assert!(!targets[2].checked, "a risky rule stays off by default");
     }
 
-    // --- A headless click harness for the projects table. ---
+    /// Missing caches stay out of the list; one that was just cleaned stays.
+    #[test]
+    fn only_present_or_cleaned_cache_rows_are_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let rule = &cache::builtin_caches()[0];
+        let row = |path: Option<PathBuf>, cleaned: bool| CacheRow {
+            rule,
+            path,
+            size: None,
+            cleaned,
+        };
 
+        assert!(cache_present(&row(Some(dir.path().to_path_buf()), false)));
+        assert!(!cache_present(&row(Some(dir.path().join("gone")), false)));
+        assert!(!cache_present(&row(None, false)));
+        assert!(cache_present(&row(None, true)));
+    }
+
+    // --- A headless click harness for the projects table. ---
     /// One app with `rows` projects, each carrying one cleanable target.
     fn app_with_rows(rows: usize) -> DevSweepApp {
         let root = PathBuf::from("/tmp/devsweep-ui-test");
