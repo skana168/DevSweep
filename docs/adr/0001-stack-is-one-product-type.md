@@ -11,3 +11,5 @@ Java 只由 `pom.xml` 触发：Gradle 项目缺少可靠的 Android / 非 Androi
 Python 支持：将 Python 追加到优先级末尾，成为 Flutter > iOS > Android > Java > Node > Python，以保留已有项目的归类与清理行为。代价是同目录同时有 `package.json` 与 Python 标记时仍归 Node，不自动合并 Python 规则；独立子目录中的 Python Project 可单独识别。
 
 Rust 支持：将 Rust 追加到优先级末尾，成为 Flutter > iOS > Android > Java > Node > Python > Rust，仍以保留已有混合项目的归类与清理行为为先。同目录的 `Cargo.toml` 不叠加 Rust 规则；独立子目录中的 Rust Project 可单独识别。代价是同目录同时有更高优先级 Marker 时，Rust 构建产物不被自动覆盖。
+
+.NET 支持（设计已确认，尚未实现）：C#、F#、Visual Basic 共用一个 `.NET` Stack，追加至优先级末尾，成为 Flutter > iOS > Android > Java > Node > Python > Rust > .NET，以保留已有项目归类。代价是同目录存在更高优先级 Marker 时不自动覆盖 bin/obj；独立子目录继续按既有项目发现规则处理，不因解决方案文件聚合 Project。
