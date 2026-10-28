@@ -7,7 +7,7 @@
 <p align="center">
   <b>Find the tens of gigabytes your build folders and package caches are quietly eating, tick what you
   don't need, and clear it in one go.</b><br>
-  A local desktop app for macOS and Windows: Flutter, Android, iOS, Java, Node, Python and Rust projects, plus the global
+  A local desktop app for macOS and Windows: Flutter, Android, iOS, Java, Node, Python, Rust and .NET projects, plus the global
   caches behind them. No cloud, no account, nothing leaves your machine.
 </p>
 
@@ -36,7 +36,7 @@
 
 ## What it does
 
-DevSweep finds build artifacts, dependencies, and caches in Flutter, Android, iOS, Java, Node, Python, and Rust projects, plus shared tool caches. Review their sizes, choose what to clean, and confirm.
+DevSweep finds build artifacts, dependencies, and caches in Flutter, Android, iOS, Java, Node, Python, Rust, and .NET projects, plus shared tool caches. Review their sizes, choose what to clean, and confirm.
 
 ## Features
 
@@ -136,6 +136,19 @@ source files alone do not identify a project.
 independent .NET subdirectory can still appear. Discovery keeps the five-level depth and platform
 subdirectory ownership rules. Generated project files, including Unity's, use the same detection
 rules; this does not add Unity cleanup support.
+
+Cleanup includes only the whole real `bin/` and `obj/` directories directly under each .NET
+project, matched with exact lowercase names. They are separate dangerous entries, unchecked by
+default; their full sizes are shown even when unchecked. Deleting a selected directory also
+deletes any manually added files inside it. Files and symbolic links are rejected at discovery
+and checked again in the final delete plan. Rule overrides can disable an entry or opt in to
+default selection, but retain the dangerous label and validation.
+
+Custom output paths, centralized `artifacts/`, `.vs/`, `TestResults/`, and NuGet global caches
+are outside these built-in rules. DevSweep does not run dotnet or MSBuild; this is not equivalent
+to `dotnet clean`. Stop builds before cleaning: active builds are not detected or locked, and
+filesystem changes between validation and deletion remain possible. .NET support is implemented
+in source and has not yet been released.
 
 ## Custom rules
 

@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>找出项目里悄悄吃掉几十 GB 的构建产物和依赖缓存，勾选不需要的部分，一次清掉。</b><br>
-  macOS 与 Windows 上的本地应用：Flutter、Android、iOS、Java、Node、Python、Rust 项目，加上它们背后的全局缓存。
+  macOS 与 Windows 上的本地应用：Flutter、Android、iOS、Java、Node、Python、Rust、.NET 项目，加上它们背后的全局缓存。
   没有云端，没有账号，数据不出本机。
 </p>
 
@@ -35,7 +35,7 @@
 
 ## 它做什么
 
-DevSweep 查找 Flutter、Android、iOS、Java、Node、Python 和 Rust 项目中的构建产物、依赖和缓存，以及共用的工具缓存。查看大小，选择要清理的内容，确认后执行。
+DevSweep 查找 Flutter、Android、iOS、Java、Node、Python、Rust 和 .NET 项目中的构建产物、依赖和缓存，以及共用的工具缓存。查看大小，选择要清理的内容，确认后执行。
 
 ## 功能
 
@@ -126,6 +126,15 @@ C#、F#、Visual Basic 共用 `.NET` 项目类型和筛选项。目录中存在�
 
 .NET 优先级最低，保留已有混合项目归类；独立 .NET 子目录仍可单独出现。沿用五层扫描深度和平台
 子目录归属规则。Unity 等工具生成的项目文件按相同条件识别，这不代表增加 Unity 清理支持。
+
+清理仅覆盖每个 .NET 项目根目录直属、名称精确小写的真实 `bin/`、`obj/` 整个目录。两项分别统计和
+勾选，均为危险项、默认不勾选；未勾选时也计入项目大小。删除所选目录也会删除其中手工放入的内容。
+普通文件和符号链接在发现时被排除，最终清理计划再次检查；规则覆盖可禁用规则或显式改变默认勾选，
+但不会移除危险标记或绕过验证。
+
+自定义输出路径、集中式 `artifacts/`、`.vs/`、`TestResults/` 和 NuGet 全局缓存不在这些内置规则内。
+DevSweep 不运行 dotnet 或 MSBuild，整目录清理不等价于 `dotnet clean`。请先停止构建：不检测或锁定
+正在进行的构建，验证与删除之间仍可能发生文件系统变化。.NET 支持已在源码中实现，尚未发布。
 
 ## 自定义规则
 

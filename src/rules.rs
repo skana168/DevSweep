@@ -209,6 +209,9 @@ pub fn builtin_rules() -> Vec<Rule> {
         rule("python.env", Some(Stack::Python), "env", false, true),
         // shortcut: only root target; resolve custom output paths when Cargo configuration enters scope.
         rule("rust.target", Some(Stack::Rust), "target", false, true),
+        // shortcut: only root bin/obj; resolve custom outputs when MSBuild configuration enters scope.
+        rule("dotnet.bin", Some(Stack::Dotnet), "bin", false, true),
+        rule("dotnet.obj", Some(Stack::Dotnet), "obj", false, true),
     ]
 }
 
@@ -223,7 +226,7 @@ pub const TEMPLATE: &str = r#"# DevSweep rule overrides.
 # [defaults]
 # "node.dist" = true
 #
-# Add a directory of your own. stack is "flutter", "android", "ios", "java", "node", "python", "rust",
+# Add a directory of your own. stack is "flutter", "android", "ios", "java", "node", "python", "rust", "dotnet",
 # or "*" for every project type. label is optional.
 # [[extra]]
 # stack = "*"
@@ -333,6 +336,7 @@ fn parse_stack(stack: &str) -> Option<Option<Stack>> {
         "node" => Some(Some(Stack::Node)),
         "python" => Some(Some(Stack::Python)),
         "rust" => Some(Some(Stack::Rust)),
+        "dotnet" => Some(Some(Stack::Dotnet)),
         _ => None,
     }
 }
@@ -382,11 +386,23 @@ pub fn expand_targets(project: &Project, rules: &[Rule]) -> Vec<Target> {
 }
 
 pub(crate) fn valid_builtin_target(rule: &Rule, path: &Path) -> bool {
-    if !rule.id.starts_with("python.") && rule.id != "rust.target" {
+    if !rule.id.starts_with("python.")
+        && !matches!(
+            rule.id.as_str(),
+            "rust.target" | "dotnet.bin" | "dotnet.obj"
+        )
+    {
         return true;
     }
     fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
         && match rule.id.as_str() {
+            "dotnet.bin" | "dotnet.obj" => path.parent().is_some_and(|parent| {
+                fs::read_dir(parent).is_ok_and(|entries| {
+                    entries
+                        .filter_map(Result::ok)
+                        .any(|entry| entry.file_name() == rule.rel.as_str())
+                })
+            }),
             "python.dot_venv" | "python.venv" | "python.env" => is_virtualenv(path),
             "python.src_egg_info" => path
                 .parent()

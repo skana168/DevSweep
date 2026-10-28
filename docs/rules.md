@@ -24,7 +24,7 @@ disable = ["node.dist", "ios.pods"]
 [defaults]
 "node.dist" = true
 
-# 3. add a directory of your own (stack: flutter / android / ios / java / node / python / rust / "*", label optional)
+# 3. add a directory of your own (stack: flutter / android / ios / java / node / python / rust / dotnet / "*", label optional)
 [[extra]]
 stack = "*"
 path = ".cache"
@@ -79,8 +79,10 @@ Extras are always checked by default and are never marked dangerous. Their ids a
 | Python | `python.venv` | `venv` | **no** (dangerous) |
 | Python | `python.env` | `env` | **no** (dangerous) |
 | Rust | `rust.target` | `target` | **no** (dangerous) |
+| .NET | `dotnet.bin` | `bin` | **no** (dangerous) |
+| .NET | `dotnet.obj` | `obj` | **no** (dangerous) |
 
-A project carries one stack, chosen by priority Flutter > iOS > Android > Java > Node > Python > Rust, so only that
+A project carries one stack, chosen by priority Flutter > iOS > Android > Java > Node > Python > Rust > .NET, so only that
 stack's rules apply to it (see [ADR 0001](adr/0001-stack-is-one-product-type.md)). A `pom.xml`
 marks a Java project; a Gradle project counts as Android even when it builds plain JVM code.
 
@@ -144,6 +146,34 @@ No Cargo command is executed, custom target-dir/build-dir settings are not resol
 `Cargo.lock` and project `.cargo/` are outside this built-in rule. Global caches are unchanged.
 Stop builds before cleaning: active builds are not detected or locked, and the existing filesystem
 race between validation and deletion is not eliminated.
+
+## .NET projects
+
+C#, F#, and Visual Basic share one `.NET` stack (`dotnet` in `rules.toml`). A real regular
+`.csproj`, `.fsproj`, or `.vbproj` file marks its containing directory; extensions are ASCII
+case-insensitive and contents are not parsed. Marker directories and symbolic links do not
+qualify. Multiple project files in one directory produce one Project. Solutions (`.sln`/`.slnx`),
+`global.json`, and source files alone do not qualify or trigger recursive cleanup. Generated
+project files, including Unity's, follow the same rules without adding Unity cleanup support.
+
+`dotnet.bin` and `dotnet.obj` match only the whole real, directly contained lowercase `bin/`
+and `obj/` directories of a .NET Project. Each is independently measured and selected, dangerous
+and unchecked by default. Names are case-sensitive even on case-insensitive filesystems.
+Their sizes include all contents, including manually added DLLs, configuration, or data;
+selecting them accepts deleting those contents. Files and symbolic links are rejected at
+discovery and rechecked in the final plan, including the exact name. Existing protected-path,
+overlap, confirmation and Trash/Direct flows apply.
+
+`disable` removes either rule; `[defaults]` can opt in with `"dotnet.bin" = true` or
+`"dotnet.obj" = true`, retaining Dangerous and mandatory validation. Extra rules retain their
+existing behavior, including file targets and .NET-scoped extras.
+
+These rules do not resolve custom output paths or centralized `artifacts/`, do not include
+`.vs/`, `TestResults/` or NuGet global caches, and execute no dotnet/MSBuild commands. This
+whole-directory cleanup is not equivalent to `dotnet clean`. Stop builds before cleaning;
+active builds are not detected or locked and filesystem changes between validation and deletion
+remain possible. Same-directory higher-priority stacks do not receive these rules, and existing
+scan-depth and platform-subdirectory ownership limits remain in effect.
 
 ## Paths
 

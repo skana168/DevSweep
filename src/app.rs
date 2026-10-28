@@ -626,6 +626,13 @@ impl DevSweepApp {
                 ui.add_space(12.0);
                 stat_row(ui, s.items, &format!("{chosen} / {}", targets.len()), t);
                 stat_row(ui, s.total, &size::format_size(panel.plan.total_bytes), t);
+                if stack == Stack::Dotnet {
+                    ui.label(
+                        RichText::new(s.dotnet_clean_note)
+                            .size(12.0)
+                            .color(t.danger),
+                    );
+                }
                 ui.add_space(10.0);
                 ui.separator();
                 ui.add_space(6.0);
