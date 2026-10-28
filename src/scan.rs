@@ -12,6 +12,7 @@ pub enum Stack {
     Ios,
     Java,
     Node,
+    Python,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,7 +104,9 @@ fn scan_root(root: &Path) -> Vec<Project> {
     let walker = WalkDir::new(root)
         .max_depth(MAX_DEPTH)
         .into_iter()
-        .filter_entry(|entry| entry.depth() == 0 || !is_pruned(entry));
+        .filter_entry(|entry| {
+            !is_virtualenv(entry.path()) && (entry.depth() == 0 || !is_pruned(entry))
+        });
 
     for entry in walker.filter_map(Result::ok) {
         if !entry.file_type().is_dir() {
@@ -130,6 +133,10 @@ fn is_pruned_name(name: &std::ffi::OsStr) -> bool {
     name.to_str().is_some_and(|name| PRUNED.contains(&name))
 }
 
+pub(crate) fn is_virtualenv(path: &Path) -> bool {
+    path.join("pyvenv.cfg").is_file()
+}
+
 fn is_platform_subdir(path: &Path, registered: &HashSet<PathBuf>) -> bool {
     let mut current = path;
     while let Some(parent) = current.parent() {
@@ -149,7 +156,12 @@ fn detect_stack(path: &Path) -> Option<Stack> {
         .ok()?
         .filter_map(Result::ok)
         .map(|entry| entry.file_name().to_string_lossy().into_owned());
-    classify(names)
+    classify(names).or_else(|| {
+        ["pyproject.toml", "setup.py", "requirements.txt", "Pipfile"]
+            .iter()
+            .any(|marker| path.join(marker).is_file())
+            .then_some(Stack::Python)
+    })
 }
 
 fn classify(names: impl IntoIterator<Item = String>) -> Option<Stack> {

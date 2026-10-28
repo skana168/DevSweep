@@ -7,7 +7,7 @@
 <p align="center">
   <b>Find the tens of gigabytes your build folders and package caches are quietly eating, tick what you
   don't need, and clear it in one go.</b><br>
-  A local desktop app for macOS and Windows: Flutter, Android, iOS, Java and Node projects, plus the global
+  A local desktop app for macOS and Windows: Flutter, Android, iOS, Java, Node and Python projects, plus the global
   caches behind them. No cloud, no account, nothing leaves your machine.
 </p>
 
@@ -35,11 +35,16 @@
 
 ## What it does
 
-Every Flutter, Android, iOS, Java and Node project leaves something behind: `build/`, `node_modules/`,
+Every Flutter, Android, iOS, Java, Node and Python project leaves something behind: `build/`, `node_modules/`,
 `.dart_tool/`, `Pods/`, `.next/`, `target/`. DevSweep walks the folders you choose, recognises each
 project, and shows how much of it is expendable in one table. Open a project, tick the entries you
 want gone, confirm the panel, and the space comes back. The same window also lists the global caches
 that have nothing to do with any single project.
+
+Python projects are recognised by `pyproject.toml`, `setup.py`, `requirements.txt`, or `Pipfile`.
+Python cleanup currently covers root-level `.pytest_cache/`, `.mypy_cache/`, and `.ruff_cache/`.
+Virtual environments are excluded from project discovery; environment cleanup, build outputs,
+bytecode caches, and coverage reports are not included yet.
 
 It never deletes anything on its own: nothing is touched until you confirm a plan, and nothing
 outside the rules (`.git`, your home folder, the project root, paths outside the project) can ever

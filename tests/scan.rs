@@ -9,6 +9,68 @@ fn write(path: &Path) {
 }
 
 #[test]
+fn python_marker_files_identify_projects_without_treating_scripts_as_projects() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for (name, marker) in [
+        ("modern", "pyproject.toml"),
+        ("legacy", "setup.py"),
+        ("requirements", "requirements.txt"),
+        ("pipenv", "Pipfile"),
+    ] {
+        write(&root.join(name).join(marker));
+    }
+    write(&root.join("scripts/main.py"));
+    write(&root.join("config/setup.cfg"));
+    fs::create_dir_all(root.join("not-a-file/pyproject.toml")).unwrap();
+
+    let projects = scan(&[root.to_path_buf()]);
+
+    assert_eq!(
+        projects
+            .iter()
+            .map(|p| (p.name.as_str(), p.stack))
+            .collect::<Vec<_>>(),
+        vec![
+            ("legacy", Stack::Python),
+            ("modern", Stack::Python),
+            ("pipenv", Stack::Python),
+            ("requirements", Stack::Python),
+        ]
+    );
+}
+
+#[test]
+fn python_scanning_preserves_priority_and_skips_validated_environments() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(&root.join("mixed/package.json"));
+    write(&root.join("mixed/pyproject.toml"));
+    write(&root.join("mixed/api/requirements.txt"));
+    for name in [".venv", "venv", "env", "custom-environment"] {
+        write(&root.join("mixed").join(name).join("pyvenv.cfg"));
+        write(&root.join("mixed").join(name).join("lib/installed/setup.py"));
+    }
+    write(&root.join("ordinary/env/setup.py"));
+    write(&root.join("only-env/.venv/pyvenv.cfg"));
+
+    let projects = scan(&[root.to_path_buf()]);
+
+    assert_eq!(
+        projects
+            .iter()
+            .map(|p| (p.name.as_str(), p.stack))
+            .collect::<Vec<_>>(),
+        vec![
+            ("api", Stack::Python),
+            ("env", Stack::Python),
+            ("mixed", Stack::Node)
+        ]
+    );
+    assert!(scan(&[root.join("mixed/custom-environment")]).is_empty());
+}
+
+#[test]
 fn marker_priority_is_flutter_then_ios_then_android_then_node() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
