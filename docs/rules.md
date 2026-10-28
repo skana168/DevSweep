@@ -74,6 +74,9 @@ Extras are always checked by default and are never marked dangerous. Their ids a
 | Python | `python.dist` | `dist` | **no** (dangerous) |
 | Python | `python.egg_info` | `*.egg-info` | **no** (dangerous) |
 | Python | `python.src_egg_info` | `src/*.egg-info` | **no** (dangerous) |
+| Python | `python.dot_venv` | `.venv` | **no** (dangerous) |
+| Python | `python.venv` | `venv` | **no** (dangerous) |
+| Python | `python.env` | `env` | **no** (dangerous) |
 
 A project carries one stack, chosen by priority Flutter > iOS > Android > Java > Node > Python, so only that
 stack's rules apply to it (see [ADR 0001](adr/0001-stack-is-one-product-type.md)). A `pom.xml`
@@ -85,20 +88,26 @@ A `pyproject.toml`, `setup.py`, `requirements.txt`, or `Pipfile` file marks a Py
 A lone `.py`, `setup.cfg`, or environment directory does not. A tooling-only `pyproject.toml`
 also qualifies; an existing stack such as Node wins when its marker is in the same directory.
 
-Python cleans the three root-level tool caches and the scoped build outputs listed above.
-Build outputs are dangerous and unchecked by default: directory names do not prove the contents
-are reproducible or exclude manually saved files. Build output patterns do not recurse into
-arbitrary directories or match source-adjacent `.so` / `.pyd` files.
-Virtual environments, bytecode caches, and coverage reports are not included.
+Python cleans the three root-level tool cache directories and the scoped build outputs listed
+above, plus root-level `.venv/`, `venv/`, and `env/` environments containing a `pyvenv.cfg` file.
+Environments are dangerous and start unchecked; their entire size is shown even when they are
+not selected. The marker confirms environment identity, not that manually installed dependencies
+can be rebuilt. Custom environment names, nested environments, `.tox`, `.nox`, and Conda
+environments are not included in environment cleanup. Build outputs are also dangerous and
+unchecked by default: directory names do not prove the contents are reproducible or exclude
+manually saved files. Build output patterns do not recurse into arbitrary directories or match
+source-adjacent `.so` / `.pyd` files. Bytecode caches and coverage reports are not included yet.
 Directories containing `pyvenv.cfg` are excluded from project discovery, including environments
 with custom names, so installed packages do not become projects. Ordinary source directories
 named `env` or `venv` without that marker are still scanned.
 
 Python built-in targets must be real directories when discovered and when the final delete plan
-is built; files and symbolic links are skipped. This mandatory validation is unaffected by
-`[defaults]`; explicitly setting a dangerous rule default to true counts as opting in, but
-retains the dangerous label. The `src` parent of a built-in egg-info target must also be a real
-directory. Extra rules keep their existing user-defined behavior.
+is built; files and symbolic links are skipped. Environment identity is rechecked in the final
+plan too. The `src` parent of a built-in egg-info target must also be a real directory. These
+mandatory checks are unaffected by `[defaults]`; explicitly setting a dangerous rule default
+to true counts as opting in, but retains the dangerous label. `disable` can remove the rule.
+Extra rules keep their existing user-defined behavior. No Python command is executed and
+DevSweep does not detect whether an environment is currently in use.
 
 ## Paths
 

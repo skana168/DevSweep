@@ -40,9 +40,11 @@
 还列着与单个项目无关的全局缓存。
 
 Python 项目由 `pyproject.toml`、`setup.py`、`requirements.txt` 或 `Pipfile` 识别。当前支持清理
-项目根目录的 `.pytest_cache/`、`.mypy_cache/`、`.ruff_cache/`；项目发现会跳过虚拟环境，
-根目录的 `build/`、`dist/`、`*.egg-info/` 及 `src/*.egg-info/` 也可清理，均为危险项、
-默认不勾选，需自行判断其中是否有人工保存的内容。暂不包含环境清理、字节码缓存和覆盖率报告。
+项目根目录的 `.pytest_cache/`、`.mypy_cache/`、`.ruff_cache/`，以及含 `pyvenv.cfg` 的
+`.venv/`、`venv/`、`env/` 虚拟环境。环境属于危险项，默认不勾选：手工安装的依赖可能无法
+完整重建。项目发现会跳过环境内部。根目录的 `build/`、`dist/`、`*.egg-info/` 及
+`src/*.egg-info/` 也可清理，均为危险项、默认不勾选，需自行判断其中是否有人工保存的内容。
+暂不包含字节码缓存和覆盖率报告。
 
 它从不自作主张地删东西：你不确认清理计划，就什么都不会动；而项目外的路径、`.git`、家目录、
 规则之外的东西永远不会进入这份计划。
