@@ -204,6 +204,9 @@ pub fn builtin_rules() -> Vec<Rule> {
             false,
             true,
         ),
+        rule("python.dot_venv", Some(Stack::Python), ".venv", false, true),
+        rule("python.venv", Some(Stack::Python), "venv", false, true),
+        rule("python.env", Some(Stack::Python), "env", false, true),
     ]
 }
 
@@ -376,12 +379,17 @@ pub fn expand_targets(project: &Project, rules: &[Rule]) -> Vec<Target> {
 }
 
 pub(crate) fn valid_builtin_target(rule: &Rule, path: &Path) -> bool {
-    !rule.id.starts_with("python.")
-        || (fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
-            && (rule.id != "python.src_egg_info"
-                || path.parent().is_some_and(|parent| {
-                    fs::symlink_metadata(parent).is_ok_and(|meta| meta.is_dir())
-                })))
+    if !rule.id.starts_with("python.") {
+        return true;
+    }
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
+        && match rule.id.as_str() {
+            "python.dot_venv" | "python.venv" | "python.env" => is_virtualenv(path),
+            "python.src_egg_info" => path
+                .parent()
+                .is_some_and(|parent| fs::symlink_metadata(parent).is_ok_and(|meta| meta.is_dir())),
+            _ => true,
+        }
 }
 
 pub(crate) fn is_recursive_cache_rule(rule: &Rule) -> bool {

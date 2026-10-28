@@ -48,7 +48,9 @@ directories, symbolic links, and independent child projects, even beyond the fiv
 discovery limit. Add a nearer scan root to discover and clean those deep child projects.
 Root-level `build/`, `dist/`, `*.egg-info/`, and `src/*.egg-info/` are also listed as dangerous
 items, unchecked by default: their contents may include files you saved manually.
-Environment cleanup and coverage reports are not included yet.
+Root-level `.venv/`, `venv/`, and `env/` environments containing `pyvenv.cfg` are also listed
+as dangerous and start unchecked: manually installed dependencies may not be reproducible.
+Their contents are excluded from project discovery. Coverage reports are not included.
 
 It never deletes anything on its own: nothing is touched until you confirm a plan, and nothing
 outside the rules (`.git`, your home folder, the project root, paths outside the project) can ever
