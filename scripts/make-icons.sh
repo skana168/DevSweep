@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Renders assets/icon.svg into assets/icon.icns and assets/icon.ico.
+# Renders assets/icon.svg into assets/icon.png, assets/icon.icns and assets/icon.ico.
 # Needs rsvg-convert (brew install librsvg) and Pillow. The rendered icons are
 # committed, so builds and CI never have to render the SVG themselves.
 set -euo pipefail
@@ -25,3 +25,5 @@ Image.open(sys.argv[1]).save(
     "assets/icon.ico", sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
 )
 PY
+
+cp "$work/icon.png" assets/icon.png

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/icon.png" width="112" alt="DevSweep icon: a folder under a sweeping green arc">
+  <img src="assets/icon.png" width="112" alt="DevSweep icon: an electric-blue D with a diagonal sweep cut on an ink-black tile">
 </p>
 
 <h1 align="center">DevSweep</h1>
@@ -134,8 +134,8 @@ cargo build --release        # Windows portable exe: target\release\devsweep.exe
 ```
 
 CI runs `cargo test` on macOS and Windows for every push. Icons: `assets/icon.svg` is the source,
-rendered by `scripts/make-icons.sh` into `assets/icon.icns` (macOS bundle) and `assets/icon.ico`
-(embedded into the exe by `build.rs`). The rendered files are committed, so normal builds need
+rendered by `scripts/make-icons.sh` into `assets/icon.png` (README preview), `assets/icon.icns`
+(macOS bundle) and `assets/icon.ico` (embedded into the exe by `build.rs`). The rendered files are committed, so normal builds need
 neither rsvg nor ImageMagick.
 
 Testing boundary: automated tests cover the core in `src/` (scan, rule matching, sizing, plan,

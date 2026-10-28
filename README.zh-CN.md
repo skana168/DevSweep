@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/icon.png" width="112" alt="DevSweep 图标：一道弧线扫过文件夹">
+  <img src="assets/icon.png" width="112" alt="DevSweep 图标：墨黑底板上的电光蓝 D，以斜向留白表现扫掠">
 </p>
 
 <h1 align="center">DevSweep</h1>
@@ -129,8 +129,8 @@ cargo build --release        # Windows 便携 exe：target\release\devsweep.exe
 ```
 
 CI 在每次推送时于 macOS 与 Windows 上跑 `cargo test`。图标：`assets/icon.svg` 是源文件，由
-`scripts/make-icons.sh` 渲染为 `assets/icon.icns`（macOS bundle 用）与 `assets/icon.ico`（构建期
-由 `build.rs` 嵌入 exe）。渲染结果已提交，常规构建不需要 rsvg 或 ImageMagick。
+`scripts/make-icons.sh` 渲染为 `assets/icon.png`（README 预览）、`assets/icon.icns`（macOS bundle 用）
+与 `assets/icon.ico`（构建期由 `build.rs` 嵌入 exe）。渲染结果已提交，常规构建不需要 rsvg 或 ImageMagick。
 
 测试边界：自动化测试只覆盖 `src/` 里的 core（扫描、规则匹配、体积、计划、删除、配置）；UI 层
 只测一件事——中文字形在每套字体里都画得出来（`src/theme.rs`）。

@@ -13,7 +13,11 @@ fn main() -> eframe::Result {
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_inner_size(size)
         .with_min_inner_size([880.0, 560.0])
-        .with_title("DevSweep");
+        .with_title("DevSweep")
+        .with_icon(
+            eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png"))
+                .expect("decode bundled app icon"),
+        );
     // The header is the title bar (see `app::DevSweepApp::header`): macOS keeps its traffic
     // lights over the content, elsewhere the decorations go and the header draws the buttons.
     viewport = if cfg!(target_os = "macos") {
