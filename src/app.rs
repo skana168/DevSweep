@@ -32,6 +32,11 @@ const ROW_H: f32 = 56.0;
 /// The height of a segmented cell and of the settings sheet's controls.
 const CELL_H: f32 = 34.0;
 
+/// The search box's width and its inner horizontal padding. The width must fit
+/// the longest hint; `every_search_hint_fits_the_box` holds it to that.
+const SEARCH_W: f32 = 210.0;
+const SEARCH_PAD: i8 = 10;
+
 fn search_id() -> egui::Id {
     egui::Id::unique("project_search")
 }
@@ -1286,9 +1291,9 @@ impl DevSweepApp {
                     TextEdit::singleline(&mut search)
                         .id(search_id())
                         .hint_text(s.search_hint)
-                        .desired_width(190.0)
+                        .desired_width(SEARCH_W)
                         .min_size(egui::vec2(0.0, 38.0))
-                        .margin(egui::Margin::symmetric(10, 0))
+                        .margin(egui::Margin::symmetric(SEARCH_PAD, 0))
                         .align(egui::Align2::LEFT_CENTER),
                 );
                 self.search = search;
@@ -2231,6 +2236,31 @@ mod tests {
         assert!(!cache_present(&row(Some(dir.path().join("gone")), false)));
         assert!(!cache_present(&row(None, false)));
         assert!(cache_present(&row(None, true)));
+    }
+
+    /// The hint must fit the box's inner width, or egui elides it. English is the
+    /// longest today.
+    #[test]
+    fn every_search_hint_fits_the_box() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut output = ctx.run_ui(raw_input(Vec::new()), |ui| {
+            let font = egui::TextStyle::Body.resolve(ui.style());
+            let inner = SEARCH_W - 2.0 * f32::from(SEARCH_PAD);
+            for lang in [Lang::Zh, Lang::En] {
+                let hint = lang.strings().search_hint;
+                let width = ui.fonts_mut(|f| {
+                    f.layout_no_wrap(hint.to_owned(), font.clone(), Color32::WHITE)
+                        .size()
+                        .x
+                });
+                assert!(
+                    width <= inner,
+                    "{lang:?} hint is {width}px in a {inner}px box: {hint}"
+                );
+            }
+        });
+        output.textures_delta.clear();
     }
 
     // --- A headless click harness for the projects table. ---
