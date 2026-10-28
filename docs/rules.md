@@ -70,6 +70,9 @@ Extras are always checked by default and are never marked dangerous. Their ids a
 | Python | `python.pytest_cache` | `.pytest_cache` | yes |
 | Python | `python.mypy_cache` | `.mypy_cache` | yes |
 | Python | `python.ruff_cache` | `.ruff_cache` | yes |
+| Python | `python.dot_venv` | `.venv` | **no** (dangerous) |
+| Python | `python.venv` | `venv` | **no** (dangerous) |
+| Python | `python.env` | `env` | **no** (dangerous) |
 
 A project carries one stack, chosen by priority Flutter > iOS > Android > Java > Node > Python, so only that
 stack's rules apply to it (see [ADR 0001](adr/0001-stack-is-one-product-type.md)). A `pom.xml`
@@ -81,15 +84,23 @@ A `pyproject.toml`, `setup.py`, `requirements.txt`, or `Pipfile` file marks a Py
 A lone `.py`, `setup.cfg`, or environment directory does not. A tooling-only `pyproject.toml`
 also qualifies; an existing stack such as Node wins when its marker is in the same directory.
 
-Python currently cleans only the three root-level tool cache directories listed above.
-Virtual environments, build outputs, bytecode caches, and coverage reports are not included.
+Python cleans the three root-level tool cache directories listed above, plus root-level
+`.venv/`, `venv/`, and `env/` environments containing a `pyvenv.cfg` file. Environments are
+dangerous and start unchecked; their entire size is shown even when they are not selected.
+The marker confirms environment identity, not that manually installed dependencies can be
+rebuilt. Custom environment names, nested environments, `.tox`, `.nox`, and Conda environments
+are not included in environment cleanup. Build outputs, bytecode caches, and coverage reports
+are not included yet.
 Directories containing `pyvenv.cfg` are excluded from project discovery, including environments
 with custom names, so installed packages do not become projects. Ordinary source directories
 named `env` or `venv` without that marker are still scanned.
 
 Python built-in targets must be real directories when discovered and when the final delete plan
-is built; files and symbolic links are skipped. This mandatory validation is unaffected by
-`[defaults]`. Extra rules keep their existing user-defined behavior.
+is built; files and symbolic links are skipped. Environment identity is rechecked in the final
+plan too. Setting an environment rule to `true` in `[defaults]` counts as an explicit choice,
+but preserves its dangerous flag and all mandatory validation. `disable` can remove the rule.
+Extra rules keep their existing user-defined behavior. No Python command is executed and
+DevSweep does not detect whether an environment is currently in use.
 
 ## Paths
 

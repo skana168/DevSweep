@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::scan::{Project, Stack};
+use crate::scan::{Project, Stack, is_virtualenv};
 
 #[derive(Clone)]
 pub struct Rule {
@@ -178,6 +178,9 @@ pub fn builtin_rules() -> Vec<Rule> {
             true,
             false,
         ),
+        rule("python.dot_venv", Some(Stack::Python), ".venv", false, true),
+        rule("python.venv", Some(Stack::Python), "venv", false, true),
+        rule("python.env", Some(Stack::Python), "env", false, true),
     ]
 }
 
@@ -339,7 +342,14 @@ pub fn expand_targets(project: &Project, rules: &[Rule]) -> Vec<Target> {
 }
 
 pub(crate) fn valid_builtin_target(rule: &Rule, path: &Path) -> bool {
-    !rule.id.starts_with("python.") || fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
+    if !rule.id.starts_with("python.") {
+        return true;
+    }
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
+        && match rule.id.as_str() {
+            "python.dot_venv" | "python.venv" | "python.env" => is_virtualenv(path),
+            _ => true,
+        }
 }
 
 /// One `*` inside a segment, matching a literal name otherwise.
