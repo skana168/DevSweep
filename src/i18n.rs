@@ -88,6 +88,7 @@ pub struct Strings {
     pub stack_node: &'static str,
     pub stack_python: &'static str,
     pub stack_rust: &'static str,
+    pub stack_dotnet: &'static str,
     pub global_caches: &'static str,
     pub cache_column: &'static str,
     pub group_column: &'static str,
@@ -135,6 +136,7 @@ impl Strings {
             Stack::Node => self.stack_node,
             Stack::Python => self.stack_python,
             Stack::Rust => self.stack_rust,
+            Stack::Dotnet => self.stack_dotnet,
         }
     }
 
@@ -221,6 +223,7 @@ static ZH: Strings = Strings {
     stack_node: "Node",
     stack_python: "Python",
     stack_rust: "Rust",
+    stack_dotnet: ".NET",
     global_caches: "全局缓存",
     cache_column: "缓存",
     group_column: "分组",
@@ -310,6 +313,7 @@ static EN: Strings = Strings {
     stack_node: "Node",
     stack_python: "Python",
     stack_rust: "Rust",
+    stack_dotnet: ".NET",
     global_caches: "Global caches",
     cache_column: "Cache",
     group_column: "Group",

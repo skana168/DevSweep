@@ -17,14 +17,14 @@ _Avoid_: 无效根、重复根
 _Avoid_: 仓库、代码库、模块
 
 **Marker（项目标记）**：
-让一个目录被认作 Project 的文件：`pubspec.yaml`、`settings.gradle(.kts)` / `build.gradle(.kts)`、`*.xcodeproj`、`pom.xml`、`package.json`、`pyproject.toml`、`setup.py`、`requirements.txt`、`Pipfile`、`Cargo.toml`。
+让一个目录被认作 Project 的文件：`pubspec.yaml`、`settings.gradle(.kts)` / `build.gradle(.kts)`、`*.xcodeproj`、`pom.xml`、`package.json`、`pyproject.toml`、`setup.py`、`requirements.txt`、`Pipfile`、`Cargo.toml`、`*.csproj`、`*.fsproj`、`*.vbproj`。
 _Avoid_: 项目文件、特征
 
 **Stack（项目类型）**：
-Project 所属的、唯一的产品技术栈家族：Flutter / iOS / Android / Java / Node / Python / Rust；它决定哪些 Rule 适用。多种标记共存时的选择约定见 [ADR 0001](docs/adr/0001-stack-is-one-product-type.md)。
+Project 所属的、唯一的产品技术栈家族：Flutter / iOS / Android / Java / Node / Python / Rust / .NET；它决定哪些 Rule 适用。多种标记共存时的选择约定见 [ADR 0001](docs/adr/0001-stack-is-one-product-type.md)。
 _Avoid_: 框架、平台、子项目类型
 
-**.NET（规划中的项目类型）**：
+**.NET（项目类型）**：
 统一涵盖 C#、F#、Visual Basic Project 的 Stack 家族；三种语言不分别成为项目类型。
 _Avoid_: C# 类型、F# 类型、Visual Basic 类型
 

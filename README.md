@@ -108,7 +108,7 @@ A directory containing a `Cargo.toml` file is recognized as a Rust project witho
 manifest. This includes workspace roots with no package of their own. Workspace roots and member
 directories appear separately, even when they have no cleanable items; membership is not resolved.
 Discovery stays within the scan roots, up to five levels deep, and skips build and dependency folders.
-Each project has one stack: Flutter > iOS > Android > Java > Node > Python > Rust. Existing markers
+Each project has one stack: Flutter > iOS > Android > Java > Node > Python > Rust > .NET. Higher-priority markers
 win when they share a directory with `Cargo.toml`; independent Rust subdirectories can still appear.
 
 Rust cleanup covers the whole real `target/` directory directly under each Rust project. It is
@@ -122,6 +122,20 @@ DevSweep does not run Cargo or resolve custom target-dir/build-dir settings. Rus
 leaves source, `Cargo.lock` and `.cargo/` untouched; Cargo registry global cache behavior is unchanged.
 Stop builds before cleaning: active builds are not detected or locked, and filesystem changes
 between the final check and deletion remain possible.
+
+### .NET projects
+
+C#, F#, and Visual Basic share the `.NET` project type and filter. A real regular file ending in
+`.csproj`, `.fsproj`, or `.vbproj` identifies its directory as a project; extensions are matched
+without ASCII case sensitivity. Project contents are not parsed, so SDK-style, legacy, empty,
+and invalid project files all qualify. Marker directories and symbolic links do not qualify.
+Multiple project files in one directory produce one project; `.sln`, `.slnx`, `global.json`, and
+source files alone do not identify a project.
+
+.NET has the lowest stack priority, preserving existing mixed-project classifications; an
+independent .NET subdirectory can still appear. Discovery keeps the five-level depth and platform
+subdirectory ownership rules. Generated project files, including Unity's, use the same detection
+rules; this does not add Unity cleanup support.
 
 ## Custom rules
 

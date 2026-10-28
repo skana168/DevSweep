@@ -14,6 +14,7 @@ pub enum Stack {
     Node,
     Python,
     Rust,
+    Dotnet,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,6 +166,24 @@ pub(crate) fn detect_stack(path: &Path) -> Option<Stack> {
                 .then_some(Stack::Python)
         })
         .or_else(|| path.join("Cargo.toml").is_file().then_some(Stack::Rust))
+        .or_else(|| {
+            fs::read_dir(path)
+                .ok()?
+                .filter_map(Result::ok)
+                .any(|entry| {
+                    entry.file_type().is_ok_and(|kind| kind.is_file())
+                        && entry
+                            .path()
+                            .extension()
+                            .and_then(|ext| ext.to_str())
+                            .is_some_and(|ext| {
+                                ["csproj", "fsproj", "vbproj"]
+                                    .iter()
+                                    .any(|marker| ext.eq_ignore_ascii_case(marker))
+                            })
+                })
+                .then_some(Stack::Dotnet)
+        })
 }
 
 fn classify(names: impl IntoIterator<Item = String>) -> Option<Stack> {

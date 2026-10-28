@@ -9,6 +9,37 @@ fn write(path: &Path) {
 }
 
 #[test]
+fn dotnet_marker_files_identify_all_languages_without_parsing_project_contents() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for (name, marker, contents) in [
+        (
+            "csharp",
+            "App.csproj",
+            "<Project Sdk=\"Microsoft.NET.Sdk\" />",
+        ),
+        ("fsharp", "Library.FSPROJ", ""),
+        (
+            "visual-basic",
+            "App.VbPrOj",
+            "<Project ToolsVersion=\"4.0\" />",
+        ),
+        ("invalid", "Broken.CSPROJ", "not XML"),
+    ] {
+        write(&root.join(name).join(marker));
+        fs::write(root.join(name).join(marker), contents).unwrap();
+    }
+
+    let projects = scan(&[root.to_path_buf()]);
+
+    assert_eq!(
+        projects.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+        vec!["csharp", "fsharp", "invalid", "visual-basic"]
+    );
+    assert!(projects.iter().all(|p| p.stack == Stack::Dotnet));
+}
+
+#[test]
 fn cargo_marker_files_identify_projects_without_parsing_the_manifest() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
@@ -438,6 +469,110 @@ fn rust_discovery_keeps_depth_platform_merge_and_overlapping_root_boundaries() {
 
     let mut projects = scan(&[root.join("app/windows")]);
     assert_eq!(projects.len(), 1);
+    merge_scan(&mut projects, scan(&[root.to_path_buf()]));
+    merge_scan(&mut projects, scan(&[root.join("app")]));
+    assert_eq!(projects, expected);
+}
+
+#[test]
+fn dotnet_markers_must_be_regular_files_and_other_dotnet_files_are_not_markers() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(&root.join("actual/App.csproj"));
+    fs::create_dir_all(root.join("directory/Folder.fsproj")).unwrap();
+    for name in [
+        "App.sln",
+        "App.slnx",
+        "global.json",
+        "Program.cs",
+        "Program.fs",
+        "Program.vb",
+    ] {
+        write(&root.join("other").join(name));
+    }
+    fs::create_dir_all(root.join("artifacts/bin")).unwrap();
+    fs::create_dir_all(root.join("artifacts/obj")).unwrap();
+    #[cfg(unix)]
+    {
+        let linked = root.join("linked");
+        fs::create_dir_all(&linked).unwrap();
+        std::os::unix::fs::symlink(root.join("actual/App.csproj"), linked.join("Alias.vbproj"))
+            .unwrap();
+    }
+
+    let projects = scan(&[root.to_path_buf()]);
+
+    assert_eq!(
+        projects.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+        vec!["actual"]
+    );
+}
+
+#[test]
+fn dotnet_discovery_preserves_existing_stack_priority_and_groups_project_markers() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for (name, marker, stack) in [
+        ("flutter", "pubspec.yaml", Stack::Flutter),
+        ("ios", "App.xcodeproj/project.pbxproj", Stack::Ios),
+        ("android", "settings.gradle", Stack::Android),
+        ("java", "pom.xml", Stack::Java),
+        ("node", "package.json", Stack::Node),
+        ("python", "pyproject.toml", Stack::Python),
+        ("rust", "Cargo.toml", Stack::Rust),
+    ] {
+        let parent = root.join(name);
+        write(&parent.join(marker));
+        write(&parent.join("App.csproj"));
+        write(&parent.join("service/Library.fsproj"));
+        let projects = scan(&[parent]);
+        assert_eq!(projects.len(), 2);
+        assert_eq!(
+            projects.iter().find(|p| p.name == name).unwrap().stack,
+            stack
+        );
+        assert_eq!(
+            projects.iter().find(|p| p.name == "service").unwrap().stack,
+            Stack::Dotnet
+        );
+    }
+
+    let unity = root.join("unity");
+    for marker in [
+        "Assembly-CSharp.csproj",
+        "Library.fsproj",
+        "Legacy.vbproj",
+        "ProjectSettings/ProjectVersion.txt",
+    ] {
+        write(&unity.join(marker));
+    }
+    fs::create_dir_all(unity.join("Assets")).unwrap();
+    let projects = scan(&[unity]);
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].stack, Stack::Dotnet);
+}
+
+#[test]
+fn dotnet_discovery_keeps_depth_platform_and_merge_boundaries() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(&root.join("app/App.csproj"));
+    write(&root.join("app/windows/Native.csproj"));
+    write(&root.join("app/windows/nested/Child.vbproj"));
+    write(&root.join("a/b/c/d/e/Library.fsproj"));
+    write(&root.join("a/b/c/d/e/f/TooDeep.csproj"));
+    write(&root.join("app/node_modules/Dependency.csproj"));
+    write(&root.join("app/target/Generated.fsproj"));
+
+    let expected = scan(&[root.to_path_buf()]);
+    assert_eq!(
+        expected.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+        vec!["app", "e"]
+    );
+    assert!(expected.iter().all(|p| p.stack == Stack::Dotnet));
+
+    let mut projects = scan(&[root.join("app/windows")]);
+    assert_eq!(projects.len(), 2);
     merge_scan(&mut projects, scan(&[root.to_path_buf()]));
     merge_scan(&mut projects, scan(&[root.join("app")]));
     assert_eq!(projects, expected);

@@ -105,7 +105,7 @@ DevSweep 查找 Flutter、Android、iOS、Java、Node、Python 和 Rust 项目�
 目录中存在 `Cargo.toml` 文件即识别为 Rust 项目，不解析清单内容，包括自身没有包的 Workspace 根。
 Workspace 根与成员目录分别展示，没有可清理项时也保留；不解析成员关系。项目发现限定在扫描根内，
 最多向下五层，并跳过构建和依赖目录。每个项目只归一种类型，优先级为
-Flutter > iOS > Android > Java > Node > Python > Rust；同目录有其它类型标记时，保留已有类型，
+Flutter > iOS > Android > Java > Node > Python > Rust > .NET；同目录有更高优先级类型标记时，保留已有类型，
 独立 Rust 子目录仍可单独出现。
 
 Rust 清理仅覆盖每个 Rust 项目根目录下真实的整个 `target/`，标为危险项且默认不勾选：其中可能有
@@ -116,6 +116,16 @@ Rust 清理仅覆盖每个 Rust 项目根目录下真实的整个 `target/`，�
 DevSweep 不运行 Cargo，也不解析自定义 target-dir/build-dir 设置。Rust 内置清理不会删除源码、
 `Cargo.lock` 和 `.cargo/`；Cargo registry 全局缓存行为不变。请停止构建后再清理：不检测或锁定
 正在进行的构建，最终检查与删除之间仍可能发生文件系统变化。
+
+### .NET 项目
+
+C#、F#、Visual Basic 共用 `.NET` 项目类型和筛选项。目录中存在扩展名为 `.csproj`、`.fsproj`、
+`.vbproj` 的真实普通文件即触发识别，扩展名按 ASCII 大小写不敏感匹配。不解析内容，SDK 风格、
+旧式项目、空文件与无效项目文件均可命中；同名目录和符号链接不触发识别。同目录多个项目文件只
+显示一个项目；仅有 `.sln`、`.slnx`、`global.json` 或源码不触发识别。
+
+.NET 优先级最低，保留已有混合项目归类；独立 .NET 子目录仍可单独出现。沿用五层扫描深度和平台
+子目录归属规则。Unity 等工具生成的项目文件按相同条件识别，这不代表增加 Unity 清理支持。
 
 ## 自定义规则
 
