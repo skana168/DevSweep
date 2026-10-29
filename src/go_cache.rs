@@ -82,14 +82,13 @@ impl GoCacheClean<'_> {
         checked: Sender<(GoCacheSnapshot, Option<GoCacheError>)>,
     ) -> DeleteReport {
         let fresh = discover_with_command(command, self.context, timeout);
-        let plan = if self.id == "go.build" {
-            self.confirmed.plan_against(self.id, &fresh, self.context)
-        } else {
-            Err(GoCacheError::InvalidOutput)
-        };
+        let plan = self.confirmed.plan_against(self.id, &fresh, self.context);
         // Deliver the recheck before Finished, so the UI never loses a rejection reason.
         let _ = checked.send((fresh, plan.as_ref().err().copied()));
         match plan {
+            Ok(plan) if self.id == "go.module" => {
+                delete::execute_go_module(plan, mode, abort, events)
+            }
             Ok(plan) => delete::execute(plan, mode, abort, events),
             Err(_) => {
                 let failures = self

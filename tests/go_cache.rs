@@ -59,8 +59,9 @@ impl Fixture {
         command
     }
 
-    fn clean_build(
+    fn clean(
         &self,
+        id: &str,
         confirmed: &GoCacheSnapshot,
         command: Command,
         aborted: bool,
@@ -69,7 +70,7 @@ impl Fixture {
         let (checked_tx, checked) = mpsc::channel();
         let report = GoCacheClean {
             confirmed,
-            id: "go.build",
+            id,
             context: &self.context,
         }
         .execute_with_command(
@@ -135,58 +136,166 @@ fn confirmed_build_clean_rechecks_and_reports_the_removed_cache() {
 }
 
 #[test]
-fn confirmed_build_clean_rejects_a_new_path_without_deleting_either_cache() {
+fn confirmed_module_clean_removes_readonly_dependencies_without_touching_link_targets() {
     let fixture = Fixture::new();
+    let dependency = fixture.root.join("modules/pkg@v1");
+    fs::create_dir(&dependency).unwrap();
+    fs::write(dependency.join("source.go"), b"source").unwrap();
+    fs::set_permissions(&dependency, fs::Permissions::from_mode(0o555)).unwrap();
+    let outside = fixture.root.join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("keep.go"), b"keep").unwrap();
+    std::os::unix::fs::symlink(&outside, fixture.root.join("modules/000-link")).unwrap();
     let confirmed =
         discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
-    let replacement = fixture.root.join("replacement");
-    fs::create_dir(&replacement).unwrap();
-    fs::write(replacement.join("keep"), b"new").unwrap();
-    let mut command = fixture.command();
-    command.env("FIXTURE_BUILD", &replacement);
+    let (tx, events) = mpsc::channel();
+    let (checked_tx, checked) = mpsc::channel();
 
-    let (report, error) = fixture.clean_build(&confirmed, command, false);
-
-    assert_eq!(error, Some(GoCacheError::Changed));
-    assert_eq!(report.freed_bytes, 0);
-    assert_eq!(report.projects_done, 0);
-    assert_eq!(report.failures.len(), 1);
-    assert_eq!(report.failures[0].path, fixture.root.join("build 缓存"));
-    assert!(fixture.root.join("build 缓存/artifact").exists());
-    assert!(replacement.join("keep").exists());
-}
-
-#[test]
-fn confirmed_build_clean_never_falls_back_when_the_final_query_fails() {
-    let fixture = Fixture::new();
-    let confirmed =
-        discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
-    let (report, error) = fixture.clean_build(
-        &confirmed,
-        Command::new(fixture.root.join("missing-go")),
-        false,
+    let report = GoCacheClean {
+        confirmed: &confirmed,
+        id: "go.module",
+        context: &fixture.context,
+    }
+    .execute_with_command(
+        fixture.command(),
+        Duration::from_secs(1),
+        DeleteMode::Direct,
+        &AtomicBool::new(false),
+        tx,
+        checked_tx,
     );
+    if dependency.exists() {
+        fs::set_permissions(&dependency, fs::Permissions::from_mode(0o755)).unwrap();
+    }
 
-    assert_eq!(error, Some(GoCacheError::Unavailable));
-    assert_eq!(report.freed_bytes, 0);
-    assert_eq!(report.projects_done, 0);
-    assert_eq!(report.failures.len(), 1);
+    assert_eq!(checked.recv().unwrap().1, None);
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert_eq!(report.freed_bytes, 12);
+    assert!(!fixture.root.join("modules").exists());
     assert!(fixture.root.join("build 缓存/artifact").exists());
+    assert_eq!(fs::read(outside.join("keep.go")).unwrap(), b"keep");
+    assert!(
+        matches!(events.into_iter().last(), Some(DeleteEvent::Finished(result)) if result == report)
+    );
 }
 
 #[test]
-fn cancelled_build_clean_finishes_without_deleting_the_confirmed_cache() {
+fn confirmed_clean_rejects_a_new_path_without_deleting_either_cache() {
+    for (id, variable, cache, artifact) in [
+        ("go.build", "FIXTURE_BUILD", "build 缓存", "artifact"),
+        ("go.module", "FIXTURE_MODULE", "modules", "dependency"),
+    ] {
+        let fixture = Fixture::new();
+        let confirmed =
+            discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
+        let replacement = fixture.root.join("replacement");
+        fs::create_dir(&replacement).unwrap();
+        fs::write(replacement.join("keep"), b"new").unwrap();
+        let mut command = fixture.command();
+        command.env(variable, &replacement);
+
+        let (report, error) = fixture.clean(id, &confirmed, command, false);
+
+        assert_eq!(error, Some(GoCacheError::Changed));
+        assert_eq!(report.freed_bytes, 0);
+        assert_eq!(report.projects_done, 0);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].path, fixture.root.join(cache));
+        assert!(fixture.root.join(cache).join(artifact).exists());
+        assert!(replacement.join("keep").exists());
+    }
+}
+
+#[test]
+fn confirmed_clean_never_falls_back_when_the_final_query_fails() {
+    for (id, artifact) in [
+        ("go.build", "build 缓存/artifact"),
+        ("go.module", "modules/dependency"),
+    ] {
+        let fixture = Fixture::new();
+        let confirmed =
+            discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
+        let (report, error) = fixture.clean(
+            id,
+            &confirmed,
+            Command::new(fixture.root.join("missing-go")),
+            false,
+        );
+
+        assert_eq!(error, Some(GoCacheError::Unavailable));
+        assert_eq!(report.freed_bytes, 0);
+        assert_eq!(report.projects_done, 0);
+        assert_eq!(report.failures.len(), 1);
+        assert!(fixture.root.join(artifact).exists());
+    }
+}
+
+#[test]
+fn cancelled_clean_finishes_without_deleting_the_confirmed_cache() {
+    for (id, artifact) in [
+        ("go.build", "build 缓存/artifact"),
+        ("go.module", "modules/dependency"),
+    ] {
+        let fixture = Fixture::new();
+        let confirmed =
+            discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
+        let (report, error) = fixture.clean(id, &confirmed, fixture.command(), true);
+
+        assert_eq!(error, None);
+        assert!(report.aborted);
+        assert_eq!(report.projects_done, 0);
+        assert_eq!(report.freed_bytes, 0);
+        assert!(report.failures.is_empty());
+        assert!(fixture.root.join(artifact).exists());
+    }
+}
+
+#[test]
+fn a_partly_failed_module_clean_reports_zero_and_preserves_external_permissions() {
     let fixture = Fixture::new();
+    let modules = fixture.root.join("modules");
+    let outside = fixture.root.join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("keep.go"), b"keep").unwrap();
+    std::os::unix::fs::symlink(&outside, modules.join("linked-dependency")).unwrap();
+    fs::set_permissions(&modules, fs::Permissions::from_mode(0o551)).unwrap();
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o500)).unwrap();
     let confirmed =
         discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
-    let (report, error) = fixture.clean_build(&confirmed, fixture.command(), true);
+    fs::set_permissions(&fixture.root, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let (report, error) = fixture.clean("go.module", &confirmed, fixture.command(), false);
+    fs::set_permissions(&fixture.root, fs::Permissions::from_mode(0o755)).unwrap();
+    let external_mode = fs::metadata(&outside).unwrap().permissions().mode() & 0o777;
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o755)).unwrap();
 
     assert_eq!(error, None);
-    assert!(report.aborted);
-    assert_eq!(report.projects_done, 0);
     assert_eq!(report.freed_bytes, 0);
-    assert!(report.failures.is_empty());
-    assert!(fixture.root.join("build 缓存/artifact").exists());
+    assert_eq!(report.failures.len(), 1);
+    assert_eq!(report.projects_done, 1);
+    assert!(modules.exists());
+    assert!(!modules.join("dependency").exists());
+    assert_eq!(external_mode, 0o500);
+    assert_eq!(fs::read(outside.join("keep.go")).unwrap(), b"keep");
+}
+
+#[test]
+fn confirmed_module_clean_rejects_a_link_replacement_without_touching_its_target() {
+    let fixture = Fixture::new();
+    let modules = fixture.root.join("modules");
+    let moved = fixture.root.join("moved-modules");
+    let confirmed =
+        discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
+    fs::rename(&modules, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &modules).unwrap();
+
+    let (report, error) = fixture.clean("go.module", &confirmed, fixture.command(), false);
+
+    assert_eq!(error, Some(GoCacheError::Linked));
+    assert_eq!(report.freed_bytes, 0);
+    assert_eq!(report.projects_done, 0);
+    assert_eq!(report.failures.len(), 1);
+    assert_eq!(fs::read(moved.join("dependency")).unwrap(), b"module");
 }
 
 #[test]
@@ -198,7 +307,7 @@ fn a_partly_failed_build_clean_does_not_claim_the_whole_cache_size() {
     let confirmed =
         discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
     fs::set_permissions(&blocked, fs::Permissions::from_mode(0o500)).unwrap();
-    let (report, error) = fixture.clean_build(&confirmed, fixture.command(), false);
+    let (report, error) = fixture.clean("go.build", &confirmed, fixture.command(), false);
     fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
 
     assert_eq!(error, None);
