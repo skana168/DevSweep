@@ -188,3 +188,33 @@ fn readonly_module_cache_can_be_trashed_and_restored_without_changing_permission
         b"unique temporary DevSweep module fixture"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn an_internal_link_does_not_skip_readonly_sibling_dependencies() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let modules = root.join("modules");
+    let outside = root.join("outside");
+    fs::create_dir(&modules).unwrap();
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("keep.go"), b"keep").unwrap();
+    symlink(&outside, modules.join("000-link")).unwrap();
+    for index in 0..8 {
+        let dependency = modules.join(format!("dependency-{index}"));
+        fs::create_dir(&dependency).unwrap();
+        fs::write(dependency.join("source.go"), b"source").unwrap();
+        fs::set_permissions(dependency, fs::Permissions::from_mode(0o555)).unwrap();
+    }
+    let (tx, _rx) = mpsc::channel();
+    let report = execute_go_module(
+        module_plan(&modules, 48),
+        DeleteMode::Direct,
+        &AtomicBool::new(false),
+        tx,
+    );
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert!(!modules.exists());
+    assert_eq!(fs::read(outside.join("keep.go")).unwrap(), b"keep");
+}

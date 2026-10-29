@@ -216,12 +216,16 @@ fn delete_module_item(item: &PlanItem, mode: DeleteMode) -> Result<(), FailureRe
 
 // shortcut: filesystem changes can race with checks; use handle-relative operations for stronger isolation.
 fn prepare_module_permissions(path: &Path) -> io::Result<()> {
-    let mut entries = walkdir::WalkDir::new(path).follow_links(false).into_iter();
-    while let Some(entry) = entries.next() {
+    for entry in walkdir::WalkDir::new(path)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            !fs::symlink_metadata(entry.path()).is_ok_and(|meta| crate::go_cache::linked(&meta))
+        })
+    {
         let entry = entry.map_err(io::Error::from)?;
         let meta = fs::symlink_metadata(entry.path())?;
         if crate::go_cache::linked(&meta) {
-            entries.skip_current_dir();
             continue;
         }
         #[cfg(unix)]
