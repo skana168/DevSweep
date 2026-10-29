@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,8 +9,9 @@ use devsweep::config::{self, Config, LanguageChoice, ThemeChoice};
 use devsweep::delete::{self, DeleteEvent, DeleteMode, DeleteReport, Failure, FailureReason};
 use devsweep::go_cache::{self, GoCacheContext, GoCacheError, GoCacheSnapshot};
 use devsweep::plan::{self, DeletePlan, PlanProject};
+use devsweep::projects::{ProjectEntry, ProjectRefresh};
 use devsweep::rules::{self, Rule, Target};
-use devsweep::scan::{self, Project, Stack};
+use devsweep::scan::{self, Stack};
 use devsweep::size::{self, SizeEvent, SizeRequest};
 use eframe::CreationContext;
 use eframe::egui::{
@@ -62,9 +62,7 @@ pub struct DevSweepApp {
     /// One-shot message under the roots list, e.g. a duplicate add.
     root_notice: Option<&'static str>,
     view: View,
-    projects: Vec<Project>,
-    /// Expanded targets and per-row UI state, keyed by the project's canonical path.
-    entries: HashMap<PathBuf, ProjectEntry>,
+    projects: ProjectRefresh,
     caches: Vec<CacheRow>,
     go_snapshot: Option<GoCacheSnapshot>,
     go_query: Option<Receiver<GoCacheSnapshot>>,
@@ -139,10 +137,6 @@ fn cache_present(row: &CacheRow) -> bool {
         || row.path.as_ref().is_some_and(|path| path.is_dir())
 }
 
-struct ProjectEntry {
-    targets: Vec<Target>,
-}
-
 /// Resets the panel's draft to each target's rule default: risky rules stay off.
 fn reset_draft(targets: &mut [Target]) {
     for target in targets {
@@ -186,8 +180,7 @@ impl DevSweepApp {
             rules_error: loaded.error,
             root_notice: None,
             view: View::Projects,
-            projects: Vec::new(),
-            entries: HashMap::new(),
+            projects: ProjectRefresh::default(),
             caches: cache::entries()
                 .into_iter()
                 .map(|entry| CacheRow {
@@ -216,15 +209,10 @@ impl DevSweepApp {
             failures: Vec::new(),
             settings_open: false,
         };
-        app.projects = scan::scan(&app.active_roots());
-        app.sync_entries();
+        app.projects.refresh(&app.config.roots, &app.rules);
         app.refresh_go_caches(&cc.egui_ctx);
         app.measure_missing(&cc.egui_ctx);
         app
-    }
-
-    fn active_roots(&self) -> Vec<PathBuf> {
-        scan::active_roots(&self.config.roots)
     }
 
     fn persist(&self) {
@@ -245,10 +233,9 @@ impl DevSweepApp {
             return;
         }
         // Only the new subtree is walked; existing projects keep their sizes.
-        scan::merge_scan(&mut self.projects, scan::scan(std::slice::from_ref(&path)));
+        self.projects.add_root(&path, &self.rules);
         self.config.roots.push(path);
         self.root_notice = None;
-        self.sync_entries();
         self.refresh_go_caches(ctx);
         self.measure_missing(ctx);
         self.persist();
@@ -256,8 +243,7 @@ impl DevSweepApp {
     }
 
     fn rescan(&mut self, ctx: &egui::Context) {
-        self.projects = scan::scan(&self.active_roots());
-        self.sync_entries();
+        self.projects.refresh(&self.config.roots, &self.rules);
         self.refresh_go_caches(ctx);
         // A cache recreated since the last scan becomes measurable again.
         for row in &mut self.caches {
@@ -270,24 +256,8 @@ impl DevSweepApp {
         self.last_scan = Instant::now();
     }
 
-    /// Track the draft targets per canonical path; survivors keep them, vanished
-    /// projects drop out.
-    fn sync_entries(&mut self) {
-        scan::retain_scanned(&mut self.entries, &self.projects);
-        let rules = &self.rules;
-        for project in &self.projects {
-            self.entries
-                .entry(project.path.clone())
-                .or_insert_with(|| ProjectEntry {
-                    targets: rules::expand_targets(project, rules),
-                });
-        }
-    }
-
     fn project_size(&self, index: usize) -> Option<u64> {
-        self.entries
-            .get(&self.projects[index].path)
-            .and_then(|entry| size::total_size(&entry.targets))
+        size::total_size(&self.projects.entries()[index].targets)
     }
 
     /// Indices of projects matching the type filter and search, in display order.
@@ -295,7 +265,9 @@ impl DevSweepApp {
         let query = self.search.trim().to_lowercase();
         let mut rows: Vec<usize> = self
             .projects
+            .entries()
             .iter()
+            .map(|entry| &entry.project)
             .enumerate()
             .filter(|(_, project)| self.filter.is_none_or(|stack| project.stack == stack))
             .filter(|(_, project)| {
@@ -311,11 +283,14 @@ impl DevSweepApp {
             .collect();
 
         rows.sort_by(|&a, &b| {
-            let name = |index: usize| self.projects[index].name.to_lowercase();
+            let name = |index: usize| self.projects.entries()[index].project.name.to_lowercase();
             match self.sort {
-                Sort::Name => name(a)
-                    .cmp(&name(b))
-                    .then_with(|| self.projects[a].path.cmp(&self.projects[b].path)),
+                Sort::Name => name(a).cmp(&name(b)).then_with(|| {
+                    self.projects.entries()[a]
+                        .project
+                        .path
+                        .cmp(&self.projects.entries()[b].project.path)
+                }),
                 // Unmeasured projects always sink below measured ones.
                 Sort::Size => match (self.project_size(a), self.project_size(b)) {
                     (Some(left), Some(right)) => {
@@ -337,8 +312,9 @@ impl DevSweepApp {
             scan_roots: self.config.roots.clone(),
             projects: self
                 .projects
+                .entries()
                 .iter()
-                .map(|project| project.path.clone())
+                .map(|entry| entry.project.path.clone())
                 .collect(),
             other_caches: self
                 .caches
@@ -434,23 +410,7 @@ impl DevSweepApp {
 
     /// Sizes already computed for a target survive rescans; only unmeasured targets queue up.
     fn measure_missing(&mut self, ctx: &egui::Context) {
-        let mut requests: Vec<SizeRequest> = self
-            .projects
-            .iter()
-            .filter_map(|project| {
-                let entry = self.entries.get(&project.path)?;
-                let pending: Vec<PathBuf> = entry
-                    .targets
-                    .iter()
-                    .filter(|target| target.size.is_none())
-                    .map(|target| target.path.clone())
-                    .collect();
-                (!pending.is_empty()).then(|| SizeRequest {
-                    project: project.path.clone(),
-                    paths: pending,
-                })
-            })
-            .collect();
+        let mut requests = self.projects.measurement_requests();
 
         // Caches are measured as their own requests so each row fills in as it lands.
         requests.extend(self.caches.iter().filter_map(|row| {
@@ -485,17 +445,10 @@ impl DevSweepApp {
 
         loop {
             match measurement.rx.try_recv() {
-                Ok(SizeEvent { project, sizes }) => {
+                Ok(event) => {
                     measurement.done += 1;
-                    if let Some(entry) = self.entries.get_mut(&project) {
-                        for (path, size) in &sizes {
-                            if let Some(target) =
-                                entry.targets.iter_mut().find(|target| &target.path == path)
-                            {
-                                target.size = Some(*size);
-                            }
-                        }
-                    }
+                    self.projects.apply_measurement(&event);
+                    let SizeEvent { project, sizes } = event;
                     if let Some(row) = self.caches.iter_mut().find(|row| {
                         !go_cache::is_go_cache(row.rule.id) && row.path.as_ref() == Some(&project)
                     }) && let Some((_, size)) = sizes.first()
@@ -526,12 +479,10 @@ impl DevSweepApp {
 
     /// The plan the panel's current draft would delete, for one project.
     fn project_plan(&self, path: &Path) -> DeletePlan {
-        let Some(project) = self.projects.iter().find(|project| project.path == path) else {
+        let Some(entry) = self.projects.entry(path) else {
             return empty_plan();
         };
-        let Some(entry) = self.entries.get(path) else {
-            return empty_plan();
-        };
+        let project = &entry.project;
         plan::plan(
             &[PlanProject {
                 path: &project.path,
@@ -545,10 +496,10 @@ impl DevSweepApp {
 
     /// Open the clean panel with a fresh draft: each target back to its rule default.
     fn open_panel(&mut self, path: &Path) {
-        let Some(entry) = self.entries.get_mut(path) else {
+        let Some(targets) = self.projects.targets_mut(path) else {
             return;
         };
-        reset_draft(&mut entry.targets);
+        reset_draft(targets);
         let plan = self.project_plan(path);
         self.panel = Some(Panel {
             project: path.to_path_buf(),
@@ -683,12 +634,10 @@ impl DevSweepApp {
                     changed = true;
                 }
                 Ok(DeleteEvent::ProjectDone { project, deleted }) => {
-                    if let Some(entry) = self.entries.get_mut(&project) {
+                    if let Some(targets) = self.projects.targets_mut(&project) {
                         // Only the targets that actually left the disk go away.
-                        entry
-                            .targets
-                            .retain(|target| !deleted.contains(&target.path));
-                        reset_draft(&mut entry.targets);
+                        targets.retain(|target| !deleted.contains(&target.path));
+                        reset_draft(targets);
                     }
                     // Its panel has nothing left to show.
                     if self
@@ -762,14 +711,13 @@ impl DevSweepApp {
             return;
         };
         let path = panel.project.clone();
-        let Some(project) = self.projects.iter().find(|project| project.path == path) else {
+        let Some(entry) = self.projects.entry(&path) else {
             return;
         };
-        let (name, stack) = (project.name.clone(), project.stack);
-        let Some(entry) = self.entries.get_mut(&path) else {
+        let (name, stack) = (entry.project.name.clone(), entry.project.stack);
+        let Some(targets) = self.projects.targets_mut(&path) else {
             return;
         };
-        let targets = &mut entry.targets;
         let chosen = targets.iter().filter(|target| target.checked).count();
         let mut dirty = false;
         let mut close = false;
@@ -1238,10 +1186,11 @@ impl DevSweepApp {
             let count = match filter {
                 Some(stack) => self
                     .projects
+                    .entries()
                     .iter()
-                    .filter(|project| project.stack == stack)
+                    .filter(|entry| entry.project.stack == stack)
                     .count(),
-                None => self.projects.len(),
+                None => self.projects.entries().len(),
             };
             let active = self.view == View::Projects && self.filter == filter;
             let label = RichText::new(format!("{label}  {count}")).size(14.0);
@@ -1333,18 +1282,7 @@ impl DevSweepApp {
     fn remove_root(&mut self, index: usize, ctx: &egui::Context) {
         self.config.roots.remove(index);
         self.root_notice = None;
-        // Projects under a remaining root stay. Roots that are no longer covered get
-        // re-walked, since the removed parent's scan may have supplied their projects.
-        self.projects.retain(|project| {
-            self.config
-                .roots
-                .iter()
-                .any(|root| project.path.starts_with(root))
-        });
-        for root in self.active_roots() {
-            scan::merge_scan(&mut self.projects, scan::scan(std::slice::from_ref(&root)));
-        }
-        self.sync_entries();
+        self.projects.remove_root(&self.config.roots, &self.rules);
         self.refresh_go_caches(ctx);
         self.measure_missing(ctx);
         self.persist();
@@ -1570,7 +1508,7 @@ impl DevSweepApp {
         });
         ui.add_space(12.0);
 
-        if self.projects.is_empty() {
+        if self.projects.entries().is_empty() {
             self.card(ui, t, s.no_projects_title, s.no_projects_body, None);
             return;
         }
@@ -1629,20 +1567,16 @@ impl DevSweepApp {
                         header.col(|_| {});
                     })
                     .body(|mut body| {
-                        let projects = &self.projects;
-                        let entries = &mut self.entries;
+                        let entries = self.projects.entries();
                         let last_index = visible.last().copied();
                         for &index in visible {
-                            let project = &projects[index];
-                            let Some(entry) = entries.get_mut(&project.path) else {
-                                continue;
-                            };
+                            let entry = &entries[index];
+                            let project = &entry.project;
                             let last = Some(index) == last_index;
                             body.row(ROW_H, |mut row| {
-                                let hit = project_table_row(
-                                    &mut row, project, entry, last, running, t, s, span,
-                                )
-                                .map(|action| (project.path.clone(), action));
+                                let hit =
+                                    project_table_row(&mut row, entry, last, running, t, s, span)
+                                        .map(|action| (project.path.clone(), action));
                                 // Only one row can be clicked per frame; later rows
                                 // must not clear an action an earlier row just set.
                                 if hit.is_some() {
@@ -1920,7 +1854,7 @@ impl eframe::App for DevSweepApp {
         if let Some(cleanup) = self.pending.clone() {
             let pending_plan = self.plan_for(cleanup.clone());
             let known = match &cleanup {
-                Cleanup::Project(path) => self.entries.get(path).is_some_and(|entry| {
+                Cleanup::Project(path) => self.projects.entry(path).is_some_and(|entry| {
                     entry
                         .targets
                         .iter()
@@ -2341,17 +2275,16 @@ fn danger_button(ui: &mut Ui, label: &str, t: &Tokens, enabled: bool) -> bool {
 ///
 /// The "last row" flag skips the rule under the final row, where the table's own
 /// frame already draws one.
-#[allow(clippy::too_many_arguments)]
 fn project_table_row(
     row: &mut TableRow<'_, '_>,
-    project: &Project,
-    entry: &mut ProjectEntry,
+    entry: &ProjectEntry,
     last: bool,
     running: bool,
     t: &Tokens,
     s: &Strings,
     span: egui::Rangef,
 ) -> Option<RowAction> {
+    let project = &entry.project;
     let mut action = None;
     let cleanable = !entry.targets.is_empty();
 
@@ -2829,22 +2762,20 @@ mod tests {
     // --- A headless click harness for the projects table. ---
     /// One app with `rows` projects, each carrying one cleanable target.
     fn app_with_rows(rows: usize) -> DevSweepApp {
-        let root = PathBuf::from("/tmp/devsweep-ui-test");
-        let mut projects = Vec::new();
-        let mut entries = HashMap::new();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
         for index in 0..rows {
             let path = root.join(format!("p{index}"));
-            projects.push(Project {
-                name: format!("p{index}"),
-                path: path.clone(),
-                stack: Stack::Node,
-            });
-            entries.insert(
-                path,
-                ProjectEntry {
-                    targets: vec![target("node_modules", true, false)],
-                },
-            );
+            std::fs::create_dir_all(path.join("node_modules")).unwrap();
+            std::fs::write(path.join("package.json"), "{}").unwrap();
+        }
+        let mut projects = ProjectRefresh::default();
+        projects.refresh(std::slice::from_ref(&root), &rules::builtin_rules());
+        for index in 0..rows {
+            projects
+                .targets_mut(&root.join(format!("p{index}")))
+                .unwrap()[0]
+                .size = Some(1024);
         }
         DevSweepApp {
             lang: Lang::En,
@@ -2857,7 +2788,6 @@ mod tests {
             root_notice: None,
             view: View::Projects,
             projects,
-            entries,
             caches: Vec::new(),
             go_snapshot: None,
             go_query: None,
@@ -3101,8 +3031,8 @@ mod tests {
         );
     }
 
-    fn expected(index: usize) -> Option<PathBuf> {
-        Some(PathBuf::from(format!("/tmp/devsweep-ui-test/p{index}")))
+    fn expected(app: &DevSweepApp, index: usize) -> Option<PathBuf> {
+        Some(app.config.roots[0].join(format!("p{index}")))
     }
 
     /// The first row is not the last rendered one: its action must survive the rows
@@ -3114,7 +3044,7 @@ mod tests {
         click_at(&mut app, &ctx, egui::pos2(200.0, 150.0));
         assert_eq!(
             app.panel.as_ref().map(|panel| panel.project.clone()),
-            expected(0)
+            expected(&app, 0)
         );
     }
 
@@ -3126,7 +3056,7 @@ mod tests {
         click_at(&mut app, &ctx, egui::pos2(735.0, 150.0));
         assert_eq!(
             app.panel.as_ref().map(|panel| panel.project.clone()),
-            expected(0)
+            expected(&app, 0)
         );
     }
 
