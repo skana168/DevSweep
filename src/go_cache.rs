@@ -5,6 +5,8 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::plan::{DeletePlan, LARGE_TARGET_BYTES, PlanItem};
+
 #[derive(Clone)]
 pub struct GoCacheContext {
     pub home: PathBuf,
@@ -26,6 +28,7 @@ pub enum GoCacheError {
     Protected,
     Overlap,
     Linked,
+    Changed,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +48,42 @@ impl GoCacheSnapshot {
         self.entries.iter().find(|entry| entry.id == id)
     }
 
+    /// Build only a measured, currently safe entry from the fixed Go cache list.
+    pub fn plan(&self, id: &str, context: &GoCacheContext) -> Result<DeletePlan, GoCacheError> {
+        if !is_go_cache(id) {
+            return Err(GoCacheError::InvalidOutput);
+        }
+        let bytes = self.entry(id).ok_or(GoCacheError::InvalidOutput)?.size?;
+        let path = self.validate(id, context)?;
+        Ok(DeletePlan {
+            items: vec![PlanItem {
+                project_path: path.clone(),
+                target_path: path,
+                bytes,
+                large: bytes > LARGE_TARGET_BYTES,
+            }],
+            skipped: Vec::new(),
+            total_bytes: bytes,
+        })
+    }
+
+    /// A final query may confirm the old path, never authorize a newly configured one.
+    pub fn plan_against(
+        &self,
+        id: &str,
+        fresh: &GoCacheSnapshot,
+        context: &GoCacheContext,
+    ) -> Result<DeletePlan, GoCacheError> {
+        let confirmed = self.plan(id, context)?;
+        let current = fresh.plan(id, context)?;
+        let before = &confirmed.items[0].target_path;
+        let after = &current.items[0].target_path;
+        if !contains(before, after) || !contains(after, before) {
+            return Err(GoCacheError::Changed);
+        }
+        Ok(confirmed)
+    }
+
     /// Recheck the discovered paths against the current filesystem and protected locations.
     pub fn validate(&self, id: &str, context: &GoCacheContext) -> Result<PathBuf, GoCacheError> {
         let entry = self.entry(id).ok_or(GoCacheError::InvalidOutput)?;
@@ -59,6 +98,10 @@ impl GoCacheSnapshot {
             .and_then(|other| other.path.as_deref());
         validate_path(path, peer, context)
     }
+}
+
+pub fn cleanup_supported(id: &str) -> bool {
+    id == "go.build"
 }
 
 pub fn is_go_cache(id: &str) -> bool {

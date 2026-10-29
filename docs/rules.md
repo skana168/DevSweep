@@ -182,3 +182,23 @@ scan-depth and platform-subdirectory ownership limits remain in effect.
 
 Paths that are invalid, that point outside the project, or that do not exist are skipped; invalid
 ones are reported in the interface.
+
+## Go build cache
+
+Go build cache cleanup is a fixed global Cache entry, independent of project Rules. It uses the
+current local Go configuration rather than a hardcoded default path, including environment and
+persisted Go settings. It does not add a Go Stack or project Marker. Go queries run in the background
+with a timeout, without shell startup files or toolchain downloads. Unavailable Go, query errors,
+missing directories and unsafe paths are shown explicitly and cannot be cleaned.
+
+Only real cache directories with no links in their path are accepted. Filesystem roots, the home
+directory, scan roots and their ancestors, and paths overlapping known Projects or other caches
+are rejected. Internal links are not followed. Custom external locations are allowed if validation
+passes. These checks protect known locations, not arbitrary manual data inside a cache.
+
+Refresh resolves the location again. Execution rechecks current Go configuration and path safety;
+a changed location cancels the old confirmation and requires new measurement and confirmation.
+Both Trash and Direct follow the global setting, with no automatic fallback or `go clean` command.
+Subsequent builds may be slower. Stop Go builds, tests and downloads first; active tasks are not
+locked or terminated. Failures trigger remeasurement, do not count the entire item as freed, and
+may leave partial deletions. Filesystem races between checking and deleting are not eliminated.

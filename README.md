@@ -61,10 +61,21 @@ DevSweep finds build artifacts, dependencies, and caches in Flutter, Android, iO
 
 | Dependency cache | Toolchain cache |
 |---|---|
-| Gradle caches, Gradle distributions, Maven local repository, npm, pnpm, bun, Yarn, pub, CocoaPods | Playwright, Xcode DerivedData, Cargo registry, pip |
+| Gradle caches, Gradle distributions, Maven local repository, npm, pnpm, bun, Yarn, pub, CocoaPods | Playwright, Xcode DerivedData, Cargo registry, pip, Go build cache |
 
 Clearing one of these frees space for every project at once, and the next build downloads or rebuilds
 what it needs. The list is fixed: `rules.toml` does not extend or disable it.
+
+The Go build cache is queried from the current local Go configuration, including environment and
+`go env -w` overrides. Go must be available to the app; failed queries never guess a default path.
+Missing or rejected Go caches remain visible with an explanation. Go project recognition is not included.
+
+Go cache paths are checked for protected directories, links and overlaps with known projects or other
+caches. Custom locations outside the home directory are supported when these checks pass. Refresh
+queries the location again; a changed location at execution cancels the old confirmation. The build
+cache follows the selected Trash / Direct setting. Cleaning makes subsequent builds slower; stop Go
+builds, tests and downloads first. Running tasks are not detected or locked. Failures are shown and
+remaining contents are measured again; partial deletion cannot be rolled back.
 
 ## Install
 
