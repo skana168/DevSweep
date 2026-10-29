@@ -1,6 +1,7 @@
 use devsweep::cache::CacheGroup;
 use devsweep::config::LanguageChoice;
 use devsweep::delete::FailureReason;
+use devsweep::go_cache::GoCacheError;
 use devsweep::plan::SkipReason;
 use devsweep::scan::Stack;
 
@@ -97,6 +98,20 @@ pub struct Strings {
     pub cache_group_toolchain: &'static str,
     pub cache_redownload: &'static str,
     pub cache_cargo_note: &'static str,
+    pub go_build_cache: &'static str,
+    pub go_module_cache: &'static str,
+    pub go_cache_querying: &'static str,
+    pub go_unavailable: &'static str,
+    pub go_query_failed: &'static str,
+    pub go_timeout: &'static str,
+    pub go_invalid_output: &'static str,
+    pub go_unreadable: &'static str,
+    pub go_disabled: &'static str,
+    pub go_missing: &'static str,
+    pub go_not_directory: &'static str,
+    pub go_protected: &'static str,
+    pub go_overlap: &'static str,
+    pub go_linked: &'static str,
     pub all: &'static str,
     pub type_filter: &'static str,
     pub search_hint: &'static str,
@@ -128,6 +143,22 @@ pub struct Strings {
 }
 
 impl Strings {
+    pub fn go_cache_error(&self, error: GoCacheError) -> &'static str {
+        match error {
+            GoCacheError::Unavailable => self.go_unavailable,
+            GoCacheError::QueryFailed => self.go_query_failed,
+            GoCacheError::Timeout => self.go_timeout,
+            GoCacheError::InvalidOutput => self.go_invalid_output,
+            GoCacheError::Unreadable => self.go_unreadable,
+            GoCacheError::Disabled => self.go_disabled,
+            GoCacheError::Missing => self.go_missing,
+            GoCacheError::NotDirectory => self.go_not_directory,
+            GoCacheError::Protected => self.go_protected,
+            GoCacheError::Overlap => self.go_overlap,
+            GoCacheError::Linked => self.go_linked,
+        }
+    }
+
     pub fn stack(&self, stack: Stack) -> &'static str {
         match stack {
             Stack::Flutter => self.stack_flutter,
@@ -233,6 +264,20 @@ static ZH: Strings = Strings {
     cache_group_toolchain: "工具链",
     cache_redownload: "清理后需重新下载",
     cache_cargo_note: "清理会影响本机 Rust 构建",
+    go_build_cache: "Go 构建缓存",
+    go_module_cache: "Go 模块缓存",
+    go_cache_querying: "正在查询 Go 缓存位置…",
+    go_unavailable: "无法确定缓存位置：未找到 Go",
+    go_query_failed: "无法确定缓存位置：Go 查询失败",
+    go_timeout: "无法确定缓存位置：Go 查询超时",
+    go_invalid_output: "无法确定缓存位置：Go 返回值无效",
+    go_unreadable: "无法读取缓存路径或测量体积",
+    go_disabled: "缓存未启用",
+    go_missing: "缓存目录不存在",
+    go_not_directory: "安全检查拒绝：缓存路径不是目录",
+    go_protected: "安全检查拒绝：受保护目录",
+    go_overlap: "安全检查拒绝：与项目或其他缓存重叠",
+    go_linked: "安全检查拒绝：缓存路径包含链接或重定向",
     all: "全部",
     type_filter: "类型",
     search_hint: "搜索名称或路径 (⌘F)",
@@ -324,6 +369,20 @@ static EN: Strings = Strings {
     cache_group_toolchain: "Toolchain",
     cache_redownload: "Downloads again next time",
     cache_cargo_note: "Affects Rust builds on this machine",
+    go_build_cache: "Go build cache",
+    go_module_cache: "Go module cache",
+    go_cache_querying: "Querying Go cache locations…",
+    go_unavailable: "Cache location unknown: Go was not found",
+    go_query_failed: "Cache location unknown: Go query failed",
+    go_timeout: "Cache location unknown: Go query timed out",
+    go_invalid_output: "Cache location unknown: invalid Go output",
+    go_unreadable: "Cannot read the cache path or measure its size",
+    go_disabled: "Cache is disabled",
+    go_missing: "Cache directory does not exist",
+    go_not_directory: "Safety check rejected: cache path is not a directory",
+    go_protected: "Safety check rejected: protected directory",
+    go_overlap: "Safety check rejected: overlaps a project or another cache",
+    go_linked: "Safety check rejected: cache path contains a link or redirection",
     all: "All",
     type_filter: "Type",
     search_hint: "Search name or path (⌘F)",

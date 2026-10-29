@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use devsweep::cache::{self, CacheRule};
 use devsweep::config::{self, Config, LanguageChoice, ThemeChoice};
 use devsweep::delete::{self, DeleteEvent, DeleteMode, Failure};
+use devsweep::go_cache::{self, GoCacheContext, GoCacheError, GoCacheSnapshot};
 use devsweep::plan::{self, DeletePlan, PlanProject};
 use devsweep::rules::{self, Rule, Target};
 use devsweep::scan::{self, Project, Stack};
@@ -65,6 +66,8 @@ pub struct DevSweepApp {
     /// Expanded targets and per-row UI state, keyed by the project's canonical path.
     entries: HashMap<PathBuf, ProjectEntry>,
     caches: Vec<CacheRow>,
+    go_snapshot: Option<GoCacheSnapshot>,
+    go_query: Option<Receiver<GoCacheSnapshot>>,
     measurement: Option<Measurement>,
     search: String,
     filter: Option<Stack>,
@@ -124,12 +127,14 @@ struct CacheRow {
     path: Option<PathBuf>,
     size: Option<u64>,
     cleaned: bool,
+    go_error: Option<GoCacheError>,
 }
 
-/// Whether a cache row belongs in the list: its path is on disk, or it was just
-/// cleaned and still shows the result until the next rescan.
+/// Go rows always show their query state; other rows need a present cache or a clean result.
 fn cache_present(row: &CacheRow) -> bool {
-    row.cleaned || row.path.as_ref().is_some_and(|path| path.is_dir())
+    go_cache::is_go_cache(row.rule.id)
+        || row.cleaned
+        || row.path.as_ref().is_some_and(|path| path.is_dir())
 }
 
 struct ProjectEntry {
@@ -186,8 +191,11 @@ impl DevSweepApp {
                     path: entry.path,
                     size: None,
                     cleaned: false,
+                    go_error: None,
                 })
                 .collect(),
+            go_snapshot: None,
+            go_query: None,
             measurement: None,
             search: String::new(),
             filter: None,
@@ -205,6 +213,7 @@ impl DevSweepApp {
         };
         app.projects = scan::scan(&app.active_roots());
         app.sync_entries();
+        app.refresh_go_caches(&cc.egui_ctx);
         app.measure_missing(&cc.egui_ctx);
         app
     }
@@ -235,6 +244,7 @@ impl DevSweepApp {
         self.config.roots.push(path);
         self.root_notice = None;
         self.sync_entries();
+        self.refresh_go_caches(ctx);
         self.measure_missing(ctx);
         self.persist();
         self.last_scan = Instant::now();
@@ -243,6 +253,7 @@ impl DevSweepApp {
     fn rescan(&mut self, ctx: &egui::Context) {
         self.projects = scan::scan(&self.active_roots());
         self.sync_entries();
+        self.refresh_go_caches(ctx);
         // A cache recreated since the last scan becomes measurable again.
         for row in &mut self.caches {
             if row.cleaned && row.path.as_ref().is_some_and(|path| path.is_dir()) {
@@ -314,6 +325,94 @@ impl DevSweepApp {
         rows
     }
 
+    fn go_context(&self) -> Option<GoCacheContext> {
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+        Some(GoCacheContext {
+            home: PathBuf::from(home),
+            scan_roots: self.config.roots.clone(),
+            projects: self
+                .projects
+                .iter()
+                .map(|project| project.path.clone())
+                .collect(),
+            other_caches: self
+                .caches
+                .iter()
+                .filter(|row| !go_cache::is_go_cache(row.rule.id))
+                .filter_map(|row| row.path.clone())
+                .collect(),
+        })
+    }
+
+    fn refresh_go_caches(&mut self, ctx: &egui::Context) {
+        // Replacing the receiver discards results from an older roots/configuration snapshot.
+        self.go_query = None;
+        self.go_snapshot = None;
+        for row in self
+            .caches
+            .iter_mut()
+            .filter(|row| go_cache::is_go_cache(row.rule.id))
+        {
+            row.path = None;
+            row.size = None;
+            row.cleaned = false;
+            row.go_error = None;
+        }
+        let Some(context) = self.go_context() else {
+            for row in self
+                .caches
+                .iter_mut()
+                .filter(|row| go_cache::is_go_cache(row.rule.id))
+            {
+                row.go_error = Some(GoCacheError::Unreadable);
+            }
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(go_cache::discover(&context));
+            repaint.request_repaint();
+        });
+        self.go_query = Some(rx);
+    }
+
+    fn poll_go_caches(&mut self, ctx: &egui::Context) {
+        let Some(query) = &self.go_query else {
+            return;
+        };
+        match query.try_recv() {
+            Ok(snapshot) => {
+                for row in self
+                    .caches
+                    .iter_mut()
+                    .filter(|row| go_cache::is_go_cache(row.rule.id))
+                {
+                    if let Some(entry) = snapshot.entry(row.rule.id) {
+                        row.path = entry.path.clone();
+                        row.size = entry.size.ok();
+                        row.go_error = entry.size.err();
+                    }
+                }
+                self.go_snapshot = Some(snapshot);
+                self.go_query = None;
+                ctx.request_repaint();
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.go_query = None;
+                for row in self
+                    .caches
+                    .iter_mut()
+                    .filter(|row| go_cache::is_go_cache(row.rule.id))
+                {
+                    row.go_error = Some(GoCacheError::QueryFailed);
+                }
+                ctx.request_repaint();
+            }
+            Err(TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(100)),
+        }
+    }
+
     /// Sizes already computed for a target survive rescans; only unmeasured targets queue up.
     fn measure_missing(&mut self, ctx: &egui::Context) {
         let mut requests: Vec<SizeRequest> = self
@@ -336,6 +435,9 @@ impl DevSweepApp {
 
         // Caches are measured as their own requests so each row fills in as it lands.
         requests.extend(self.caches.iter().filter_map(|row| {
+            if go_cache::is_go_cache(row.rule.id) {
+                return None;
+            }
             let path = row.path.as_ref()?;
             (row.size.is_none() && !row.cleaned && path.is_dir()).then(|| SizeRequest {
                 project: path.clone(),
@@ -375,16 +477,12 @@ impl DevSweepApp {
                             }
                         }
                     }
-                    if let Some(row) = self
-                        .caches
-                        .iter_mut()
-                        .find(|row| row.path.as_ref() == Some(&project))
+                    if let Some(row) = self.caches.iter_mut().find(|row| {
+                        !go_cache::is_go_cache(row.rule.id) && row.path.as_ref() == Some(&project)
+                    }) && let Some((_, size)) = sizes.first()
+                        && !row.cleaned
                     {
-                        if let Some((_, size)) = sizes.first() {
-                            if !row.cleaned {
-                                row.size = Some(*size);
-                            }
-                        }
+                        row.size = Some(*size);
                     }
                     changed = true;
                 }
@@ -456,7 +554,7 @@ impl DevSweepApp {
     fn cache_total(&self) -> Option<u64> {
         self.caches
             .iter()
-            .filter(|row| cache_present(row))
+            .filter(|row| cache_present(row) && row.go_error.is_none())
             .try_fold(0, |sum, row| row.size.map(|size| sum + size))
     }
 
@@ -1140,6 +1238,7 @@ impl DevSweepApp {
             scan::merge_scan(&mut self.projects, scan::scan(std::slice::from_ref(&root)));
         }
         self.sync_entries();
+        self.refresh_go_caches(ctx);
         self.measure_missing(ctx);
         self.persist();
         self.last_scan = Instant::now();
@@ -1577,6 +1676,7 @@ impl DevSweepApp {
 
 impl eframe::App for DevSweepApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_go_caches(ctx);
         self.poll_measurement(ctx);
         self.poll_execution(ctx);
 
@@ -2280,16 +2380,37 @@ fn cache_table_row(
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 ui.label(
-                    RichText::new(cache.rule.name)
-                        .size(14.0)
-                        .strong()
-                        .color(t.text),
+                    RichText::new(match cache.rule.id {
+                        "go.build" => s.go_build_cache,
+                        "go.module" => s.go_module_cache,
+                        _ => cache.rule.name,
+                    })
+                    .size(14.0)
+                    .strong()
+                    .color(t.text),
                 );
                 // Only the cargo registry carries a risk note today.
                 if cache.rule.id == "cargo.registry" {
                     ui.label(RichText::new(s.cache_cargo_note).size(11.0).color(t.danger));
                 }
             });
+            if let Some(error) = cache.go_error {
+                ui.add(
+                    Label::new(
+                        RichText::new(s.go_cache_error(error))
+                            .size(11.0)
+                            .color(t.danger),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(s.go_cache_error(error));
+            } else if go_cache::is_go_cache(cache.rule.id) && cache.path.is_none() {
+                ui.label(
+                    RichText::new(s.go_cache_querying)
+                        .size(11.0)
+                        .color(t.text_muted),
+                );
+            }
             if let Some(path) = &cache.path {
                 let label = Label::new(
                     RichText::new(path.display().to_string())
@@ -2308,6 +2429,7 @@ fn cache_table_row(
     row.col(|ui| {
         let (text, color) = match cache.size {
             Some(bytes) => (size::format_size(bytes), t.good),
+            None if cache.go_error.is_some() => ("—".to_string(), t.text_muted),
             None => ("…".to_string(), t.text_muted),
         };
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -2317,7 +2439,11 @@ fn cache_table_row(
     row.col(|ui| {
         // Keep the clean button off the size column's right-aligned numbers.
         ui.add_space(12.0);
-        let armed = exists && !cache.cleaned && !busy && cache.size.is_some();
+        let armed = !go_cache::is_go_cache(cache.rule.id)
+            && exists
+            && !cache.cleaned
+            && !busy
+            && cache.size.is_some();
         if action_button(
             ui,
             s.clean,
@@ -2331,7 +2457,10 @@ fn cache_table_row(
     });
     row.col(|ui| {
         // Nothing to open when the entry is not on this machine.
-        if let Some(path) = cache.path.as_ref().filter(|_| exists)
+        if let Some(path) = cache
+            .path
+            .as_ref()
+            .filter(|_| exists && cache.go_error.is_none())
             && let Some(choice) = more_menu(ui, t, s)
         {
             action = Some((path.clone(), choice));
@@ -2532,6 +2661,7 @@ mod tests {
             path,
             size: None,
             cleaned,
+            go_error: None,
         };
 
         assert!(cache_present(&row(Some(dir.path().to_path_buf()), false)));
@@ -2598,6 +2728,8 @@ mod tests {
             projects,
             entries,
             caches: Vec::new(),
+            go_snapshot: None,
+            go_query: None,
             measurement: None,
             search: String::new(),
             filter: None,

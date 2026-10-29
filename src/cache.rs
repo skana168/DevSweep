@@ -62,13 +62,13 @@ const fn local(rel: &'static str) -> Option<PathSpec> {
     })
 }
 
-/// The whitelist: these thirteen entries are the only paths a global-cache
+/// The whitelist: these fixed entries are the only paths a global-cache
 /// cleanup can touch. `id`s are stable once released.
 pub fn builtin_caches() -> &'static [CacheRule] {
     &CACHES
 }
 
-static CACHES: [CacheRule; 13] = [
+static CACHES: [CacheRule; 15] = [
     CacheRule {
         id: "gradle.caches",
         name: "Gradle caches",
@@ -142,6 +142,14 @@ static CACHES: [CacheRule; 13] = [
         dangerous: false,
     },
     CacheRule {
+        id: "go.module",
+        name: "Go module cache",
+        group: CacheGroup::Dependency,
+        mac: None,
+        win: None,
+        dangerous: true,
+    },
+    CacheRule {
         id: "playwright.browsers",
         name: "Playwright",
         group: CacheGroup::Toolchain,
@@ -164,6 +172,14 @@ static CACHES: [CacheRule; 13] = [
         mac: home(".cargo/registry"),
         win: home(".cargo/registry"),
         dangerous: true,
+    },
+    CacheRule {
+        id: "go.build",
+        name: "Go build cache",
+        group: CacheGroup::Toolchain,
+        mac: None,
+        win: None,
+        dangerous: false,
     },
     CacheRule {
         id: "pip.cache",
@@ -236,7 +252,7 @@ pub struct CacheEntry {
     pub path: Option<PathBuf>,
 }
 
-/// All thirteen entries with their path on this machine. Paths are not checked
+/// All fixed entries with their path on this machine. Paths are not checked
 /// for existence here; the UI renders missing ones as "not found".
 pub fn entries() -> Vec<CacheEntry> {
     let env = Env::current();
@@ -296,18 +312,18 @@ mod tests {
     }
 
     #[test]
-    fn table_has_thirteen_unique_entries_and_one_dangerous_one() {
+    fn table_has_fifteen_unique_entries_and_two_dangerous_ones() {
         let rules = builtin_caches();
         let ids: HashSet<&str> = rules.iter().map(|rule| rule.id).collect();
 
-        assert_eq!(rules.len(), 13);
-        assert_eq!(ids.len(), 13);
+        assert_eq!(rules.len(), 15);
+        assert_eq!(ids.len(), 15);
         assert_eq!(
             rules
                 .iter()
                 .filter(|rule| rule.group == CacheGroup::Dependency)
                 .count(),
-            9
+            10
         );
         assert_eq!(
             rules
@@ -315,7 +331,7 @@ mod tests {
                 .filter(|rule| rule.dangerous)
                 .map(|rule| rule.id)
                 .collect::<Vec<_>>(),
-            vec!["cargo.registry"]
+            vec!["go.module", "cargo.registry"]
         );
     }
 
