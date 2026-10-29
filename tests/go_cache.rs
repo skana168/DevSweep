@@ -6,7 +6,12 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-use devsweep::go_cache::{GoCacheContext, discover_with_command};
+use devsweep::delete::{DeleteEvent, DeleteMode, DeleteReport};
+use devsweep::go_cache::{
+    GoCacheClean, GoCacheContext, GoCacheError, GoCacheSnapshot, discover_with_command,
+};
+use std::sync::atomic::AtomicBool;
+use std::sync::mpsc;
 
 struct Fixture {
     _temp: tempfile::TempDir,
@@ -53,6 +58,33 @@ impl Fixture {
         command.env("FIXTURE_MODULE", self.root.join("modules"));
         command
     }
+
+    fn clean_build(
+        &self,
+        confirmed: &GoCacheSnapshot,
+        command: Command,
+        aborted: bool,
+    ) -> (DeleteReport, Option<GoCacheError>) {
+        let (tx, events) = mpsc::channel();
+        let (checked_tx, checked) = mpsc::channel();
+        let report = GoCacheClean {
+            confirmed,
+            id: "go.build",
+            context: &self.context,
+        }
+        .execute_with_command(
+            command,
+            Duration::from_secs(1),
+            DeleteMode::Direct,
+            &AtomicBool::new(aborted),
+            tx,
+            checked_tx,
+        );
+        assert!(
+            matches!(events.into_iter().last(), Some(DeleteEvent::Finished(result)) if result == report)
+        );
+        (report, checked.recv().unwrap().1)
+    }
 }
 
 #[test]
@@ -66,6 +98,113 @@ fn discovers_and_measures_both_independent_custom_caches() {
     assert_eq!(build.size, Ok(5));
     assert_eq!(module.path.as_ref(), Some(&fixture.root.join("modules")));
     assert_eq!(module.size, Ok(6));
+}
+
+#[test]
+fn confirmed_build_clean_rechecks_and_reports_the_removed_cache() {
+    let fixture = Fixture::new();
+    let confirmed =
+        discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
+    let (tx, events) = mpsc::channel();
+    let (checked_tx, checked) = mpsc::channel();
+    let report = GoCacheClean {
+        confirmed: &confirmed,
+        id: "go.build",
+        context: &fixture.context,
+    }
+    .execute_with_command(
+        fixture.command(),
+        Duration::from_secs(1),
+        DeleteMode::Direct,
+        &AtomicBool::new(false),
+        tx,
+        checked_tx,
+    );
+
+    assert_eq!(report.freed_bytes, 5);
+    assert_eq!(report.projects_done, 1);
+    assert!(report.failures.is_empty());
+    assert!(!fixture.root.join("build 缓存").exists());
+    assert!(fixture.root.join("modules/dependency").exists());
+    let (snapshot, error) = checked.recv().unwrap();
+    assert_eq!(error, None);
+    assert_eq!(snapshot.entry("go.build").unwrap().size, Ok(5));
+    assert!(
+        matches!(events.into_iter().last(), Some(DeleteEvent::Finished(result)) if result == report)
+    );
+}
+
+#[test]
+fn confirmed_build_clean_rejects_a_new_path_without_deleting_either_cache() {
+    let fixture = Fixture::new();
+    let confirmed =
+        discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
+    let replacement = fixture.root.join("replacement");
+    fs::create_dir(&replacement).unwrap();
+    fs::write(replacement.join("keep"), b"new").unwrap();
+    let mut command = fixture.command();
+    command.env("FIXTURE_BUILD", &replacement);
+
+    let (report, error) = fixture.clean_build(&confirmed, command, false);
+
+    assert_eq!(error, Some(GoCacheError::Changed));
+    assert_eq!(report.freed_bytes, 0);
+    assert_eq!(report.projects_done, 0);
+    assert_eq!(report.failures.len(), 1);
+    assert_eq!(report.failures[0].path, fixture.root.join("build 缓存"));
+    assert!(fixture.root.join("build 缓存/artifact").exists());
+    assert!(replacement.join("keep").exists());
+}
+
+#[test]
+fn confirmed_build_clean_never_falls_back_when_the_final_query_fails() {
+    let fixture = Fixture::new();
+    let confirmed =
+        discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
+    let (report, error) = fixture.clean_build(
+        &confirmed,
+        Command::new(fixture.root.join("missing-go")),
+        false,
+    );
+
+    assert_eq!(error, Some(GoCacheError::Unavailable));
+    assert_eq!(report.freed_bytes, 0);
+    assert_eq!(report.projects_done, 0);
+    assert_eq!(report.failures.len(), 1);
+    assert!(fixture.root.join("build 缓存/artifact").exists());
+}
+
+#[test]
+fn cancelled_build_clean_finishes_without_deleting_the_confirmed_cache() {
+    let fixture = Fixture::new();
+    let confirmed =
+        discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
+    let (report, error) = fixture.clean_build(&confirmed, fixture.command(), true);
+
+    assert_eq!(error, None);
+    assert!(report.aborted);
+    assert_eq!(report.projects_done, 0);
+    assert_eq!(report.freed_bytes, 0);
+    assert!(report.failures.is_empty());
+    assert!(fixture.root.join("build 缓存/artifact").exists());
+}
+
+#[test]
+fn a_partly_failed_build_clean_does_not_claim_the_whole_cache_size() {
+    let fixture = Fixture::new();
+    let blocked = fixture.root.join("build 缓存/blocked");
+    fs::create_dir(&blocked).unwrap();
+    fs::write(blocked.join("keep"), b"blocked").unwrap();
+    let confirmed =
+        discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o500)).unwrap();
+    let (report, error) = fixture.clean_build(&confirmed, fixture.command(), false);
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert_eq!(error, None);
+    assert_eq!(report.freed_bytes, 0);
+    assert_eq!(report.failures.len(), 1);
+    assert!(blocked.join("keep").exists());
 }
 
 #[test]
