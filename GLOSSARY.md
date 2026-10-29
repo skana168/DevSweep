@@ -107,7 +107,7 @@ _Avoid_: 项目缓存、系统缓存
 _Avoid_: 规则、Target
 
 **Cache group（缓存分组）**：
-Cache entry 的展示分组：Dependency cache（依赖缓存：Gradle、npm、pnpm、bun、Yarn、pub、CocoaPods）与 Toolchain cache（工具链缓存：Playwright、DerivedData、Cargo registry、pip）。分组只决定展示与顺序，不改变清理行为。
+Cache entry 的展示分组：Dependency cache（依赖缓存：Gradle、npm、pnpm、bun、Yarn、pub、CocoaPods、Go module cache）与 Toolchain cache（工具链缓存：Playwright、DerivedData、Cargo registry、pip、Go build cache）。分组只决定展示与顺序，不改变清理行为。
 _Avoid_: 项目缓存、项目相关
 
 **Needs re-download（需重新下载）**：

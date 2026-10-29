@@ -202,3 +202,22 @@ Both Trash and Direct follow the global setting, with no automatic fallback or `
 Subsequent builds may be slower. Stop Go builds, tests and downloads first; active tasks are not
 locked or terminated. Failures trigger remeasurement, do not count the entire item as freed, and
 may leave partial deletions. Filesystem races between checking and deleting are not eliminated.
+
+
+## Go module cache
+
+Go module cache is a separate fixed Dependency cache entry with the same local-Go discovery,
+protected-path, refresh and final-confirmation checks as Go build cache. It is Dangerous: removing
+it discards downloaded modules and unpacked dependency sources, so dependencies must be downloaded
+again, offline builds may fail, and manual edits inside the cache are lost.
+
+The selected Trash / Direct mode is preserved. On POSIX, Direct adds only missing owner-write
+permission to directories, preserving other mode bits; read-only source files need not be changed.
+Trash first attempts the normal move without changing POSIX content permissions. Windows clears
+read-only attributes only within the validated cache. Internal links and reparse points are not
+followed for measurement or permission changes, and deletion does not delete their external targets.
+No privilege escalation or Go clean command is used, and Trash failure never falls back to Direct.
+
+A failed item is not reported as fully cleaned or counted as fully freed; remaining contents are
+measured again. Partial deletions and permission changes cannot be rolled back. Stop builds, tests
+and downloads before cleaning; the filesystem race between validation and deletion still exists.

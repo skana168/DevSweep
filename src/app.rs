@@ -617,7 +617,11 @@ impl DevSweepApp {
                 let _ = check_tx.send((fresh, checked.as_ref().err().copied()));
                 match checked {
                     Ok(plan) => {
-                        delete::execute(plan, mode, &flag, tx);
+                        if id == "go.module" {
+                            delete::execute_go_module(plan, mode, &flag, tx);
+                        } else {
+                            delete::execute(plan, mode, &flag, tx);
+                        }
                     }
                     Err(_) => {
                         let path = plan.items[0].target_path.clone();
@@ -2569,13 +2573,8 @@ fn cache_table_row(
     row.col(|ui| {
         // Keep the clean button off the size column's right-aligned numbers.
         ui.add_space(12.0);
-        let armed = (!go_cache::is_go_cache(cache.rule.id)
-            || go_cache::cleanup_supported(cache.rule.id))
-            && cache.go_error.is_none()
-            && exists
-            && !cache.cleaned
-            && !busy
-            && cache.size.is_some();
+        let armed =
+            cache.go_error.is_none() && exists && !cache.cleaned && !busy && cache.size.is_some();
         if action_button(
             ui,
             s.clean,

@@ -100,10 +100,6 @@ impl GoCacheSnapshot {
     }
 }
 
-pub fn cleanup_supported(id: &str) -> bool {
-    id == "go.build"
-}
-
 pub fn is_go_cache(id: &str) -> bool {
     matches!(id, "go.build" | "go.module")
 }
