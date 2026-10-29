@@ -920,6 +920,7 @@ impl DevSweepApp {
             }
         };
         let cache_warning = match cleanup {
+            Cleanup::Cache(rule) if rule.id == "go.module" => Some(s.go_module_note),
             Cleanup::Cache(rule) if rule.dangerous => Some(s.cache_cargo_note),
             _ => None,
         };
@@ -2389,8 +2390,14 @@ fn cache_table_row(
                     .strong()
                     .color(t.text),
                 );
-                // Only the cargo registry carries a risk note today.
-                if cache.rule.id == "cargo.registry" {
+                if cache.rule.id == "go.module" {
+                    ui.label(RichText::new(s.dangerous).size(11.0).color(t.danger));
+                    ui.add(
+                        Label::new(RichText::new(s.go_module_note).size(11.0).color(t.danger))
+                            .truncate(),
+                    )
+                    .on_hover_text(s.go_module_note);
+                } else if cache.rule.id == "cargo.registry" {
                     ui.label(RichText::new(s.cache_cargo_note).size(11.0).color(t.danger));
                 }
             });

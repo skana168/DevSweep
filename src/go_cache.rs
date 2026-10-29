@@ -240,7 +240,7 @@ fn normalize_known_path(path: &Path) -> Result<PathBuf, GoCacheError> {
     }
 }
 
-fn linked(meta: &fs::Metadata) -> bool {
+pub(crate) fn linked(meta: &fs::Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;

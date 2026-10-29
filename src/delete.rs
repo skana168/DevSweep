@@ -78,6 +78,26 @@ pub fn execute(
     abort: &AtomicBool,
     tx: Sender<DeleteEvent>,
 ) -> DeleteReport {
+    execute_inner(plan, mode, abort, tx, delete_item)
+}
+
+/// Execute a validated Go module cache plan, handling its read-only dependencies.
+pub fn execute_go_module(
+    plan: DeletePlan,
+    mode: DeleteMode,
+    abort: &AtomicBool,
+    tx: Sender<DeleteEvent>,
+) -> DeleteReport {
+    execute_inner(plan, mode, abort, tx, delete_module_item)
+}
+
+fn execute_inner(
+    plan: DeletePlan,
+    mode: DeleteMode,
+    abort: &AtomicBool,
+    tx: Sender<DeleteEvent>,
+    delete: fn(&PlanItem, DeleteMode) -> Result<(), FailureReason>,
+) -> DeleteReport {
     // Plan items are sorted by project, so grouping keeps project order.
     let mut groups: Vec<(PathBuf, Vec<PlanItem>)> = Vec::new();
     for item in plan.items {
@@ -114,7 +134,7 @@ pub fn execute(
                     let mut deleted = Vec::new();
                     let mut freed = 0;
                     for item in items {
-                        match delete_item(item, mode) {
+                        match delete(item, mode) {
                             Ok(()) => {
                                 freed += item.bytes;
                                 deleted.push(item.target_path.clone());
@@ -166,6 +186,62 @@ fn delete_item(item: &PlanItem, mode: DeleteMode) -> Result<(), FailureReason> {
         DeleteMode::Direct if meta.is_dir() => remove_tree(&item.target_path).map_err(io_reason),
         DeleteMode::Direct => fs::remove_file(&item.target_path).map_err(io_reason),
     }
+}
+
+fn delete_module_item(item: &PlanItem, mode: DeleteMode) -> Result<(), FailureReason> {
+    let path = &item.target_path;
+    if !path.is_absolute() || path.parent().is_none() {
+        return Err(FailureReason::Other);
+    }
+    for ancestor in path.ancestors() {
+        let meta = fs::symlink_metadata(ancestor).map_err(io_reason)?;
+        if crate::go_cache::linked(&meta) {
+            return Err(FailureReason::Other);
+        }
+    }
+    if !fs::symlink_metadata(path).map_err(io_reason)?.is_dir() {
+        return Err(FailureReason::Other);
+    }
+    if mode == DeleteMode::Direct || cfg!(windows) {
+        prepare_module_permissions(path).map_err(io_reason)?;
+    }
+    match mode {
+        DeleteMode::Trash => trash::delete(path).map_err(|error| trash_reason(&error)),
+        #[cfg(windows)]
+        DeleteMode::Direct => fs::remove_dir_all(long_path(path)).map_err(io_reason),
+        #[cfg(not(windows))]
+        DeleteMode::Direct => fs::remove_dir_all(path).map_err(io_reason),
+    }
+}
+
+// shortcut: filesystem changes can race with checks; use handle-relative operations for stronger isolation.
+fn prepare_module_permissions(path: &Path) -> io::Result<()> {
+    let mut entries = walkdir::WalkDir::new(path).follow_links(false).into_iter();
+    while let Some(entry) = entries.next() {
+        let entry = entry.map_err(io::Error::from)?;
+        let meta = fs::symlink_metadata(entry.path())?;
+        if crate::go_cache::linked(&meta) {
+            entries.skip_current_dir();
+            continue;
+        }
+        #[cfg(unix)]
+        if meta.is_dir() {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = meta.permissions();
+            let mode = permissions.mode();
+            if mode & 0o200 == 0 {
+                permissions.set_mode(mode | 0o200);
+                fs::set_permissions(entry.path(), permissions)?;
+            }
+        }
+        #[cfg(windows)]
+        if meta.permissions().readonly() {
+            let mut permissions = meta.permissions();
+            permissions.set_readonly(false);
+            fs::set_permissions(entry.path(), permissions)?;
+        }
+    }
+    Ok(())
 }
 
 fn move_to_trash(path: &Path) -> Result<(), FailureReason> {
