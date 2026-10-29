@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use devsweep::cache::{self, CacheRule};
 use devsweep::config::{self, Config, LanguageChoice, ThemeChoice};
 use devsweep::delete::{self, DeleteEvent, DeleteMode, DeleteReport, Failure, FailureReason};
-use devsweep::go_cache::{self, GoCacheContext, GoCacheError, GoCacheSnapshot};
+use devsweep::go_cache::{self, GoCacheClean, GoCacheContext, GoCacheError, GoCacheSnapshot};
 use devsweep::plan::{self, DeletePlan, PlanProject};
 use devsweep::projects::{ProjectEntry, ProjectRefresh};
 use devsweep::rules::{self, Rule, Target};
@@ -563,16 +563,21 @@ impl DevSweepApp {
         self.go_notice = None;
         std::thread::spawn(move || {
             if let Some((id, confirmed, context)) = go_cleanup {
+                if id == "go.build" {
+                    GoCacheClean {
+                        confirmed: &confirmed,
+                        id,
+                        context: &context,
+                    }
+                    .execute(mode, &flag, tx, check_tx);
+                    return;
+                }
                 let fresh = go_cache::discover(&context);
                 let checked = confirmed.plan_against(id, &fresh, &context);
                 let _ = check_tx.send((fresh, checked.as_ref().err().copied()));
                 match checked {
                     Ok(plan) => {
-                        if id == "go.module" {
-                            delete::execute_go_module(plan, mode, &flag, tx);
-                        } else {
-                            delete::execute(plan, mode, &flag, tx);
-                        }
+                        delete::execute_go_module(plan, mode, &flag, tx);
                     }
                     Err(_) => {
                         let path = plan.items[0].target_path.clone();

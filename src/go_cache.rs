@@ -2,9 +2,12 @@ use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::delete::{self, DeleteEvent, DeleteMode, DeleteReport, Failure, FailureReason};
 use crate::plan::{DeletePlan, LARGE_TARGET_BYTES, PlanItem};
 
 #[derive(Clone)]
@@ -41,6 +44,77 @@ pub struct GoCacheEntry {
 #[derive(Debug, Clone)]
 pub struct GoCacheSnapshot {
     pub entries: [GoCacheEntry; 2],
+}
+
+/// A confirmed cache and the protected locations against which it must be rechecked.
+pub struct GoCacheClean<'a> {
+    pub confirmed: &'a GoCacheSnapshot,
+    pub id: &'a str,
+    pub context: &'a GoCacheContext,
+}
+
+impl GoCacheClean<'_> {
+    pub fn execute(
+        &self,
+        mode: DeleteMode,
+        abort: &AtomicBool,
+        events: Sender<DeleteEvent>,
+        checked: Sender<(GoCacheSnapshot, Option<GoCacheError>)>,
+    ) -> DeleteReport {
+        self.execute_with_command(
+            Command::new("go"),
+            Duration::from_secs(3),
+            mode,
+            abort,
+            events,
+            checked,
+        )
+    }
+
+    /// Query and execute through the same seam used by cache discovery.
+    pub fn execute_with_command(
+        &self,
+        command: Command,
+        timeout: Duration,
+        mode: DeleteMode,
+        abort: &AtomicBool,
+        events: Sender<DeleteEvent>,
+        checked: Sender<(GoCacheSnapshot, Option<GoCacheError>)>,
+    ) -> DeleteReport {
+        let fresh = discover_with_command(command, self.context, timeout);
+        let plan = if self.id == "go.build" {
+            self.confirmed.plan_against(self.id, &fresh, self.context)
+        } else {
+            Err(GoCacheError::InvalidOutput)
+        };
+        // Deliver the recheck before Finished, so the UI never loses a rejection reason.
+        let _ = checked.send((fresh, plan.as_ref().err().copied()));
+        match plan {
+            Ok(plan) => delete::execute(plan, mode, abort, events),
+            Err(_) => {
+                let failures = self
+                    .confirmed
+                    .entry(self.id)
+                    .and_then(|entry| entry.path.as_ref())
+                    .map(|path| Failure {
+                        project_path: path.clone(),
+                        path: path.clone(),
+                        reason: FailureReason::Other,
+                    })
+                    .into_iter()
+                    .collect();
+                let report = DeleteReport {
+                    freed_bytes: 0,
+                    failures,
+                    projects_done: 0,
+                    projects_total: usize::from(is_go_cache(self.id)),
+                    aborted: abort.load(Ordering::Relaxed),
+                };
+                let _ = events.send(DeleteEvent::Finished(report.clone()));
+                report
+            }
+        }
+    }
 }
 
 impl GoCacheSnapshot {
