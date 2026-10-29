@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use devsweep::plan::{PlanProject, SkipReason, plan};
-use devsweep::rules::{Rule, builtin_rules, expand_targets};
+use devsweep::rules::{Rule, builtin_rules, expand_targets, load};
 use devsweep::scan::scan;
 
 const MB: u64 = 1024 * 1024;
@@ -21,6 +21,52 @@ fn extra_rule(id: &'static str, rel: &'static str) -> Rule {
         default_checked: true,
         dangerous: false,
     }
+}
+
+#[test]
+fn an_extra_rule_uses_the_same_path_segments_at_discovery_and_final_planning() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    write(&root.join("app/package.json"), 0);
+    write(&root.join("app/artifacts/main.cache"), 7);
+    write(&root.join("app/artifacts/nested/keep.cache"), 11);
+    let overrides = root.join("rules.toml");
+    fs::write(
+        &overrides,
+        "[[extra]]\nstack = \"node\"\npath = \"artifacts//*.cache\"\n",
+    )
+    .unwrap();
+    let loaded = load(Some(&overrides));
+    assert!(loaded.error.is_none());
+    let projects = scan(std::slice::from_ref(&root));
+    let project = &projects[0];
+    let mut targets = expand_targets(project, &loaded.rules);
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].path, project.path.join("artifacts/main.cache"));
+    targets[0].size = Some(7);
+    let mut nested = targets[0].clone();
+    nested.path = project.path.join("artifacts/nested/keep.cache");
+    nested.size = Some(11);
+    targets.push(nested);
+
+    let delete_plan = plan(
+        &[PlanProject {
+            path: &project.path,
+            stack: project.stack,
+            targets: &targets,
+        }],
+        std::slice::from_ref(&root),
+        &loaded.rules,
+    );
+
+    assert_eq!(delete_plan.items.len(), 1);
+    assert_eq!(delete_plan.total_bytes, 7);
+    assert_eq!(delete_plan.skipped.len(), 1);
+    assert_eq!(delete_plan.skipped[0].reason, SkipReason::OutsideRules);
+    assert_eq!(
+        delete_plan.skipped[0].path,
+        project.path.join("artifacts/nested/keep.cache")
+    );
 }
 
 #[test]
