@@ -1,10 +1,7 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use crate::rules::{
-    Rule, Target, is_recursive_cache_rule, segment_matches, valid_builtin_target,
-    valid_recursive_cache,
-};
+use crate::rules::{Rule, Target};
 use crate::scan::Stack;
 
 /// Single targets above this size are flagged so the user gets a second warning.
@@ -183,31 +180,11 @@ fn check_target(
         .iter()
         .find(|rule| rule.id == target.rule_id)
         .ok_or(SkipReason::OutsideRules)?;
-    let stack_applies = rule.stack.is_none_or(|stack| stack == project.stack);
-    let path_matches = if is_recursive_cache_rule(rule) {
-        valid_recursive_cache(project.path, &target.path)
-    } else {
-        matches_rule(rel, &rule.rel)
-    };
-    if !stack_applies || !path_matches || !valid_builtin_target(rule, &target.path) {
+    if !rule.accepts(project.path, project.stack, &target.path) {
         return Err(SkipReason::OutsideRules);
     }
 
     Ok((canonical, is_link))
-}
-
-/// One `*` per segment, matching a literal path exactly otherwise. No `**`.
-fn matches_rule(rel: &Path, pattern: &str) -> bool {
-    let rel: Vec<String> = rel
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect();
-    let pattern: Vec<&str> = pattern.split('/').collect();
-    rel.len() == pattern.len()
-        && rel
-            .iter()
-            .zip(&pattern)
-            .all(|(segment, pattern)| segment_matches(segment, pattern))
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -248,21 +225,6 @@ mod tests {
             .iter()
             .map(|skip| (skip.path.display().to_string(), skip.reason))
             .collect()
-    }
-
-    #[test]
-    fn rule_patterns_match_exactly_one_level_of_wildcards() {
-        assert!(matches_rule(Path::new("build"), "build"));
-        assert!(matches_rule(Path::new("app/build"), "*/build"));
-        assert!(!matches_rule(Path::new("app/app/build"), "*/build"));
-        assert!(matches_rule(
-            Path::new("App.xcodeproj/xcuserdata"),
-            "*.xcodeproj/xcuserdata"
-        ));
-        assert!(!matches_rule(
-            Path::new("nested/App.xcodeproj/xcuserdata"),
-            "*.xcodeproj/xcuserdata"
-        ));
     }
 
     #[test]

@@ -23,6 +23,25 @@ pub struct Rule {
     pub dangerous: bool,
 }
 
+impl Rule {
+    fn applies_to(&self, stack: Stack) -> bool {
+        self.stack.is_none_or(|required| required == stack)
+    }
+
+    /// Recheck Rule-specific eligibility at discovery and immediately before planning.
+    pub(crate) fn accepts(&self, root: &Path, stack: Stack, path: &Path) -> bool {
+        self.applies_to(stack)
+            && path.strip_prefix(root).is_ok_and(|rel| {
+                if is_recursive_cache_rule(self) {
+                    valid_recursive_cache(root, path)
+                } else {
+                    matches_rule(rel, &self.rel)
+                }
+            })
+            && valid_builtin_target(self, path)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
     pub rule_id: String,
@@ -353,7 +372,7 @@ fn is_plain_rel(rel: &str) -> bool {
 pub fn expand_targets(project: &Project, rules: &[Rule]) -> Vec<Target> {
     let mut targets = Vec::new();
     for rule in rules {
-        if rule.stack.is_some_and(|stack| stack != project.stack) {
+        if !rule.applies_to(project.stack) {
             continue;
         }
         let paths = if is_recursive_cache_rule(rule) {
@@ -361,14 +380,14 @@ pub fn expand_targets(project: &Project, rules: &[Rule]) -> Vec<Target> {
                 .into_iter()
                 .filter_entry(|entry| recursive_cache_directory(&project.path, entry.path()))
                 .filter_map(Result::ok)
-                .filter(|entry| valid_recursive_cache(&project.path, entry.path()))
+                .filter(|entry| entry.file_name() == "__pycache__")
                 .map(|entry| entry.into_path())
                 .collect()
         } else {
             resolve(&project.path, &rule.rel)
         };
         for path in paths {
-            if !valid_builtin_target(rule, &path) {
+            if !rule.accepts(&project.path, project.stack, &path) {
                 continue;
             }
             targets.push(Target {
@@ -385,7 +404,7 @@ pub fn expand_targets(project: &Project, rules: &[Rule]) -> Vec<Target> {
     targets
 }
 
-pub(crate) fn valid_builtin_target(rule: &Rule, path: &Path) -> bool {
+fn valid_builtin_target(rule: &Rule, path: &Path) -> bool {
     if !rule.id.starts_with("python.")
         && !matches!(
             rule.id.as_str(),
@@ -411,11 +430,11 @@ pub(crate) fn valid_builtin_target(rule: &Rule, path: &Path) -> bool {
         }
 }
 
-pub(crate) fn is_recursive_cache_rule(rule: &Rule) -> bool {
+fn is_recursive_cache_rule(rule: &Rule) -> bool {
     rule.id == "python.pycache" && rule.stack == Some(Stack::Python)
 }
 
-pub(crate) fn valid_recursive_cache(root: &Path, path: &Path) -> bool {
+fn valid_recursive_cache(root: &Path, path: &Path) -> bool {
     path != root
         && path.starts_with(root)
         && path.file_name().is_some_and(|name| name == "__pycache__")
@@ -437,8 +456,25 @@ fn recursive_cache_directory(root: &Path, path: &Path) -> bool {
                     || is_platform_subdir(path, &HashSet::from([root.to_path_buf()])))))
 }
 
+/// One `*` per segment, matching a literal path exactly otherwise. No `**`.
+fn matches_rule(rel: &Path, pattern: &str) -> bool {
+    let rel: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let pattern: Vec<&str> = pattern
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    rel.len() == pattern.len()
+        && rel
+            .iter()
+            .zip(&pattern)
+            .all(|(segment, pattern)| segment_matches(segment, pattern))
+}
+
 /// One `*` inside a segment, matching a literal name otherwise.
-pub(crate) fn segment_matches(name: &str, pattern: &str) -> bool {
+fn segment_matches(name: &str, pattern: &str) -> bool {
     match pattern.split_once('*') {
         Some((prefix, suffix)) => {
             name.len() >= prefix.len() + suffix.len()
