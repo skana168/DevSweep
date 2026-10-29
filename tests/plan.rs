@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use devsweep::plan::{PlanProject, SkipReason, plan};
-use devsweep::rules::{Rule, builtin_rules, expand_targets, load};
+use devsweep::rules::{Rule, Target, builtin_rules, expand_targets, load};
 use devsweep::scan::scan;
 
 const MB: u64 = 1024 * 1024;
@@ -157,6 +157,17 @@ fn plan_lists_checked_targets_and_rejects_escaping_paths() {
             _ => 0,
         });
     }
+    // Windows normalizes `..` when joining verbatim paths, so discovery may omit it.
+    targets.retain(|target| target.rule_id != "test.escape");
+    targets.push(Target {
+        rule_id: "test.escape".into(),
+        path: root.join("outside"),
+        size: Some(5 * MB),
+        checked: true,
+        default_checked: true,
+        dangerous: false,
+        label: None,
+    });
 
     let plan = plan(
         &[PlanProject {
@@ -178,7 +189,7 @@ fn plan_lists_checked_targets_and_rejects_escaping_paths() {
     assert!(planned.contains(&project.path.join(".next")));
     // `dist` is risky and off by default.
     assert!(!planned.contains(&project.path.join("dist")));
-    // `../escape` resolves outside the project and must be rejected.
+    // The selected target outside the project must be rejected.
     assert!(!planned.contains(&root.join("outside")));
     assert!(
         plan.skipped.iter().any(|skip| {
