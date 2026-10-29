@@ -100,6 +100,9 @@ pub struct Strings {
     pub cache_cargo_note: &'static str,
     pub go_build_cache: &'static str,
     pub go_module_cache: &'static str,
+    pub go_build_note: &'static str,
+    pub go_stop_tasks: &'static str,
+    pub go_cache_changed: &'static str,
     pub go_cache_querying: &'static str,
     pub go_unavailable: &'static str,
     pub go_query_failed: &'static str,
@@ -145,6 +148,7 @@ pub struct Strings {
 impl Strings {
     pub fn go_cache_error(&self, error: GoCacheError) -> &'static str {
         match error {
+            GoCacheError::Changed => self.go_cache_changed,
             GoCacheError::Unavailable => self.go_unavailable,
             GoCacheError::QueryFailed => self.go_query_failed,
             GoCacheError::Timeout => self.go_timeout,
@@ -266,6 +270,9 @@ static ZH: Strings = Strings {
     cache_cargo_note: "清理会影响本机 Rust 构建",
     go_build_cache: "Go 构建缓存",
     go_module_cache: "Go 模块缓存",
+    go_build_note: "清理后，后续构建会变慢。",
+    go_stop_tasks: "清理前请停止 Go 构建、测试和依赖下载；并发任务可能导致失败或立即重建缓存。",
+    go_cache_changed: "缓存位置已变化，本次清理已取消。请等待重新测量后再次确认。",
     go_cache_querying: "正在查询 Go 缓存位置…",
     go_unavailable: "无法确定缓存位置：未找到 Go",
     go_query_failed: "无法确定缓存位置：Go 查询失败",
@@ -371,6 +378,9 @@ static EN: Strings = Strings {
     cache_cargo_note: "Affects Rust builds on this machine",
     go_build_cache: "Go build cache",
     go_module_cache: "Go module cache",
+    go_build_note: "Subsequent builds will be slower after cleaning.",
+    go_stop_tasks: "Stop Go builds, tests and downloads before cleaning; concurrent tasks may cause failure or recreate caches immediately.",
+    go_cache_changed: "Cache location changed; cleanup cancelled. Wait for measurement and confirm again.",
     go_cache_querying: "Querying Go cache locations…",
     go_unavailable: "Cache location unknown: Go was not found",
     go_query_failed: "Cache location unknown: Go query failed",

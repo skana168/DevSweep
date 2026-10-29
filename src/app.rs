@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use devsweep::cache::{self, CacheRule};
 use devsweep::config::{self, Config, LanguageChoice, ThemeChoice};
-use devsweep::delete::{self, DeleteEvent, DeleteMode, Failure};
+use devsweep::delete::{self, DeleteEvent, DeleteMode, DeleteReport, Failure, FailureReason};
 use devsweep::go_cache::{self, GoCacheContext, GoCacheError, GoCacheSnapshot};
 use devsweep::plan::{self, DeletePlan, PlanProject};
 use devsweep::rules::{self, Rule, Target};
@@ -68,6 +68,7 @@ pub struct DevSweepApp {
     caches: Vec<CacheRow>,
     go_snapshot: Option<GoCacheSnapshot>,
     go_query: Option<Receiver<GoCacheSnapshot>>,
+    go_notice: Option<GoCacheError>,
     measurement: Option<Measurement>,
     search: String,
     filter: Option<Stack>,
@@ -106,6 +107,7 @@ enum Sort {
 enum Cleanup {
     Project(PathBuf),
     Cache(&'static CacheRule),
+    GoCache(&'static CacheRule, GoCacheSnapshot),
 }
 
 /// What a row's buttons ask the app to do, applied outside the table borrow.
@@ -160,6 +162,8 @@ struct Execution {
     current: Option<String>,
     rx: Receiver<DeleteEvent>,
     abort: Arc<AtomicBool>,
+    go_cache: bool,
+    go_check: Option<Receiver<(GoCacheSnapshot, Option<GoCacheError>)>>,
     /// Show the "downloads again next time" hint in the result banner.
     global_cache: bool,
 }
@@ -196,6 +200,7 @@ impl DevSweepApp {
                 .collect(),
             go_snapshot: None,
             go_query: None,
+            go_notice: None,
             measurement: None,
             search: String::new(),
             filter: None,
@@ -345,6 +350,15 @@ impl DevSweepApp {
     }
 
     fn refresh_go_caches(&mut self, ctx: &egui::Context) {
+        if matches!(self.pending.as_ref(), Some(Cleanup::GoCache(..))) {
+            self.pending = None;
+        }
+        if let Some(execution) = &mut self.execution
+            && execution.go_cache
+        {
+            execution.abort.store(true, Ordering::Relaxed);
+            execution.go_check = None;
+        }
         // Replacing the receiver discards results from an older roots/configuration snapshot.
         self.go_query = None;
         self.go_snapshot = None;
@@ -377,24 +391,29 @@ impl DevSweepApp {
         self.go_query = Some(rx);
     }
 
+    fn apply_go_snapshot(&mut self, snapshot: GoCacheSnapshot) {
+        for row in self
+            .caches
+            .iter_mut()
+            .filter(|row| go_cache::is_go_cache(row.rule.id))
+        {
+            if let Some(entry) = snapshot.entry(row.rule.id) {
+                row.path = entry.path.clone();
+                row.size = entry.size.ok();
+                row.go_error = entry.size.err();
+                row.cleaned = false;
+            }
+        }
+        self.go_snapshot = Some(snapshot);
+    }
+
     fn poll_go_caches(&mut self, ctx: &egui::Context) {
         let Some(query) = &self.go_query else {
             return;
         };
         match query.try_recv() {
             Ok(snapshot) => {
-                for row in self
-                    .caches
-                    .iter_mut()
-                    .filter(|row| go_cache::is_go_cache(row.rule.id))
-                {
-                    if let Some(entry) = snapshot.entry(row.rule.id) {
-                        row.path = entry.path.clone();
-                        row.size = entry.size.ok();
-                        row.go_error = entry.size.err();
-                    }
-                }
-                self.go_snapshot = Some(snapshot);
+                self.apply_go_snapshot(snapshot);
                 self.go_query = None;
                 ctx.request_repaint();
             }
@@ -542,6 +561,10 @@ impl DevSweepApp {
         match cleanup {
             Cleanup::Project(path) => self.project_plan(&path),
             Cleanup::Cache(rule) => self.cache_plan(rule).unwrap_or_else(empty_plan),
+            Cleanup::GoCache(rule, snapshot) => self
+                .go_context()
+                .and_then(|context| snapshot.plan(rule.id, &context).ok())
+                .unwrap_or_else(empty_plan),
         }
     }
 
@@ -561,18 +584,59 @@ impl DevSweepApp {
     /// Execute the current plan on a worker thread. The UI keeps painting while
     /// per-project events stream back.
     fn start_execution(&mut self, ctx: &egui::Context, cleanup: Cleanup) {
-        let global_cache = matches!(cleanup, Cleanup::Cache(_));
+        let go_cleanup = match &cleanup {
+            Cleanup::GoCache(rule, snapshot) => {
+                let Some(context) = self.go_context() else {
+                    return;
+                };
+                Some((rule.id, snapshot.clone(), context))
+            }
+            _ => None,
+        };
+        let global_cache = match &cleanup {
+            Cleanup::Cache(_) => true,
+            Cleanup::GoCache(rule, _) => rule.id == "go.module",
+            Cleanup::Project(_) => false,
+        };
         let plan = self.plan_for(cleanup);
         if plan.items.is_empty() {
             return;
         }
 
         let (tx, rx) = std::sync::mpsc::channel();
+        let (check_tx, check_rx) = std::sync::mpsc::channel();
         let abort = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&abort);
         let mode = self.config.delete_mode;
+        let is_go = go_cleanup.is_some();
+        self.go_notice = None;
         std::thread::spawn(move || {
-            delete::execute(plan, mode, &flag, tx);
+            if let Some((id, confirmed, context)) = go_cleanup {
+                let fresh = go_cache::discover(&context);
+                let checked = confirmed.plan_against(id, &fresh, &context);
+                let _ = check_tx.send((fresh, checked.as_ref().err().copied()));
+                match checked {
+                    Ok(plan) => {
+                        delete::execute(plan, mode, &flag, tx);
+                    }
+                    Err(_) => {
+                        let path = plan.items[0].target_path.clone();
+                        let _ = tx.send(DeleteEvent::Finished(DeleteReport {
+                            freed_bytes: 0,
+                            failures: vec![Failure {
+                                project_path: path.clone(),
+                                path,
+                                reason: FailureReason::Other,
+                            }],
+                            projects_done: 0,
+                            projects_total: 1,
+                            aborted: flag.load(Ordering::Relaxed),
+                        }));
+                    }
+                }
+            } else {
+                delete::execute(plan, mode, &flag, tx);
+            }
         });
 
         self.execution = Some(Execution {
@@ -581,6 +645,8 @@ impl DevSweepApp {
             current: None,
             rx,
             abort,
+            go_cache: is_go,
+            go_check: is_go.then_some(check_rx),
             global_cache,
         });
         self.flash = None;
@@ -600,6 +666,7 @@ impl DevSweepApp {
             return;
         };
         let global_cache = execution.global_cache;
+        let is_go = execution.go_cache;
         let mut changed = false;
         let mut finished = None;
         let mut lost = false;
@@ -649,6 +716,15 @@ impl DevSweepApp {
             }
         }
 
+        let checked = execution
+            .go_check
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok());
+        if let Some((snapshot, error)) = checked {
+            self.apply_go_snapshot(snapshot);
+            self.go_notice = error;
+            changed = true;
+        }
         if let Some(report) = finished {
             self.execution = None;
             self.flash = Some(Flash {
@@ -658,9 +734,15 @@ impl DevSweepApp {
             });
             self.failures = report.failures;
             self.failures_open = !self.failures.is_empty();
+            if is_go {
+                self.refresh_go_caches(ctx);
+            }
             changed = true;
         } else if lost {
             self.execution = None;
+            if is_go {
+                self.refresh_go_caches(ctx);
+            }
         }
         if changed {
             ctx.request_repaint();
@@ -915,12 +997,22 @@ impl DevSweepApp {
         };
         let title = match cleanup {
             Cleanup::Cache(rule) => format!("{} · {}", s.confirm_title, rule.name),
+            Cleanup::GoCache(rule, _) => format!(
+                "{} · {}",
+                s.confirm_title,
+                if rule.id == "go.build" {
+                    s.go_build_cache
+                } else {
+                    s.go_module_cache
+                }
+            ),
             Cleanup::Project(ref path) => {
                 format!("{} · {}", s.confirm_title, project_name(path))
             }
         };
         let cache_warning = match cleanup {
             Cleanup::Cache(rule) if rule.dangerous => Some(s.cache_cargo_note),
+            Cleanup::GoCache(rule, _) if rule.id == "go.build" => Some(s.go_build_note),
             _ => None,
         };
         let mut ack = self.confirm_large_ack;
@@ -946,6 +1038,11 @@ impl DevSweepApp {
                     ui.label(RichText::new(warning).size(13.0).color(t.danger));
                 }
 
+                if matches!(cleanup, Cleanup::GoCache(..)) {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(s.go_stop_tasks).size(12.0).color(t.danger));
+                }
+
                 if !large.is_empty() {
                     ui.add_space(12.0);
                     ui.label(RichText::new(s.large_warning).size(13.0).color(t.danger));
@@ -968,7 +1065,12 @@ impl DevSweepApp {
                 ui.add_space(20.0);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     // Unknown sizes could hide a > 5 GB target, so wait for them.
-                    if danger_button(ui, s.confirm, t, known && (large.is_empty() || ack)) {
+                    if danger_button(
+                        ui,
+                        s.confirm,
+                        t,
+                        known && !plan.items.is_empty() && (large.is_empty() || ack),
+                    ) {
                         confirm = true;
                     }
                     ui.add_space(4.0);
@@ -1580,6 +1682,14 @@ impl DevSweepApp {
         );
         ui.add_space(12.0);
 
+        if let Some(error) = self.go_notice {
+            ui.label(
+                RichText::new(s.go_cache_error(error))
+                    .size(12.0)
+                    .color(t.danger),
+            );
+            ui.add_space(8.0);
+        }
         let mut clean = None;
         let mut action = None;
         let busy = self.execution.is_some();
@@ -1637,7 +1747,14 @@ impl DevSweepApp {
             });
 
         if let Some(rule) = clean {
-            self.pending = Some(Cleanup::Cache(rule));
+            self.go_notice = None;
+            self.pending = if go_cache::is_go_cache(rule.id) {
+                self.go_snapshot
+                    .clone()
+                    .map(|snapshot| Cleanup::GoCache(rule, snapshot))
+            } else {
+                Some(Cleanup::Cache(rule))
+            };
             self.confirm_large_ack = false;
         }
         match action {
@@ -1805,7 +1922,7 @@ impl eframe::App for DevSweepApp {
                         .filter(|target| target.checked)
                         .all(|target| target.size.is_some())
                 }),
-                Cleanup::Cache(_) => true,
+                Cleanup::Cache(_) | Cleanup::GoCache(..) => true,
             };
             self.confirm_dialog(ui.ctx(), t, s, &pending_plan, known, cleanup);
         }
@@ -2389,7 +2506,13 @@ fn cache_table_row(
                     .strong()
                     .color(t.text),
                 );
-                // Only the cargo registry carries a risk note today.
+                if cache.rule.id == "go.build" {
+                    ui.label(
+                        RichText::new(s.go_build_note)
+                            .size(11.0)
+                            .color(t.text_muted),
+                    );
+                }
                 if cache.rule.id == "cargo.registry" {
                     ui.label(RichText::new(s.cache_cargo_note).size(11.0).color(t.danger));
                 }
@@ -2439,7 +2562,9 @@ fn cache_table_row(
     row.col(|ui| {
         // Keep the clean button off the size column's right-aligned numbers.
         ui.add_space(12.0);
-        let armed = !go_cache::is_go_cache(cache.rule.id)
+        let armed = (!go_cache::is_go_cache(cache.rule.id)
+            || go_cache::cleanup_supported(cache.rule.id))
+            && cache.go_error.is_none()
             && exists
             && !cache.cleaned
             && !busy
@@ -2730,6 +2855,7 @@ mod tests {
             caches: Vec::new(),
             go_snapshot: None,
             go_query: None,
+            go_notice: None,
             measurement: None,
             search: String::new(),
             filter: None,

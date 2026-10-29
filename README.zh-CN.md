@@ -60,10 +60,18 @@ DevSweep 查找 Flutter、Android、iOS、Java、Node、Python、Rust 和 .NET �
 
 | 依赖缓存 | 工具链缓存 |
 |---|---|
-| Gradle caches、Gradle distributions、Maven local repository、npm、pnpm、bun、Yarn、pub、CocoaPods | Playwright、Xcode DerivedData、Cargo registry、pip |
+| Gradle caches、Gradle distributions、Maven local repository、npm、pnpm、bun、Yarn、pub、CocoaPods | Playwright、Xcode DerivedData、Cargo registry、pip、Go 构建缓存 |
 
 清理其中一条会同时为所有项目腾出空间，下一次构建会重新下载或重建它需要的东西。这份清单固定，
 `rules.toml` 不能扩展也不能关闭它。
+
+Go 构建缓存通过当前本机 Go 配置定位，包含环境变量及 `go env -w` 的覆盖。应用必须能找到 Go；
+查询失败不会猜测默认路径。不存在或被安全检查拒绝的 Go 条目仍展示原因，不新增 Go 项目类型。
+
+Go 缓存拒绝危险目录、链接，以及与已知项目或其他缓存重叠的路径；通过检查的家目录外自定义位置
+可以使用。刷新会重新查询，执行前若位置变化则取消旧确认。构建缓存遵循所选废纸篓 / 直接删除方式；
+清理后后续构建会变慢。请先停止 Go 构建、测试与依赖下载；应用不检测或锁定并发任务。
+失败会显示错误并重新测量剩余内容，部分删除无法回滚。
 
 ## 安装
 
