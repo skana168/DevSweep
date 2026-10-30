@@ -28,10 +28,13 @@ fn refresh_preserves_surviving_target_drafts_and_sizes_and_measures_only_new_pro
     });
     projects.targets_mut(&alpha).unwrap()[0].checked = false;
     project(&root.join("beta"));
+    // Refresh discovers Projects, not newly created Targets inside surviving Projects.
+    fs::create_dir(alpha.join("dist")).unwrap();
 
     projects.refresh(std::slice::from_ref(&root), &rules);
 
     assert_eq!(projects.entries().len(), 2);
+    assert_eq!(projects.entry(&alpha).unwrap().targets.len(), 1);
     let target = &projects.entry(&alpha).unwrap().targets[0];
     assert_eq!(target.size, Some(37));
     assert!(!target.checked);

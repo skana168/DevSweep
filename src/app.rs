@@ -456,6 +456,10 @@ impl DevSweepApp {
             })
         }));
 
+        self.measure_requests(ctx, requests);
+    }
+
+    fn measure_requests(&mut self, ctx: &egui::Context, requests: Vec<SizeRequest>) {
         if requests.is_empty() {
             self.measurement = None;
             return;
@@ -1203,7 +1207,28 @@ impl DevSweepApp {
     }
 
     fn sidebar(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings) {
-        ui.label(theme::hud(s.roots, t.text_muted));
+        ui.horizontal(|ui| {
+            ui.label(theme::hud(s.roots, t.text_muted));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let reason = if self.measurement.is_some() || self.go_query.is_some() {
+                    Some(s.refresh_measuring)
+                } else if self.execution.is_some() {
+                    Some(s.refresh_cleaning)
+                } else if self.pending.is_some() || self.panel.is_some() {
+                    Some(s.refresh_confirmation)
+                } else if self.config.roots.is_empty() {
+                    Some(s.refresh_no_roots)
+                } else {
+                    None
+                };
+                if refresh_icon(ui, t, s.refresh_projects, reason) {
+                    self.projects.refresh(&self.config.roots, &self.rules);
+                    // Manual Refresh must not enqueue or replace global-cache work.
+                    self.measure_requests(ui.ctx(), self.projects.measurement_requests());
+                    self.last_scan = Instant::now();
+                }
+            });
+        });
         ui.add_space(4.0);
 
         self.roots_editor(ui, t, s);
@@ -2142,6 +2167,44 @@ fn settings_icon(ui: &mut Ui, t: &Tokens, label: &str, active: bool) -> bool {
         .clicked()
 }
 
+/// A themed vector refresh button with the same square icon treatment as row actions.
+fn refresh_icon(ui: &mut Ui, t: &Tokens, label: &str, reason: Option<&str>) -> bool {
+    let response = ui
+        .add_enabled_ui(reason.is_none(), |ui| {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::hover());
+            let response = ui.interact(rect, egui::Id::unique("sidebar-refresh"), Sense::click());
+            let (rest, hot) = look(Kind::Icon, t);
+            let (fill, border, ink) = if response.hovered() { hot } else { rest };
+            let p = ui.painter();
+            p.rect(rect, CornerRadius::ZERO, fill, border, StrokeKind::Inside);
+            let c = rect.center();
+            let points: Vec<_> = (0..=24)
+                .map(|i| {
+                    let angle = std::f32::consts::TAU * (0.12 + 0.76 * i as f32 / 24.0);
+                    c + egui::vec2(angle.cos(), angle.sin()) * 6.0
+                })
+                .collect();
+            let end = *points.last().unwrap();
+            p.add(egui::Shape::line(points, Stroke::new(1.5, ink)));
+            p.line_segment([end + egui::vec2(-3.5, -1.0), end], Stroke::new(1.5, ink));
+            p.line_segment([end + egui::vec2(-0.5, 3.5), end], Stroke::new(1.5, ink));
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label)
+            });
+            ui.ctx().accesskit_node_builder(response.id, |node| {
+                if let Some(reason) = reason {
+                    node.set_description(reason);
+                }
+            });
+            response
+        })
+        .inner;
+    response
+        .on_hover_text(label)
+        .on_disabled_hover_text(reason.unwrap_or(label))
+        .clicked()
+}
+
 /// A window without decorations: a hairline round it, and resizing from its edges and corners.
 fn window_edges(ctx: &egui::Context, t: &Tokens) {
     use egui::CursorIcon as C;
@@ -2899,6 +2962,271 @@ mod tests {
             failures_open: false,
             failures: Vec::new(),
             settings_open: false,
+        }
+    }
+
+    fn sidebar_frame(
+        app: &mut DevSweepApp,
+        ctx: &egui::Context,
+        input: egui::RawInput,
+    ) -> egui::FullOutput {
+        let mut output = ctx.run_ui(input, |ui| {
+            let s = app.strings();
+            egui::Panel::left("refresh-sidebar")
+                .exact_size(220.0)
+                .show(ui, |ui| {
+                    app.sidebar(ui, theme::tokens(egui::Theme::Dark), s);
+                });
+        });
+        output.textures_delta.clear();
+        output
+    }
+
+    #[test]
+    fn sidebar_refresh_click_discovers_projects_without_touching_caches_or_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("new/node_modules")).unwrap();
+        std::fs::write(root.join("new/package.json"), "{}").unwrap();
+        let cache = root.join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        let mut app = app_with_rows(0);
+        app.config.roots = vec![root.clone()];
+        app.rules = rules::builtin_rules();
+        app.caches.push(CacheRow {
+            rule: &cache::builtin_caches()[0],
+            path: Some(cache),
+            size: None,
+            cleaned: false,
+            go_error: None,
+        });
+        app.search = "keep".into();
+        app.filter = Some(Stack::Rust);
+        app.sort = Sort::Size;
+        app.view = View::Caches;
+        app.last_scan = Instant::now() - REFRESH_AFTER;
+        let before = app.last_scan;
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        ctx.enable_accesskit();
+        let output = sidebar_frame(&mut app, &ctx, raw_input(vec![]));
+        assert!(
+            output
+                .platform_output
+                .accesskit_update
+                .unwrap()
+                .nodes
+                .iter()
+                .any(|(_, node)| node.label() == Some("Refresh project list"))
+        );
+        let response = ctx
+            .read_response(egui::Id::unique("sidebar-refresh"))
+            .expect("sidebar refresh button");
+        assert!(response.enabled());
+        sidebar_frame(&mut app, &ctx, input(response.rect.center(), true));
+        sidebar_frame(&mut app, &ctx, input(response.rect.center(), false));
+        assert!(app.projects.entry(&root.join("new")).is_some());
+        assert!(app.last_scan > before);
+        assert_eq!(
+            app.measurement.as_ref().unwrap().total,
+            1,
+            "only the new project is measured"
+        );
+        assert!(app.caches[0].size.is_none());
+        assert!(app.go_query.is_none());
+        assert_eq!(app.search, "keep");
+        assert!(
+            app.filter == Some(Stack::Rust) && app.sort == Sort::Size && app.view == View::Caches
+        );
+        assert!(app.pending.is_none() && app.flash.is_none());
+
+        // A focus immediately after the manual click must not refresh caches.
+        app.caches[0].cleaned = true;
+        app.caches[0].size = Some(19);
+        let focus = |app: &mut DevSweepApp| {
+            app.was_focused = Some(false);
+            let mut input = raw_input(vec![]);
+            input
+                .viewports
+                .get_mut(&egui::ViewportId::ROOT)
+                .unwrap()
+                .focused = Some(true);
+            let mut output = ctx.run_ui(input, |ui| {
+                eframe::App::logic(app, ui.ctx(), &mut eframe::Frame::_new_kittest());
+            });
+            output.textures_delta.clear();
+        };
+        focus(&mut app);
+        assert!(app.caches[0].cleaned);
+        assert_eq!(app.caches[0].size, Some(19));
+        assert!(app.go_query.is_none());
+
+        // The existing stale-focus path still refreshes both projects and caches.
+        std::fs::create_dir_all(root.join("later/node_modules")).unwrap();
+        std::fs::write(root.join("later/package.json"), "{}").unwrap();
+        app.last_scan = Instant::now() - REFRESH_AFTER;
+        focus(&mut app);
+        assert!(app.projects.entry(&root.join("later")).is_some());
+        assert!(!app.caches[0].cleaned);
+        assert!(app.caches[0].size.is_none());
+        assert!(app.go_query.is_some());
+    }
+
+    #[test]
+    fn sidebar_refresh_disabled_states_explain_why_in_both_languages_and_ignore_clicks() {
+        for lang in [Lang::Zh, Lang::En] {
+            for state in 0..8 {
+                let ctx = egui::Context::default();
+                theme::install(&ctx);
+                ctx.enable_accesskit();
+                let mut app = app_with_rows(0);
+                app.lang = lang;
+                let s = app.strings();
+                let (_size_tx, size_rx) = std::sync::mpsc::channel();
+                let (_go_tx, go_rx) = std::sync::mpsc::channel();
+                let (_delete_tx, delete_rx) = std::sync::mpsc::channel();
+                let reason = match state {
+                    0 => {
+                        app.config.roots.clear();
+                        s.refresh_no_roots
+                    }
+                    1 => {
+                        app.measurement = Some(Measurement {
+                            done: 0,
+                            total: 1,
+                            rx: size_rx,
+                        });
+                        s.refresh_measuring
+                    }
+                    2 => {
+                        app.go_query = Some(go_rx);
+                        s.refresh_measuring
+                    }
+                    3 => {
+                        app.panel = Some(Panel {
+                            project: PathBuf::new(),
+                            plan: empty_plan(),
+                            query: None,
+                        });
+                        s.refresh_confirmation
+                    }
+                    4 => {
+                        app.pending = Some(Cleanup::Project(PathBuf::new()));
+                        s.refresh_confirmation
+                    }
+                    5 => {
+                        app.pending = Some(Cleanup::Cache(&cache::builtin_caches()[0]));
+                        s.refresh_confirmation
+                    }
+                    6 => {
+                        app.execution = Some(Execution {
+                            done: 0,
+                            total: 1,
+                            current: None,
+                            rx: delete_rx,
+                            abort: Arc::new(AtomicBool::new(false)),
+                            go_cache: false,
+                            go_check: None,
+                            global_cache: false,
+                        });
+                        s.refresh_cleaning
+                    }
+                    _ => {
+                        app.execution = Some(Execution {
+                            done: 0,
+                            total: 1,
+                            current: None,
+                            rx: delete_rx,
+                            abort: Arc::new(AtomicBool::new(false)),
+                            go_cache: true,
+                            go_check: None,
+                            global_cache: true,
+                        });
+                        s.refresh_cleaning
+                    }
+                };
+                let before = app.last_scan;
+                let output = sidebar_frame(&mut app, &ctx, raw_input(vec![]));
+                let update = output.platform_output.accesskit_update.unwrap();
+                let node = update
+                    .nodes
+                    .iter()
+                    .find(|(_, node)| node.label() == Some(s.refresh_projects))
+                    .expect("localized accessible name");
+                assert!(node.1.is_disabled(), "state {state}");
+                assert_eq!(node.1.description(), Some(reason));
+                let response = ctx
+                    .read_response(egui::Id::unique("sidebar-refresh"))
+                    .unwrap();
+                assert!(!response.enabled());
+                sidebar_frame(&mut app, &ctx, input(response.rect.center(), true));
+                sidebar_frame(&mut app, &ctx, input(response.rect.center(), false));
+                assert_eq!(app.last_scan, before);
+                assert_eq!(app.go_query.is_some(), state == 2);
+                assert_eq!(app.measurement.is_some(), state == 1);
+            }
+        }
+    }
+
+    #[test]
+    fn sidebar_refresh_hover_is_localized_and_settings_roots_have_no_refresh() {
+        fn has_text(shape: &egui::Shape, text: &str) -> bool {
+            match shape {
+                egui::Shape::Text(shape) => shape.galley.job.text.contains(text),
+                egui::Shape::Vec(shapes) => shapes.iter().any(|shape| has_text(shape, text)),
+                _ => false,
+            }
+        }
+        for lang in [Lang::Zh, Lang::En] {
+            for disabled in [false, true] {
+                let ctx = egui::Context::default();
+                theme::install(&ctx);
+                ctx.all_styles_mut(|style| style.interaction.tooltip_delay = 0.0);
+                let mut app = app_with_rows(0);
+                app.lang = lang;
+                if disabled {
+                    app.config.roots.clear();
+                }
+                sidebar_frame(&mut app, &ctx, raw_input(vec![]));
+                let rect = ctx
+                    .read_response(egui::Id::unique("sidebar-refresh"))
+                    .unwrap()
+                    .rect;
+                let expected = if disabled {
+                    app.strings().refresh_no_roots
+                } else {
+                    app.strings().refresh_projects
+                };
+                let mut found = false;
+                for frame in 0..5 {
+                    let mut input = raw_input(vec![egui::Event::PointerMoved(rect.center())]);
+                    input.time = Some(1.0 + f64::from(frame));
+                    let output = sidebar_frame(&mut app, &ctx, input);
+                    found |= output
+                        .shapes
+                        .iter()
+                        .any(|shape| has_text(&shape.shape, expected));
+                }
+                assert!(found, "localized hover: {expected}");
+            }
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            ctx.enable_accesskit();
+            let mut app = app_with_rows(0);
+            let s = lang.strings();
+            let mut output = ctx.run_ui(raw_input(vec![]), |ui| {
+                app.roots_editor(ui, theme::tokens(egui::Theme::Dark), s);
+            });
+            output.textures_delta.clear();
+            assert!(
+                !output
+                    .platform_output
+                    .accesskit_update
+                    .unwrap()
+                    .nodes
+                    .iter()
+                    .any(|(_, node)| node.label() == Some(s.refresh_projects))
+            );
         }
     }
 
