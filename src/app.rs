@@ -121,40 +121,7 @@ enum RowAction {
     Terminal,
 }
 
-/// An open clean panel: the project plus the plan its current draft would delete.
-struct Panel {
-    project: PathBuf,
-    plan: DeletePlan,
-    query: Option<Receiver<DeletePlan>>,
-}
-
-impl Panel {
-    fn replan(&mut self, ctx: &egui::Context, task: impl FnOnce() -> DeletePlan + Send + 'static) {
-        self.plan = empty_plan();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let repaint = ctx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(task());
-            repaint.request_repaint();
-        });
-        self.query = Some(rx);
-    }
-
-    fn poll(&mut self) {
-        if let Some(rx) = &self.query {
-            match rx.try_recv() {
-                Ok(plan) => {
-                    self.plan = plan;
-                    self.query = None;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    self.query = None;
-                }
-                Err(TryRecvError::Empty) => {}
-            }
-        }
-    }
-}
+type Panel = devsweep::project_clean::ProjectClean;
 
 struct CacheRow {
     rule: &'static CacheRule,
@@ -320,7 +287,7 @@ impl DevSweepApp {
                 self.measure_requests(ctx, self.projects.measurement_requests());
                 self.last_scan = Instant::now();
                 if let Some(mut panel) = self.panel.take() {
-                    panel.replan(ctx, self.project_plan_task(&panel.project));
+                    self.replan_panel(ctx, &mut panel);
                     self.panel = Some(panel);
                 }
                 ctx.request_repaint();
@@ -565,7 +532,7 @@ impl DevSweepApp {
         }
         if changed {
             if let Some(mut panel) = self.panel.take() {
-                panel.replan(ctx, self.project_plan_task(&panel.project));
+                self.replan_panel(ctx, &mut panel);
                 self.panel = Some(panel);
             }
             ctx.request_repaint();
@@ -581,7 +548,11 @@ impl DevSweepApp {
             (
                 entry.project.path.clone(),
                 entry.project.stack,
-                entry.targets.clone(),
+                self.panel
+                    .as_ref()
+                    .filter(|panel| panel.project == path && panel.locked())
+                    .map(|panel| panel.targets().to_vec())
+                    .unwrap_or_else(|| entry.targets.clone()),
             )
         });
         let roots = self.config.roots.clone();
@@ -608,13 +579,30 @@ impl DevSweepApp {
             return;
         };
         reset_draft(targets);
-        let mut panel = Panel {
-            project: path.to_path_buf(),
-            plan: empty_plan(),
-            query: None,
-        };
-        panel.replan(ctx, self.project_plan_task(path));
+        let mut panel = Panel::new(path.to_path_buf(), targets.clone());
+        self.replan_panel(ctx, &mut panel);
         self.panel = Some(panel);
+    }
+
+    fn replan_panel(&self, ctx: &egui::Context, panel: &mut Panel) {
+        let Some(entry) = self.projects.entry(&panel.project) else {
+            return;
+        };
+        panel.refresh(
+            entry.project.stack,
+            entry.targets.clone(),
+            self.config.roots.clone(),
+            self.rules.clone(),
+            |task| {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let repaint = ctx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(task());
+                    repaint.request_repaint();
+                });
+                rx
+            },
+        );
     }
 
     fn plan_for(&self, cleanup: Cleanup) -> DeletePlan {
@@ -802,18 +790,23 @@ impl DevSweepApp {
 
     /// The project's clean panel: details, a draft of what to delete, and the two exits.
     fn clean_panel(&mut self, ctx: &egui::Context, t: &Tokens, s: &Strings) {
+        if self.panel.as_ref().is_some_and(|panel| panel.locked()) {
+            return;
+        }
         let Some(mut panel) = self.panel.take() else {
             return;
         };
         panel.poll();
+        if panel.query.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
         let path = panel.project.clone();
         let Some(entry) = self.projects.entry(&path) else {
             return;
         };
         let (name, stack) = (entry.project.name.clone(), entry.project.stack);
-        let Some(targets) = self.projects.targets_mut(&path) else {
-            return;
-        };
+        let mut draft = panel.targets().to_vec();
+        let targets = &mut draft;
         let chosen = targets.iter().filter(|target| target.checked).count();
         let mut dirty = false;
         let mut close = false;
@@ -854,6 +847,9 @@ impl DevSweepApp {
                 ui.add_space(12.0);
                 stat_row(ui, s.items, &format!("{chosen} / {}", targets.len()), t);
                 stat_row(ui, s.total, &size::format_size(panel.plan.total_bytes), t);
+                if panel.failed() {
+                    ui.label(RichText::new(s.clean_preview_failed).color(t.danger));
+                }
                 if stack == Stack::Unity {
                     ui.label(
                         RichText::new(s.unity_note(&scan::unity_version(&path)))
@@ -958,7 +954,7 @@ impl DevSweepApp {
                         .iter()
                         .filter(|target| target.checked)
                         .all(|target| target.size.is_some());
-                    if danger_button(ui, &label, t, planned > 0 && known) {
+                    if danger_button(ui, &label, t, planned > 0 && known && !dirty) {
                         clean = true;
                     }
                     ui.add_space(4.0);
@@ -970,12 +966,17 @@ impl DevSweepApp {
 
         // Discard the old result while the changed draft is checked.
         if dirty {
-            panel.replan(ctx, self.project_plan_task(&path));
+            panel.edit(draft.clone());
+            if let Some(targets) = self.projects.targets_mut(&path) {
+                *targets = draft;
+            }
+            self.replan_panel(ctx, &mut panel);
         }
-        if clean {
+        if clean && panel.confirm() {
             self.pending_plan = panel.plan.clone();
             self.pending = Some(Cleanup::Project(path));
             self.confirm_large_ack = false;
+            self.panel = Some(panel);
         } else if !close && !modal.should_close() {
             self.panel = Some(panel);
         }
@@ -1145,8 +1146,14 @@ impl DevSweepApp {
         if confirm {
             self.pending = None;
             self.start_execution(ctx, cleanup);
+            self.panel = None;
         } else if close || modal.backdrop_response.clicked() {
             self.pending = None;
+            if let Some(mut panel) = self.panel.take() {
+                panel.cancel_confirmation();
+                self.replan_panel(ctx, &mut panel);
+                self.panel = Some(panel);
+            }
         }
     }
 
@@ -1350,6 +1357,11 @@ impl DevSweepApp {
 
     /// The scan-root list, shared by the sidebar and the settings sheet.
     fn roots_editor(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings) {
+        let locked = self.pending.is_some() || self.execution.is_some();
+        ui.add_enabled_ui(!locked, |ui| self.roots_editor_contents(ui, t, s));
+    }
+
+    fn roots_editor_contents(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings) {
         let covering = scan::covering_roots(&self.config.roots);
         let mut remove = None;
         for (index, root) in self.config.roots.iter().enumerate() {
@@ -2023,12 +2035,13 @@ impl eframe::App for DevSweepApp {
         if let Some(cleanup) = self.pending.clone() {
             let pending_plan = self.plan_for(cleanup.clone());
             let known = match &cleanup {
-                Cleanup::Project(path) => self.projects.entry(path).is_some_and(|entry| {
-                    entry
-                        .targets
-                        .iter()
-                        .filter(|target| target.checked)
-                        .all(|target| target.size.is_some())
+                Cleanup::Project(_) => self.panel.as_ref().is_some_and(|panel| {
+                    panel.locked()
+                        && panel
+                            .targets()
+                            .iter()
+                            .filter(|target| target.checked)
+                            .all(|target| target.size.is_some())
                 }),
                 Cleanup::Cache(_) | Cleanup::GoCache(..) => true,
             };
@@ -2937,37 +2950,6 @@ mod tests {
         assert!(cache_present(&row(None, true)));
     }
 
-    #[test]
-    fn planning_does_not_block_ui_and_late_results_cannot_replace_new_draft() {
-        let ctx = egui::Context::default();
-        let start = Instant::now();
-        let mut panel = Panel {
-            project: PathBuf::new(),
-            plan: empty_plan(),
-            query: None,
-        };
-        panel.replan(&ctx, move || {
-            std::thread::sleep(Duration::from_millis(200));
-            empty_plan()
-        });
-        assert!(start.elapsed() < Duration::from_millis(100));
-        panel.poll();
-        assert!(panel.query.is_some());
-        let mut newer = empty_plan();
-        newer.total_bytes = 42;
-        panel.replan(&ctx, move || newer);
-
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while panel.query.is_some() && Instant::now() < deadline {
-            panel.poll();
-            std::thread::yield_now();
-        }
-        assert_eq!(panel.plan.total_bytes, 42);
-        std::thread::sleep(Duration::from_millis(250));
-        panel.poll();
-        assert_eq!(panel.plan.total_bytes, 42);
-    }
-
     /// The hint must fit the box's inner width, or egui elides it. English is the
     /// longest today.
     #[test]
@@ -3327,11 +3309,7 @@ mod tests {
                         s.refresh_measuring
                     }
                     3 => {
-                        app.panel = Some(Panel {
-                            project: PathBuf::new(),
-                            plan: empty_plan(),
-                            query: None,
-                        });
+                        app.panel = Some(Panel::new(PathBuf::new(), vec![]));
                         s.refresh_confirmation
                     }
                     4 => {
@@ -3866,6 +3844,171 @@ mod tests {
             app.panel.as_ref().map(|panel| panel.project.clone()),
             expected(&app, 0)
         );
+    }
+
+    #[test]
+    fn project_execution_rechecks_the_fixed_confirmation_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("package.json"), "{}").unwrap();
+        std::fs::create_dir(root.join("node_modules")).unwrap();
+        std::fs::create_dir(root.join("dist")).unwrap();
+        let mut app = app_with_rows(0);
+        app.rules = rules::builtin_rules();
+        app.config.roots = vec![root.clone()];
+        app.config.delete_mode = DeleteMode::Direct;
+        app.projects.refresh(&app.config.roots, &app.rules);
+        for target in app.projects.targets_mut(&root).unwrap() {
+            target.size = Some(10);
+            target.checked = target.path.ends_with("node_modules");
+            target.default_checked = target.checked;
+        }
+        let ctx = egui::Context::default();
+        app.open_panel(&ctx, &root);
+        let panel = app.panel.as_mut().unwrap();
+        let plan = panel.query.take().unwrap().recv().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(plan).unwrap();
+        panel.preview(rx);
+        panel.poll();
+        assert!(panel.confirm());
+        app.pending_plan = panel.plan.clone();
+        for target in app.projects.targets_mut(&root).unwrap() {
+            target.checked = target.path.ends_with("dist");
+        }
+        app.start_execution(&ctx, Cleanup::Project(root.clone()));
+        let execution = app.execution.take().unwrap();
+        loop {
+            if let DeleteEvent::Finished(report) = execution.rx.recv().unwrap() {
+                assert_eq!(report.freed_bytes, 10);
+                break;
+            }
+        }
+        assert!(!root.join("node_modules").exists());
+        assert!(root.join("dist").exists());
+        assert!(root.join("package.json").exists());
+    }
+
+    #[test]
+    fn confirmation_large_target_requires_acknowledgement() {
+        for ack in [false, true] {
+            let mut app = app_with_rows(0);
+            app.confirm_large_ack = ack;
+            app.pending = Some(Cleanup::Project("/project".into()));
+            let mut plan = empty_plan();
+            plan.items.push(plan::PlanItem {
+                project_path: "/project".into(),
+                target_path: "/project/build".into(),
+                bytes: plan::LARGE_TARGET_BYTES + 1,
+                large: true,
+            });
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            let s = Lang::En.strings();
+            let mut warmup = ctx.run_ui(raw_input(vec![]), |ui| {
+                app.confirm_dialog(
+                    ui.ctx(),
+                    theme::tokens(egui::Theme::Dark),
+                    s,
+                    &plan,
+                    true,
+                    Cleanup::Project("/project".into()),
+                );
+            });
+            warmup.textures_delta.clear();
+            let mut output = ctx.run_ui(raw_input(vec![]), |ui| {
+                app.confirm_dialog(
+                    ui.ctx(),
+                    theme::tokens(egui::Theme::Dark),
+                    s,
+                    &plan,
+                    true,
+                    Cleanup::Project("/project".into()),
+                );
+            });
+            output.textures_delta.clear();
+            let update = output.platform_output.accesskit_update.unwrap();
+            let (_, confirm) = update
+                .nodes
+                .iter()
+                .find(|(_, node)| node.label() == Some(s.confirm.to_uppercase().as_str()))
+                .unwrap();
+            assert_eq!(confirm.is_disabled(), !ack);
+        }
+    }
+
+    #[test]
+    fn scan_root_controls_lock_during_confirmation() {
+        for locked in [false, true] {
+            let mut app = app_with_rows(0);
+            if locked {
+                app.pending = Some(Cleanup::Project("/project".into()));
+            }
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            let s = Lang::En.strings();
+            let mut output = ctx.run_ui(raw_input(vec![]), |ui| {
+                app.roots_editor(ui, theme::tokens(egui::Theme::Dark), s)
+            });
+            output.textures_delta.clear();
+            let update = output.platform_output.accesskit_update.unwrap();
+            let (_, add) = update
+                .nodes
+                .iter()
+                .find(|(_, node)| {
+                    node.label()
+                        .is_some_and(|label| label.contains(&s.add_directory.to_uppercase()))
+                })
+                .unwrap();
+            assert_eq!(add.is_disabled(), locked);
+        }
+    }
+
+    #[test]
+    fn confirmation_cancel_restores_editing_without_execution() {
+        let mut app = app_with_rows(1);
+        let path = app.projects.entries()[0].project.path.clone();
+        let targets = app.projects.entries()[0].targets.clone();
+        let mut panel = Panel::new(path.clone(), targets);
+        let mut plan = empty_plan();
+        plan.items.push(plan::PlanItem {
+            project_path: path.clone(),
+            target_path: path.join("build"),
+            bytes: 1024,
+            large: false,
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        panel.preview(rx);
+        tx.send(plan.clone()).unwrap();
+        panel.poll();
+        assert!(panel.confirm());
+        app.panel = Some(panel);
+        app.pending = Some(Cleanup::Project(path.clone()));
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            raw_input(vec![egui::Event::Key {
+                key: Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            }]),
+            |ui| {
+                let s = app.strings();
+                app.confirm_dialog(
+                    ui.ctx(),
+                    theme::tokens(egui::Theme::Dark),
+                    s,
+                    &plan,
+                    true,
+                    Cleanup::Project(path.clone()),
+                );
+            },
+        );
+        output.textures_delta.clear();
+        assert!(app.pending.is_none());
+        assert!(app.execution.is_none());
+        assert!(!app.panel.as_ref().unwrap().locked());
     }
 
     /// The row's size counts every target, risky ones included.
