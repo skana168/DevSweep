@@ -19,6 +19,7 @@ use eframe::egui::{
     Layout, Modifiers, Response, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit, Ui,
 };
 use egui_extras::{Column, TableBuilder, TableRow};
+use egui_icons::icons;
 
 use crate::i18n::{Lang, Strings};
 use crate::terminal;
@@ -833,7 +834,7 @@ impl DevSweepApp {
                     ui.add_space(8.0);
                     chip(ui, s.stack(stack), t);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if icon_button(ui, "×", t) {
+                        if icon_button(ui, icons::ICON_CLOSE.codepoint, t) {
                             close = true;
                         }
                     });
@@ -1015,7 +1016,7 @@ impl DevSweepApp {
                         }
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let close = RichText::new("×");
+                        let close = RichText::new(icons::ICON_CLOSE.codepoint);
                         if text_button(ui, close, t.text_muted, t.text_strong).clicked() {
                             dismiss = true;
                         }
@@ -1366,9 +1367,14 @@ impl DevSweepApp {
                     None => root.display().to_string(),
                 };
                 ui.add_sized([name_width, 18.0], label).on_hover_text(hover);
-                if text_button(ui, RichText::new("×"), t.text_muted, t.text_strong)
-                    .on_hover_text(s.remove)
-                    .clicked()
+                if text_button(
+                    ui,
+                    RichText::new(icons::ICON_CLOSE.codepoint),
+                    t.text_muted,
+                    t.text_strong,
+                )
+                .on_hover_text(s.remove)
+                .clicked()
                 {
                     remove = Some(index);
                 }
@@ -1394,7 +1400,11 @@ impl DevSweepApp {
                 paint_states(ui, rest, hot);
                 ui.add_sized(
                     [width, CELL_H],
-                    Button::new(theme::button_text(format!("+ {}", s.add_directory))),
+                    Button::new(theme::button_text(format!(
+                        "{} {}",
+                        icons::ICON_ADD.codepoint,
+                        s.add_directory
+                    ))),
                 )
             })
             .inner;
@@ -1677,7 +1687,13 @@ impl DevSweepApp {
                     .column(Column::exact(44.0))
                     .header(42.0, |mut header| {
                         header.col(|ui| {
-                            if sort_header(ui, s.project_column, "↑", sort == Sort::Name, t) {
+                            if sort_header(
+                                ui,
+                                s.project_column,
+                                icons::ICON_ARROW_UPWARD.codepoint,
+                                sort == Sort::Name,
+                                t,
+                            ) {
                                 sort_clicked = Some(Sort::Name);
                             }
                             row_rule(ui, t, span);
@@ -1687,7 +1703,13 @@ impl DevSweepApp {
                         });
                         header.col(|ui| {
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if sort_header(ui, s.size_column, "↓", sort == Sort::Size, t) {
+                                if sort_header(
+                                    ui,
+                                    s.size_column,
+                                    icons::ICON_ARROW_DOWNWARD.codepoint,
+                                    sort == Sort::Size,
+                                    t,
+                                ) {
                                     sort_clicked = Some(Sort::Size);
                                 }
                             });
@@ -2165,47 +2187,30 @@ fn window_button(ui: &mut Ui, t: &Tokens, s: &Strings, button: WindowButton) -> 
     let p = ui.painter();
     p.rect_filled(rect, CornerRadius::ZERO, fill);
     let c = rect.center();
-    let stroke = Stroke::new(1.0, ink);
     let label = match button {
         WindowButton::Minimize => s.minimize,
         WindowButton::Maximize => s.maximize,
         WindowButton::Restore => s.restore,
         WindowButton::Close => s.close,
     };
-    // Half the glyph's size: 10 px, like the system's own caption buttons.
-    let s = 5.0;
-    match button {
-        WindowButton::Minimize => {
-            p.hline(c.x - s..=c.x + s, c.y, stroke);
-        }
-        WindowButton::Maximize => {
-            p.rect_stroke(
-                egui::Rect::from_center_size(c, egui::vec2(2.0 * s, 2.0 * s)),
-                CornerRadius::ZERO,
-                stroke,
-                StrokeKind::Inside,
-            );
-        }
-        WindowButton::Restore => {
-            // A window in front of another.
-            let front = egui::Rect::from_min_size(
-                c + egui::vec2(-s, -s + 2.0),
-                egui::vec2(2.0 * s - 2.0, 2.0 * s - 2.0),
-            );
-            p.rect_stroke(front, CornerRadius::ZERO, stroke, StrokeKind::Inside);
-            p.hline(c.x - s + 2.0..=c.x + s, c.y - s, stroke);
-            p.vline(c.x + s, c.y - s..=c.y + s - 2.0, stroke);
-        }
-        WindowButton::Close => {
-            p.line_segment([c + egui::vec2(-s, -s), c + egui::vec2(s, s)], stroke);
-            p.line_segment([c + egui::vec2(-s, s), c + egui::vec2(s, -s)], stroke);
-        }
-    }
+    let glyph = match button {
+        WindowButton::Minimize => icons::ICON_REMOVE,
+        WindowButton::Maximize => icons::ICON_CROP_SQUARE,
+        WindowButton::Restore => icons::ICON_FILTER_NONE,
+        WindowButton::Close => icons::ICON_CLOSE,
+    };
+    p.text(
+        c,
+        egui::Align2::CENTER_CENTER,
+        glyph.codepoint,
+        egui::FontId::new(16.0, egui::FontFamily::Name(egui_icons::FONT_FAMILY.into())),
+        ink,
+    );
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
     resp.on_hover_text(label)
 }
 
-/// The settings entry at the header's right end: the reference's vector gear in a square cell
+/// The settings entry at the header's right end: a Rounded gear in a square cell
 /// with a hairline on its left, inverted under the pointer and while the sheet is open.
 fn settings_icon(ui: &mut Ui, t: &Tokens, label: &str, active: bool) -> bool {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(HEADER_H, HEADER_H), Sense::hover());
@@ -2217,20 +2222,13 @@ fn settings_icon(ui: &mut Ui, t: &Tokens, label: &str, active: bool) -> bool {
     }
     p.vline(rect.left() + 0.5, rect.y_range(), t.hairline());
     let ink = if hot { t.invert_fg } else { t.text_muted };
-    let c = rect.center();
-    let stroke = Stroke::new(1.5, ink);
-    p.circle_stroke(c, 3.2, stroke);
-    for i in 0..8 {
-        let angle = std::f32::consts::TAU * i as f32 / 8.0;
-        let (sin, cos) = angle.sin_cos();
-        p.line_segment(
-            [
-                c + egui::vec2(cos, sin) * 4.8,
-                c + egui::vec2(cos, sin) * 6.6,
-            ],
-            stroke,
-        );
-    }
+    p.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        icons::ICON_SETTINGS.codepoint,
+        egui::FontId::new(18.0, egui::FontFamily::Name(egui_icons::FONT_FAMILY.into())),
+        ink,
+    );
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
     resp.on_hover_text(label)
         .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -2568,7 +2566,8 @@ fn project_table_row(
 fn more_menu(ui: &mut Ui, t: &Tokens, s: &Strings) -> Option<RowAction> {
     let saved = ui.visuals().clone();
     let (rest, hot) = look(Kind::Icon, t);
-    let button = Button::new(RichText::new("…").size(15.0)).min_size(egui::vec2(CELL_H, CELL_H));
+    let button = Button::new(RichText::new(icons::ICON_MORE_HORIZ.codepoint).size(18.0))
+        .min_size(egui::vec2(CELL_H, CELL_H));
     let (response, open) = ui
         .scope(|ui| {
             paint_states(ui, rest, hot);
