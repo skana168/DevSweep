@@ -252,6 +252,9 @@ impl DevSweepApp {
     }
 
     fn add_directory(&mut self, ctx: &egui::Context) {
+        if self.root_edits_locked() {
+            return;
+        }
         let Some(path) = rfd::FileDialog::new().pick_folder() else {
             return;
         };
@@ -261,6 +264,9 @@ impl DevSweepApp {
     }
 
     fn add_root(&mut self, path: PathBuf, ctx: &egui::Context) {
+        if self.root_edits_locked() {
+            return;
+        }
         if self.config.roots.contains(&path) {
             self.root_notice = Some(self.strings().root_duplicate);
             return;
@@ -1412,9 +1418,15 @@ impl DevSweepApp {
         }
     }
 
+    fn root_edits_locked(&self) -> bool {
+        self.pending.is_some()
+            || self.execution.is_some()
+            || self.panel.as_ref().is_some_and(|panel| panel.locked())
+    }
+
     /// The scan-root list, shared by the sidebar and the settings sheet.
     fn roots_editor(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings) {
-        let locked = self.pending.is_some() || self.execution.is_some();
+        let locked = self.root_edits_locked();
         ui.add_enabled_ui(!locked, |ui| self.roots_editor_contents(ui, t, s));
     }
 
@@ -1488,6 +1500,9 @@ impl DevSweepApp {
     }
 
     fn remove_root(&mut self, index: usize, ctx: &egui::Context) {
+        if self.root_edits_locked() {
+            return;
+        }
         self.config.roots.remove(index);
         self.root_notice = None;
         self.refresh.roots_removed(
@@ -4086,10 +4101,16 @@ mod tests {
         .unwrap();
         app.poll_execution(&ctx);
         assert!(app.execution.is_some(), "abort is only a request");
+        let roots = app.config.roots.clone();
+        app.add_root(PathBuf::from("/must-not-be-added"), &ctx);
+        app.remove_root(0, &ctx);
+        assert_eq!(app.config.roots, roots);
+        assert!(app.root_edits_locked());
         assert!(app.projects.entry(&project).unwrap().targets.is_empty());
         drop(tx);
         app.poll_execution(&ctx);
         assert!(app.execution.is_none());
+        assert!(!app.root_edits_locked());
         let flash = app.flash.as_ref().unwrap();
         assert!(flash.interrupted);
         assert_eq!(flash.bytes, 1024);
@@ -4187,6 +4208,174 @@ mod tests {
                 .find(|(_, node)| node.label() == Some(s.confirm.to_uppercase().as_str()))
                 .unwrap();
             assert_eq!(confirm.is_disabled(), !ack);
+        }
+    }
+
+    #[test]
+    fn manual_project_refresh_preserves_inflight_go_query_and_localized_refusal() {
+        for lang in [Lang::Zh, Lang::En] {
+            let mut app = app_with_rows(0);
+            app.lang = lang;
+            let (tx, rx) = std::sync::mpsc::channel();
+            app.go_query = Some(rx);
+            app.go_notice = Some(GoCacheError::Changed);
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            app.refresh_projects(&ctx);
+            assert!(app.refresh.scan.is_some());
+            let snapshot = GoCacheSnapshot {
+                entries: ["go.build", "go.module"].map(|id| go_cache::GoCacheEntry {
+                    id,
+                    path: None,
+                    size: Err(GoCacheError::Protected),
+                }),
+            };
+            tx.send(snapshot)
+                .expect("manual Project Refresh must retain the active Go receiver");
+            app.poll_go_caches(&ctx);
+            assert!(app.go_query.is_none());
+            assert_eq!(
+                app.go_snapshot.as_ref().unwrap().entries[0].size,
+                Err(GoCacheError::Protected)
+            );
+            assert_eq!(app.go_notice, Some(GoCacheError::Changed));
+            let s = lang.strings();
+            let mut output = ctx.run_ui(raw_input(vec![]), |ui| {
+                app.caches_content(ui, theme::tokens(egui::Theme::Dark), s);
+            });
+            output.textures_delta.clear();
+            assert!(
+                painted_text(&output)
+                    .iter()
+                    .any(|(text, _)| text == s.go_cache_error(GoCacheError::Changed))
+            );
+        }
+    }
+
+    #[test]
+    fn lifecycle_progress_and_failure_notices_render_in_both_languages() {
+        for lang in [Lang::Zh, Lang::En] {
+            let mut app = app_with_rows(1);
+            app.lang = lang;
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            let s = lang.strings();
+            let (scan_tx, scan_rx) = std::sync::mpsc::channel();
+            app.refresh.scan = Some(scan_rx);
+            let (size_tx, size_rx) = std::sync::mpsc::channel();
+            app.refresh.measurement = Some(devsweep::refresh::Measurement {
+                shown: false,
+                done: 0,
+                total: 1,
+                rx: size_rx,
+            });
+            let mut output = ctx.run_ui(raw_input(vec![]), |ui| {
+                eframe::App::ui(&mut app, ui, &mut eframe::Frame::_new_kittest());
+            });
+            output.textures_delta.clear();
+            let text = painted_text(&output);
+            assert!(text.iter().any(|(text, _)| text == s.refresh_scanning));
+            assert!(
+                text.iter()
+                    .any(|(text, _)| text == &format!("{} 0/1", s.measuring))
+            );
+            drop(scan_tx);
+            drop(size_tx);
+            app.poll_project_scan(&ctx);
+            app.poll_measurement(&ctx);
+            let output = sidebar_frame(&mut app, &ctx, raw_input(vec![]));
+            assert!(
+                painted_text(&output)
+                    .iter()
+                    .any(|(text, _)| text == s.refresh_failed)
+            );
+            assert!(app.refresh.scan.is_none());
+            assert!(app.refresh.measurement.is_none());
+
+            let entry = &app.projects.entries()[0];
+            let mut panel = Panel::new(entry.project.path.clone(), entry.targets.clone());
+            let (tx, rx) = std::sync::mpsc::channel();
+            panel.preview(rx);
+            drop(tx);
+            app.panel = Some(panel);
+            // The modal's first frame measures its layout before it is painted.
+            let mut initial = ctx.run_ui(raw_input(vec![]), |ui| {
+                app.clean_panel(ui.ctx(), theme::tokens(egui::Theme::Dark), s);
+            });
+            initial.textures_delta.clear();
+            let mut output = ctx.run_ui(raw_input(vec![]), |ui| {
+                app.clean_panel(ui.ctx(), theme::tokens(egui::Theme::Dark), s);
+            });
+            output.textures_delta.clear();
+            assert!(
+                painted_text(&output)
+                    .iter()
+                    .any(|(text, _)| text == s.clean_preview_failed)
+            );
+            assert!(!app.panel.as_mut().unwrap().confirm());
+            app.flash = Some(Flash {
+                bytes: 23,
+                aborted: false,
+                interrupted: true,
+                global_cache: false,
+                skipped: vec![],
+            });
+            let mut output = ctx.run_ui(raw_input(vec![]), |ui| {
+                app.flash_banner(ui, theme::tokens(egui::Theme::Dark), s);
+            });
+            output.textures_delta.clear();
+            assert!(
+                painted_text(&output)
+                    .iter()
+                    .any(|(text, _)| text.contains(s.clean_execution_interrupted))
+            );
+        }
+    }
+
+    #[test]
+    fn confirmed_clean_locks_root_controls_and_rejects_root_entry_intents() {
+        for lang in [Lang::En, Lang::Zh] {
+            let mut app = app_with_rows(1);
+            let path = app.projects.entries()[0].project.path.clone();
+            let mut panel = Panel::new(path.clone(), app.projects.entries()[0].targets.clone());
+            panel.plan.items.push(plan::PlanItem {
+                project_path: path.clone(),
+                target_path: path.join("node_modules"),
+                bytes: 1024,
+                large: false,
+            });
+            assert!(panel.confirm());
+            app.panel = Some(panel);
+            app.lang = lang;
+            let roots = app.config.roots.clone();
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            let s = lang.strings();
+            let mut output = ctx.run_ui(raw_input(vec![]), |ui| {
+                app.roots_editor(ui, theme::tokens(egui::Theme::Dark), s)
+            });
+            output.textures_delta.clear();
+            let update = output.platform_output.accesskit_update.unwrap();
+            let (_, add) = update
+                .nodes
+                .iter()
+                .find(|(_, node)| {
+                    node.label()
+                        .is_some_and(|label| label.contains(&s.add_directory.to_uppercase()))
+                })
+                .unwrap();
+            assert!(
+                add.is_disabled(),
+                "confirmed selection must lock Scan root controls"
+            );
+            app.add_root(PathBuf::from("/must-not-be-added"), &ctx);
+            app.remove_root(0, &ctx);
+            assert_eq!(app.config.roots, roots);
+            assert!(app.refresh.scan.is_none());
+            app.panel.as_mut().unwrap().cancel_confirmation();
+            app.remove_root(0, &ctx);
+            assert!(app.config.roots.is_empty());
+            assert!(app.refresh.scan.is_some());
         }
     }
 

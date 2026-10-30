@@ -482,3 +482,89 @@ fn running_discovery_and_late_measurement_keep_successful_deletions() {
     assert!(execution.interrupted);
     assert_eq!(executor.discoveries.len(), 1);
 }
+
+#[test]
+fn root_change_after_cancel_supersedes_old_scan_and_queued_refresh_scope() {
+    use devsweep::{plan::PlanItem, project_clean::ProjectClean};
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().canonicalize().unwrap();
+    let child = parent.join("android");
+    std::fs::create_dir_all(child.join("build")).unwrap();
+    std::fs::create_dir(parent.join("build")).unwrap();
+    std::fs::write(parent.join("pubspec.yaml"), "").unwrap();
+    std::fs::write(child.join("build.gradle"), "").unwrap();
+    let rules = devsweep::rules::builtin_rules();
+    let mut projects = ProjectRefresh::default();
+    projects.refresh(std::slice::from_ref(&parent), &rules);
+    for target in projects.targets_mut(&parent).unwrap() {
+        target.size = Some(12);
+    }
+    let mut refresh = Refresh::default();
+    let mut executor = Controlled::default();
+    refresh.request(
+        &projects,
+        std::slice::from_ref(&parent),
+        &rules,
+        &mut executor,
+    );
+    let stale = projects.clone();
+    let mut clean = ProjectClean::new(
+        parent.clone(),
+        projects.entry(&parent).unwrap().targets.clone(),
+    );
+    clean.plan.items.push(PlanItem {
+        project_path: parent.clone(),
+        target_path: parent.join("build"),
+        bytes: 12,
+        large: false,
+    });
+    assert!(clean.confirm());
+    refresh.coordinate(Some(&clean), None);
+    for _ in 0..3 {
+        refresh.request(
+            &projects,
+            std::slice::from_ref(&parent),
+            &rules,
+            &mut executor,
+        );
+    }
+    assert_eq!(executor.discoveries.len(), 1);
+    clean.cancel_confirmation();
+    refresh.coordinate(Some(&clean), None);
+    refresh.roots_removed(
+        &mut projects,
+        std::slice::from_ref(&child),
+        &rules,
+        &mut executor,
+    );
+    assert!(projects.entries().is_empty());
+    assert!(
+        executor.discoveries[0].send(stale).is_err(),
+        "superseded result is disconnected"
+    );
+    let mut recovered = ProjectRefresh::default();
+    recovered.refresh(std::slice::from_ref(&child), &rules);
+    for target in recovered.targets_mut(&child).unwrap() {
+        target.size = Some(7);
+    }
+    executor.discoveries[1].send(recovered).unwrap();
+    refresh.poll_discovery(
+        &mut projects,
+        std::slice::from_ref(&child),
+        &rules,
+        &mut executor,
+    );
+    refresh.poll_discovery(
+        &mut projects,
+        std::slice::from_ref(&child),
+        &rules,
+        &mut executor,
+    );
+    assert!(projects.entry(&parent).is_none());
+    assert!(projects.entry(&child).is_some());
+    assert_eq!(executor.roots, vec![vec![parent], vec![child]]);
+    assert!(
+        refresh.scan.is_none(),
+        "scope recovery satisfies the deferred Refresh"
+    );
+}
