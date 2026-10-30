@@ -5,6 +5,7 @@ use crate::{
     size::{SizeEvent, SizeRequest},
 };
 use std::{
+    collections::HashSet,
     path::PathBuf,
     sync::mpsc::{Receiver, TryRecvError},
 };
@@ -34,6 +35,7 @@ pub struct Refresh {
     clean_locked: bool,
     pending_measurements: Vec<SizeRequest>,
     pub measurement: Option<Measurement>,
+    invalidated_measurements: HashSet<PathBuf>,
     pub failed: bool,
 }
 
@@ -66,6 +68,23 @@ impl Refresh {
         rules: &[Rule],
         executor: &mut impl RefreshExecutor,
     ) {
+        // Invalidation lasts for the active batch, even if the same path is
+        // discovered again before its old result arrives. Surviving Projects and
+        // independent cache measurements keep their ownership and progress.
+        let removed: HashSet<_> = projects
+            .entries()
+            .iter()
+            .filter(|entry| {
+                !roots
+                    .iter()
+                    .any(|root| entry.project.path.starts_with(root))
+            })
+            .map(|entry| entry.project.path.clone())
+            .collect();
+        self.invalidated_measurements
+            .extend(removed.iter().cloned());
+        self.pending_measurements
+            .retain(|request| !removed.contains(&request.project));
         projects.retain_roots(roots);
         self.additions.clear();
         self.scan = None;
@@ -94,6 +113,7 @@ impl Refresh {
             self.pending_measurements.extend(requests);
             return;
         }
+        self.invalidated_measurements.clear();
         let total = requests.len();
         self.measurement = Some(Measurement {
             shown: false,
@@ -123,8 +143,10 @@ impl Refresh {
             match progress.rx.try_recv() {
                 Ok(event) => {
                     progress.done += 1;
-                    projects.apply_measurement(&event);
-                    events.push(event);
+                    if !self.invalidated_measurements.contains(&event.project) {
+                        projects.apply_measurement(&event);
+                        events.push(event);
+                    }
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {

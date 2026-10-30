@@ -568,3 +568,129 @@ fn root_change_after_cancel_supersedes_old_scan_and_queued_refresh_scope() {
         "scope recovery satisfies the deferred Refresh"
     );
 }
+
+#[test]
+fn removed_and_readded_project_requires_fresh_measurement() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("node_modules")).unwrap();
+    std::fs::write(root.join("package.json"), "{}").unwrap();
+    let rules = devsweep::rules::builtin_rules();
+    let roots = std::slice::from_ref(&root);
+    let mut projects = ProjectRefresh::default();
+    projects.refresh(roots, &rules);
+    let mut refresh = Refresh::default();
+    let mut executor = Controlled::default();
+    refresh.measure(projects.measurement_requests(), &mut executor);
+    refresh.roots_removed(&mut projects, &[], &rules, &mut executor);
+    refresh.root_added(&root, &rules, &mut executor);
+    let mut found = ProjectRefresh::default();
+    found.refresh(roots, &rules);
+    executor.discoveries[1].send(found).unwrap();
+    refresh.poll_discovery(&mut projects, roots, &rules, &mut executor);
+    executor
+        .measurements
+        .remove(0)
+        .send(SizeEvent {
+            project: root.clone(),
+            sizes: vec![(root.join("node_modules"), 19)],
+        })
+        .unwrap();
+    refresh.present_progress();
+    refresh.poll_measurement(&mut projects);
+    assert_eq!(
+        projects.entry(&root).unwrap().targets[0].size,
+        None,
+        "the previous incarnation cannot supply the confirmation estimate"
+    );
+    refresh.poll_discovery(&mut projects, roots, &rules, &mut executor);
+    assert_eq!(
+        executor.measurements.len(),
+        1,
+        "fresh measurement must not be skipped"
+    );
+    executor
+        .measurements
+        .remove(0)
+        .send(SizeEvent {
+            project: root.clone(),
+            sizes: vec![(root.join("node_modules"), 6 * 1024 * 1024 * 1024)],
+        })
+        .unwrap();
+    refresh.present_progress();
+    refresh.poll_measurement(&mut projects);
+    let plan = devsweep::plan::plan(
+        &[devsweep::plan::PlanProject {
+            path: &root,
+            stack: projects.entry(&root).unwrap().project.stack,
+            targets: &projects.entry(&root).unwrap().targets,
+        }],
+        roots,
+        &rules,
+    );
+    assert!(
+        plan.items[0].large,
+        "fresh size requires large-target acknowledgement"
+    );
+}
+
+#[test]
+fn root_removal_preserves_surviving_project_and_cache_measurements() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let removed = root.join("removed");
+    let retained = root.join("retained");
+    let cache = root.join("cache");
+    for project in [&removed, &retained] {
+        std::fs::create_dir_all(project.join("node_modules")).unwrap();
+        std::fs::write(project.join("package.json"), "{}").unwrap();
+    }
+    let rules = devsweep::rules::builtin_rules();
+    let mut projects = ProjectRefresh::default();
+    projects.refresh(&[removed.clone(), retained.clone()], &rules);
+    let mut requests = projects.measurement_requests();
+    requests.push(SizeRequest {
+        project: cache.clone(),
+        paths: vec![cache.clone()],
+    });
+    let mut refresh = Refresh::default();
+    let mut executor = Controlled::default();
+    refresh.measure(requests, &mut executor);
+    refresh.roots_removed(
+        &mut projects,
+        std::slice::from_ref(&retained),
+        &rules,
+        &mut executor,
+    );
+    let sender = executor.measurements.remove(0);
+    for project in [&removed, &retained, &cache] {
+        sender
+            .send(SizeEvent {
+                project: project.clone(),
+                sizes: vec![(
+                    if project == &cache {
+                        cache.clone()
+                    } else {
+                        project.join("node_modules")
+                    },
+                    47,
+                )],
+            })
+            .unwrap();
+    }
+    refresh.present_progress();
+    let accepted = refresh.poll_measurement(&mut projects);
+    assert_eq!(accepted.len(), 2);
+    assert!(
+        accepted
+            .iter()
+            .any(|event| event.project == cache && event.sizes == vec![(cache.clone(), 47)])
+    );
+    assert_eq!(projects.entry(&retained).unwrap().targets[0].size, Some(47));
+    assert!(projects.entry(&removed).is_none());
+    assert_eq!(refresh.measurement.as_ref().unwrap().done, 3);
+    drop(sender);
+    refresh.poll_measurement(&mut projects);
+    assert!(refresh.measurement.is_none());
+    assert!(!refresh.failed);
+}

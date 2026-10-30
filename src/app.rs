@@ -185,6 +185,20 @@ struct Execution {
     global_cache: bool,
 }
 
+impl Execution {
+    fn progress(&self) -> (usize, usize, Option<String>) {
+        if let Some(project) = &self.project {
+            (
+                project.done,
+                project.total,
+                project.current.as_deref().map(project_name),
+            )
+        } else {
+            (self.done, self.total, self.current.clone())
+        }
+    }
+}
+
 struct Flash {
     interrupted: bool,
     skipped: Vec<devsweep::plan::Skip>,
@@ -695,11 +709,7 @@ impl DevSweepApp {
 
     fn stop_execution(&self) {
         if let Some(execution) = &self.execution {
-            if let Some(project) = &execution.project {
-                project.request_abort();
-            } else {
-                execution.abort.store(true, Ordering::Relaxed);
-            }
+            execution.abort.store(true, Ordering::Relaxed);
         }
     }
 
@@ -709,9 +719,6 @@ impl DevSweepApp {
         };
         if let Some(project) = &mut execution.project {
             project.poll_projects(&mut self.projects);
-            execution.done = project.done;
-            execution.total = project.total;
-            execution.current = project.current.as_deref().map(project_name);
             if !project.running() {
                 self.flash = Some(Flash {
                     bytes: project.freed_bytes,
@@ -2045,13 +2052,14 @@ impl eframe::App for DevSweepApp {
                         );
                     }
                     if let Some(execution) = &self.execution {
+                        let (done, total, current) = execution.progress();
                         ui.label(
                             RichText::new(format!(
                                 "{} {}/{} · {}",
                                 s.cleaning,
-                                execution.done,
-                                execution.total,
-                                execution.current.as_deref().unwrap_or_default()
+                                done,
+                                total,
+                                current.as_deref().unwrap_or_default()
                             ))
                             .size(11.0)
                             .color(t.text),
