@@ -78,6 +78,8 @@ pub struct DevSweepApp {
     panel: Option<Panel>,
     /// What the open confirm dialog will clean; `None` while it is closed.
     pending: Option<Cleanup>,
+    /// Completed confirmation preview; execution always builds a fresh plan.
+    pending_plan: DeletePlan,
     /// The user has ticked "I understand" in the confirm dialog.
     confirm_large_ack: bool,
     execution: Option<Execution>,
@@ -120,6 +122,35 @@ enum RowAction {
 struct Panel {
     project: PathBuf,
     plan: DeletePlan,
+    query: Option<Receiver<DeletePlan>>,
+}
+
+impl Panel {
+    fn replan(&mut self, ctx: &egui::Context, task: impl FnOnce() -> DeletePlan + Send + 'static) {
+        self.plan = empty_plan();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(task());
+            repaint.request_repaint();
+        });
+        self.query = Some(rx);
+    }
+
+    fn poll(&mut self) {
+        if let Some(rx) = &self.query {
+            match rx.try_recv() {
+                Ok(plan) => {
+                    self.plan = plan;
+                    self.query = None;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.query = None;
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+    }
 }
 
 struct CacheRow {
@@ -202,6 +233,7 @@ impl DevSweepApp {
             last_scan: Instant::now(),
             panel: None,
             pending: None,
+            pending_plan: empty_plan(),
             confirm_large_ack: false,
             execution: None,
             flash: None,
@@ -470,6 +502,10 @@ impl DevSweepApp {
             self.measurement = None;
         }
         if changed {
+            if let Some(mut panel) = self.panel.take() {
+                panel.replan(ctx, self.project_plan_task(&panel.project));
+                self.panel = Some(panel);
+            }
             ctx.request_repaint();
         }
         if self.measurement.is_some() {
@@ -478,39 +514,50 @@ impl DevSweepApp {
     }
 
     /// The plan the panel's current draft would delete, for one project.
-    fn project_plan(&self, path: &Path) -> DeletePlan {
-        let Some(entry) = self.projects.entry(path) else {
-            return empty_plan();
-        };
-        let project = &entry.project;
-        plan::plan(
-            &[PlanProject {
-                path: &project.path,
-                stack: project.stack,
-                targets: &entry.targets,
-            }],
-            &self.config.roots,
-            &self.rules,
-        )
+    fn project_plan_task(&self, path: &Path) -> impl FnOnce() -> DeletePlan + Send + 'static {
+        let entry = self.projects.entry(path).map(|entry| {
+            (
+                entry.project.path.clone(),
+                entry.project.stack,
+                entry.targets.clone(),
+            )
+        });
+        let roots = self.config.roots.clone();
+        let rules = self.rules.clone();
+        move || {
+            let Some((path, stack, targets)) = entry else {
+                return empty_plan();
+            };
+            plan::plan(
+                &[PlanProject {
+                    path: &path,
+                    stack,
+                    targets: &targets,
+                }],
+                &roots,
+                &rules,
+            )
+        }
     }
 
-    /// Open the clean panel with a fresh draft: each target back to its rule default.
-    fn open_panel(&mut self, path: &Path) {
+    /// Open the panel without waiting for the process query on the UI thread.
+    fn open_panel(&mut self, ctx: &egui::Context, path: &Path) {
         let Some(targets) = self.projects.targets_mut(path) else {
             return;
         };
         reset_draft(targets);
-        let plan = self.project_plan(path);
-        self.panel = Some(Panel {
+        let mut panel = Panel {
             project: path.to_path_buf(),
-            plan,
-        });
+            plan: empty_plan(),
+            query: None,
+        };
+        panel.replan(ctx, self.project_plan_task(path));
+        self.panel = Some(panel);
     }
 
-    /// Plan for the cleanup the confirm dialog will run.
     fn plan_for(&self, cleanup: Cleanup) -> DeletePlan {
         match cleanup {
-            Cleanup::Project(path) => self.project_plan(&path),
+            Cleanup::Project(_) => self.pending_plan.clone(),
             Cleanup::Cache(rule) => self.cache_plan(rule).unwrap_or_else(empty_plan),
             Cleanup::GoCache(rule, snapshot) => self
                 .go_context()
@@ -549,6 +596,10 @@ impl DevSweepApp {
             Cleanup::GoCache(rule, _) => rule.id == "go.module",
             Cleanup::Project(_) => false,
         };
+        let project_task = match &cleanup {
+            Cleanup::Project(path) => Some(self.project_plan_task(path)),
+            _ => None,
+        };
         let plan = self.plan_for(cleanup);
         if plan.items.is_empty() {
             return;
@@ -570,6 +621,8 @@ impl DevSweepApp {
                 }
                 .execute(mode, &flag, tx, check_tx);
             } else {
+                // Confirmation is only a preview: observe real process state again here.
+                let plan = project_task.map_or(plan, |task| task());
                 delete::execute(plan, mode, &flag, tx);
             }
         });
@@ -690,6 +743,7 @@ impl DevSweepApp {
         let Some(mut panel) = self.panel.take() else {
             return;
         };
+        panel.poll();
         let path = panel.project.clone();
         let Some(entry) = self.projects.entry(&path) else {
             return;
@@ -738,6 +792,14 @@ impl DevSweepApp {
                 ui.add_space(12.0);
                 stat_row(ui, s.items, &format!("{chosen} / {}", targets.len()), t);
                 stat_row(ui, s.total, &size::format_size(panel.plan.total_bytes), t);
+                if stack == Stack::Unity {
+                    ui.label(
+                        RichText::new(s.unity_note(&scan::unity_version(&path)))
+                            .size(12.0)
+                            .color(t.danger),
+                    );
+                    ui.label(RichText::new(s.unity_notice).size(12.0).color(t.danger));
+                }
                 if stack == Stack::Dotnet {
                     ui.label(
                         RichText::new(s.dotnet_clean_note)
@@ -844,11 +906,12 @@ impl DevSweepApp {
                 });
             });
 
-        // The draft changed: replan now, so the totals match what is on screen.
+        // Discard the old result while the changed draft is checked.
         if dirty {
-            panel.plan = self.project_plan(&path);
+            panel.replan(ctx, self.project_plan_task(&path));
         }
         if clean {
+            self.pending_plan = panel.plan.clone();
             self.pending = Some(Cleanup::Project(path));
             self.confirm_large_ack = false;
         } else if !close && !modal.should_close() {
@@ -1151,6 +1214,7 @@ impl DevSweepApp {
         ui.add_space(4.0);
         let filters = std::iter::once((None, s.all)).chain(
             [
+                Stack::Unity,
                 Stack::Flutter,
                 Stack::Android,
                 Stack::Ios,
@@ -1553,16 +1617,24 @@ impl DevSweepApp {
                             let entry = &entries[index];
                             let project = &entry.project;
                             let last = Some(index) == last_index;
-                            body.row(ROW_H, |mut row| {
-                                let hit =
-                                    project_table_row(&mut row, entry, last, running, t, s, span)
-                                        .map(|action| (project.path.clone(), action));
-                                // Only one row can be clicked per frame; later rows
-                                // must not clear an action an earlier row just set.
-                                if hit.is_some() {
-                                    action = hit;
-                                }
-                            });
+                            body.row(
+                                if project.stack == Stack::Unity {
+                                    76.0
+                                } else {
+                                    ROW_H
+                                },
+                                |mut row| {
+                                    let hit = project_table_row(
+                                        &mut row, entry, last, running, t, s, span,
+                                    )
+                                    .map(|action| (project.path.clone(), action));
+                                    // Only one row can be clicked per frame; later rows
+                                    // must not clear an action an earlier row just set.
+                                    if hit.is_some() {
+                                        action = hit;
+                                    }
+                                },
+                            );
                         }
                     });
             });
@@ -1571,7 +1643,7 @@ impl DevSweepApp {
             self.sort = key;
         }
         match action {
-            Some((path, RowAction::Panel)) => self.open_panel(&path),
+            Some((path, RowAction::Panel)) => self.open_panel(ui.ctx(), &path),
             Some((path, RowAction::Folder)) => {
                 let _ = opener::open(&path);
             }
@@ -2293,6 +2365,15 @@ fn project_table_row(
             .selectable(false);
             ui.add(path)
                 .on_hover_text(project.path.display().to_string());
+            if project.stack == Stack::Unity {
+                let note = s.unity_note(&scan::unity_version(&project.path));
+                ui.add(
+                    Label::new(RichText::new(&note).size(12.0).color(t.text_muted))
+                        .truncate()
+                        .selectable(false),
+                )
+                .on_hover_text(note);
+            }
         });
         if cleanable
             && open
@@ -2714,6 +2795,37 @@ mod tests {
         assert!(cache_present(&row(None, true)));
     }
 
+    #[test]
+    fn planning_does_not_block_ui_and_late_results_cannot_replace_new_draft() {
+        let ctx = egui::Context::default();
+        let start = Instant::now();
+        let mut panel = Panel {
+            project: PathBuf::new(),
+            plan: empty_plan(),
+            query: None,
+        };
+        panel.replan(&ctx, move || {
+            std::thread::sleep(Duration::from_millis(200));
+            empty_plan()
+        });
+        assert!(start.elapsed() < Duration::from_millis(100));
+        panel.poll();
+        assert!(panel.query.is_some());
+        let mut newer = empty_plan();
+        newer.total_bytes = 42;
+        panel.replan(&ctx, move || newer);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while panel.query.is_some() && Instant::now() < deadline {
+            panel.poll();
+            std::thread::yield_now();
+        }
+        assert_eq!(panel.plan.total_bytes, 42);
+        std::thread::sleep(Duration::from_millis(250));
+        panel.poll();
+        assert_eq!(panel.plan.total_bytes, 42);
+    }
+
     /// The hint must fit the box's inner width, or egui elides it. English is the
     /// longest today.
     #[test]
@@ -2780,12 +2892,96 @@ mod tests {
             last_scan: Instant::now(),
             panel: None,
             pending: None,
+            pending_plan: empty_plan(),
             confirm_large_ack: false,
             execution: None,
             flash: None,
             failures_open: false,
             failures: Vec::new(),
             settings_open: false,
+        }
+    }
+
+    #[test]
+    fn type_filter_displays_unity_and_keeps_existing_types_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let game = root.join("game");
+        std::fs::create_dir_all(game.join("Assets")).unwrap();
+        std::fs::create_dir_all(game.join("ProjectSettings")).unwrap();
+        std::fs::write(
+            game.join("ProjectSettings/ProjectVersion.txt"),
+            "m_EditorVersion: 6000.0.1f1",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("web")).unwrap();
+        std::fs::write(root.join("web/package.json"), "{}").unwrap();
+        let mut app = app_with_rows(0);
+        app.config.roots = vec![root];
+        app.projects
+            .refresh(&app.config.roots, &rules::builtin_rules());
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        for lang in [Lang::Zh, Lang::En] {
+            app.lang = lang;
+            for (filter, game_visible, web_visible) in [
+                (None, true, true),
+                (Some(Stack::Unity), true, false),
+                (Some(Stack::Node), false, true),
+            ] {
+                app.filter = filter;
+                let mut text = String::new();
+                for _ in 0..2 {
+                    let mut output = ctx.run_ui(raw_input(Vec::new()), |ui| {
+                        let t = theme::tokens(egui::Theme::Dark);
+                        let s = app.strings();
+                        egui::Panel::left("filters")
+                            .exact_size(200.0)
+                            .show(ui, |ui| app.sidebar(ui, t, s));
+                        egui::CentralPanel::default().show(ui, |ui| {
+                            app.content(ui, t, s, &app.visible());
+                        });
+                    });
+                    fn collect(shape: &egui::Shape, text: &mut String) {
+                        match shape {
+                            egui::Shape::Text(shape) => {
+                                text.push_str(&shape.galley.job.text);
+                                text.push('\n');
+                            }
+                            egui::Shape::Vec(shapes) => {
+                                for shape in shapes {
+                                    collect(shape, text);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    text.clear();
+                    for clipped in &output.shapes {
+                        collect(&clipped.shape, &mut text);
+                    }
+                    output.textures_delta.clear();
+                }
+                assert!(text.contains("Unity  1"), "{text}");
+                assert_eq!(
+                    text.lines().any(|line| line == "game"),
+                    game_visible,
+                    "{text}"
+                );
+                assert_eq!(
+                    text.lines().any(|line| line == "web"),
+                    web_visible,
+                    "{text}"
+                );
+                if game_visible {
+                    assert!(
+                        text.contains("6000.0.1f1")
+                            || text.contains("只读")
+                            || text.contains("read-only"),
+                        "{text}"
+                    );
+                }
+            }
         }
     }
 

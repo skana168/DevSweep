@@ -7,6 +7,7 @@ use walkdir::{DirEntry, WalkDir};
 /// Marker priority when several markers land in one directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stack {
+    Unity,
     Flutter,
     Android,
     Ios,
@@ -22,6 +23,55 @@ pub struct Project {
     pub path: PathBuf,
     pub name: String,
     pub stack: Stack,
+}
+
+/// Version qualification is independent of the Editor process and path checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnityVersion {
+    Supported(String),
+    Unsupported(String),
+    Invalid,
+    Unknown,
+}
+
+pub fn unity_version(path: &Path) -> UnityVersion {
+    let Ok(text) = fs::read_to_string(path.join("ProjectSettings/ProjectVersion.txt")) else {
+        return UnityVersion::Unknown;
+    };
+    let mut versions = text
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("m_EditorVersion:"));
+    let Some(version) = versions.next().map(str::trim) else {
+        return UnityVersion::Unknown;
+    };
+    if versions.next().is_some() {
+        return UnityVersion::Invalid;
+    }
+    let mut parts = version.split('.');
+    let number = |value: &str| {
+        (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| value.parse::<u32>().ok())
+            .flatten()
+    };
+    let parsed = (|| {
+        let major = number(parts.next()?)?;
+        let minor = number(parts.next()?)?;
+        let release = parts.next()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        let channel = release.find(['a', 'b', 'f', 'p'])?;
+        number(&release[..channel])?;
+        number(&release[channel + 1..])?;
+        Some((major, minor))
+    })();
+    match parsed {
+        Some(version_number) if version_number >= (2022, 3) => {
+            UnityVersion::Supported(version.into())
+        }
+        Some(_) => UnityVersion::Unsupported(version.into()),
+        None => UnityVersion::Invalid,
+    }
 }
 
 const MAX_DEPTH: usize = 5;
@@ -86,7 +136,10 @@ pub fn merge_scan(projects: &mut Vec<Project>, found: Vec<Project>) {
     }
 
     let project_paths: HashSet<PathBuf> = projects.iter().map(|p| p.path.clone()).collect();
-    projects.retain(|project| !is_platform_subdir(&project.path, &project_paths));
+    projects.retain(|project| {
+        !is_platform_subdir(&project.path, &project_paths)
+            && !project.path.parent().is_some_and(inside_unity)
+    });
 
     projects.sort_by(|a, b| {
         a.name
@@ -107,7 +160,9 @@ fn scan_root(root: &Path) -> Vec<Project> {
         .max_depth(MAX_DEPTH)
         .into_iter()
         .filter_entry(|entry| {
-            !is_virtualenv(entry.path()) && (entry.depth() == 0 || !is_pruned(entry))
+            !is_virtualenv(entry.path())
+                && (entry.depth() == 0 || !is_pruned(entry))
+                && !entry.path().parent().is_some_and(inside_unity)
         });
 
     for entry in walker.filter_map(Result::ok) {
@@ -153,7 +208,21 @@ pub(crate) fn is_platform_subdir(path: &Path, registered: &HashSet<PathBuf>) -> 
     false
 }
 
+pub(crate) fn is_unity(path: &Path) -> bool {
+    path.join("Assets").is_dir()
+        && path.join("ProjectSettings").is_dir()
+        && path.join("ProjectSettings/ProjectVersion.txt").is_file()
+}
+
+pub(crate) fn inside_unity(path: &Path) -> bool {
+    let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    path.ancestors().any(is_unity)
+}
+
 pub(crate) fn detect_stack(path: &Path) -> Option<Stack> {
+    if is_unity(path) {
+        return Some(Stack::Unity);
+    }
     let names = fs::read_dir(path)
         .ok()?
         .filter_map(Result::ok)

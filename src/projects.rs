@@ -69,13 +69,15 @@ impl ProjectRefresh {
         let mut targets: HashMap<_, _> = self
             .entries
             .drain(..)
-            .map(|entry| (entry.project.path, entry.targets))
+            .map(|entry| (entry.project.path, (entry.project.stack, entry.targets)))
             .collect();
         self.entries = projects
             .into_iter()
             .map(|project| {
                 let targets = targets
                     .remove(&project.path)
+                    .filter(|(stack, _)| *stack == project.stack)
+                    .map(|(_, targets)| targets)
                     .unwrap_or_else(|| rules::expand_targets(&project, rules));
                 ProjectEntry { project, targets }
             })

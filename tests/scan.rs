@@ -549,7 +549,7 @@ fn dotnet_discovery_preserves_existing_stack_priority_and_groups_project_markers
     fs::create_dir_all(unity.join("Assets")).unwrap();
     let projects = scan(&[unity]);
     assert_eq!(projects.len(), 1);
-    assert_eq!(projects[0].stack, Stack::Dotnet);
+    assert_eq!(projects[0].stack, Stack::Unity);
 }
 
 #[test]
@@ -576,4 +576,63 @@ fn dotnet_discovery_keeps_depth_platform_and_merge_boundaries() {
     merge_scan(&mut projects, scan(&[root.to_path_buf()]));
     merge_scan(&mut projects, scan(&[root.join("app")]));
     assert_eq!(projects, expected);
+}
+
+#[test]
+fn unity_owns_its_tree_even_without_generated_projects_and_across_roots() {
+    let dir = tempfile::tempdir().unwrap();
+    let unity = dir.path().join("game");
+    write(&unity.join("ProjectSettings/ProjectVersion.txt"));
+    fs::create_dir_all(unity.join("Assets")).unwrap();
+    write(&unity.join("Packages/tool/package.json"));
+    let projects = scan(&[unity.join("Packages/tool"), unity.clone()]);
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].stack, Stack::Unity);
+    for marker in [
+        "pubspec.yaml",
+        "App.xcodeproj/project.pbxproj",
+        "build.gradle",
+        "pom.xml",
+        "package.json",
+        "pyproject.toml",
+        "Cargo.toml",
+        "App.csproj",
+    ] {
+        write(&unity.join(marker));
+    }
+    assert_eq!(scan(std::slice::from_ref(&unity)), projects);
+    fs::remove_dir_all(unity.join("Assets")).unwrap();
+    assert_ne!(scan(&[unity])[0].stack, Stack::Unity);
+}
+
+#[test]
+fn unity_requires_each_marker_with_the_right_filesystem_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for missing in [
+        "Assets",
+        "ProjectSettings",
+        "ProjectSettings/ProjectVersion.txt",
+    ] {
+        let game = root.join(missing.replace('/', "-"));
+        if missing != "Assets" {
+            fs::create_dir_all(game.join("Assets")).unwrap();
+        }
+        if missing != "ProjectSettings" {
+            fs::create_dir_all(game.join("ProjectSettings")).unwrap();
+        }
+        if missing != "ProjectSettings" && missing != "ProjectSettings/ProjectVersion.txt" {
+            write(&game.join("ProjectSettings/ProjectVersion.txt"));
+        }
+        assert!(scan(&[game]).is_empty(), "missing {missing}");
+    }
+    let game = root.join("wrong-kind");
+    write(&game.join("Assets"));
+    write(&game.join("ProjectSettings/ProjectVersion.txt"));
+    assert!(scan(std::slice::from_ref(&game)).is_empty());
+    fs::remove_file(game.join("Assets")).unwrap();
+    fs::create_dir(game.join("Assets")).unwrap();
+    fs::remove_file(game.join("ProjectSettings/ProjectVersion.txt")).unwrap();
+    fs::create_dir(game.join("ProjectSettings/ProjectVersion.txt")).unwrap();
+    assert!(scan(&[game]).is_empty());
 }

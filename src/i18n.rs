@@ -89,6 +89,16 @@ pub struct Strings {
     pub stack_node: &'static str,
     pub stack_python: &'static str,
     pub stack_rust: &'static str,
+    pub unity_supported: &'static str,
+    pub unity_unsupported: &'static str,
+    pub unity_invalid: &'static str,
+    pub unity_unknown: &'static str,
+    pub unity_guard: &'static str,
+    pub unity_notice: &'static str,
+    pub unity_busy: &'static str,
+    pub unity_process_unknown: &'static str,
+    pub unity_path: &'static str,
+    pub unity_version_block: &'static str,
     pub stack_dotnet: &'static str,
     pub dotnet_clean_note: &'static str,
     pub global_caches: &'static str,
@@ -147,6 +157,27 @@ pub struct Strings {
 }
 
 impl Strings {
+    pub fn unity_block(&self, reason: devsweep::unity::BlockReason) -> &'static str {
+        use devsweep::unity::BlockReason;
+        match reason {
+            BlockReason::Version => self.unity_version_block,
+            BlockReason::Busy => self.unity_busy,
+            BlockReason::Unknown => self.unity_process_unknown,
+            BlockReason::Path => self.unity_path,
+        }
+    }
+
+    pub fn unity_note(&self, version: &devsweep::scan::UnityVersion) -> String {
+        use devsweep::scan::UnityVersion;
+        let qualification = match version {
+            UnityVersion::Supported(version) => format!("{version}: {}", self.unity_supported),
+            UnityVersion::Unsupported(version) => format!("{version}: {}", self.unity_unsupported),
+            UnityVersion::Invalid => self.unity_invalid.to_string(),
+            UnityVersion::Unknown => self.unity_unknown.to_string(),
+        };
+        format!("{} {qualification}", self.unity_guard)
+    }
+
     pub fn go_cache_error(&self, error: GoCacheError) -> &'static str {
         match error {
             GoCacheError::Changed => self.go_cache_changed,
@@ -174,6 +205,7 @@ impl Strings {
             Stack::Python => self.stack_python,
             Stack::Rust => self.stack_rust,
             Stack::Dotnet => self.stack_dotnet,
+            Stack::Unity => "Unity",
         }
     }
 
@@ -186,6 +218,7 @@ impl Strings {
 
     pub fn skip_reason(&self, reason: SkipReason) -> &'static str {
         match reason {
+            SkipReason::UnityBlocked(reason) => self.unity_block(reason),
             SkipReason::OutsideProject => self.skip_outside_project,
             SkipReason::ProjectRoot => self.skip_project_root,
             SkipReason::Home => self.skip_home,
@@ -200,6 +233,7 @@ impl Strings {
 
     pub fn failure_reason(&self, reason: FailureReason) -> &'static str {
         match reason {
+            FailureReason::UnityBlocked(reason) => self.unity_block(reason),
             FailureReason::PermissionDenied => self.fail_permission,
             FailureReason::InUse => self.fail_in_use,
             FailureReason::Missing => self.fail_missing,
@@ -260,6 +294,16 @@ static ZH: Strings = Strings {
     stack_node: "Node",
     stack_python: "Python",
     stack_rust: "Rust",
+    unity_supported: "符合 Unity 2022.3+ 版本范围。",
+    unity_unsupported: "低于支持下限 Unity 2022.3；这不表示所有早期版本都不安全。",
+    unity_invalid: "版本信息损坏，无法确认是否符合 Unity 2022.3+ 范围。",
+    unity_unknown: "版本未知，无法确认是否符合 Unity 2022.3+ 范围。",
+    unity_guard: "清理前需关闭所有 Unity Editor（含 batch mode）；状态未知时禁止清理。",
+    unity_notice: "Library 将在下次打开时重新导入资源，可能耗时较长。清理期间不要启动 Editor；预检不是跨进程锁，检查后启动仍存在竞态。移入废纸篓后需自行清空才能释放空间。进程保护尚待 macOS/Windows 真实 Editor 验收。",
+    unity_busy: "检测到 Unity Editor；请关闭所有 Editor（含 batch mode）后重试。",
+    unity_process_unknown: "无法枚举进程或确认 Unity Editor 身份；为保护项目，禁止清理。",
+    unity_path: "Unity 仅允许项目根下真实的 Library、Temp 目录；路径验证失败。",
+    unity_version_block: "无法确认符合 Unity 2022.3+ 支持范围，禁止清理。",
     stack_dotnet: ".NET",
     dotnet_clean_note: "将删除所选 bin/obj 整个目录，包括手工放入的内容。请先停止构建。",
     global_caches: "全局缓存",
@@ -369,6 +413,16 @@ static EN: Strings = Strings {
     stack_node: "Node",
     stack_python: "Python",
     stack_rust: "Rust",
+    unity_supported: "meets the Unity 2022.3+ version range.",
+    unity_unsupported: "below the Unity 2022.3 support floor; this does not mean all earlier versions are unsafe.",
+    unity_invalid: "Malformed version; cannot confirm the Unity 2022.3+ version range.",
+    unity_unknown: "Unknown version; cannot confirm the Unity 2022.3+ version range.",
+    unity_guard: "Close all Unity Editors (including batch mode) before cleaning; unknown process state blocks cleanup.",
+    unity_notice: "Library requires resource reimport next time the project opens, which may take a long time. Do not start an Editor during cleanup: preflight is not a cross-process lock and cannot prevent a later start. Empty Trash yourself to release space. Process protection still awaits real Editor acceptance on macOS/Windows.",
+    unity_busy: "Unity Editor detected. Close all Editors (including batch mode) and retry.",
+    unity_process_unknown: "Cannot enumerate processes or identify a possible Unity Editor; cleanup is blocked to protect the project.",
+    unity_path: "Unity allows only real Library and Temp directories at the project root; path validation failed.",
+    unity_version_block: "Cannot confirm the Unity 2022.3+ support range; cleanup is blocked.",
     stack_dotnet: ".NET",
     dotnet_clean_note: "Deletes each selected bin/obj directory in full, including files you added. Stop builds first.",
     global_caches: "Global caches",
@@ -425,3 +479,43 @@ static EN: Strings = Strings {
     root_covered: "Covered by a parent root",
     root_duplicate: "This directory is already listed",
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use devsweep::scan::UnityVersion;
+
+    #[test]
+    fn unity_messages_explain_guards_and_version_qualification_in_both_languages() {
+        let zh = Lang::Zh.strings();
+        let en = Lang::En.strings();
+        assert!(zh.unity_notice.contains("废纸篓"));
+        assert!(en.unity_notice.contains("Trash"));
+        for reason in [
+            devsweep::unity::BlockReason::Busy,
+            devsweep::unity::BlockReason::Unknown,
+            devsweep::unity::BlockReason::Version,
+            devsweep::unity::BlockReason::Path,
+        ] {
+            assert_ne!(zh.unity_block(reason), en.unity_block(reason));
+        }
+        assert_eq!(zh.stack(Stack::Unity), "Unity");
+        assert_eq!(en.stack(Stack::Unity), "Unity");
+        for (strings, guard, supported, unsupported, invalid, unknown) in [
+            (zh, "Editor", "符合", "低于", "损坏", "未知"),
+            (en, "Editor", "meets", "below", "Malformed", "Unknown"),
+        ] {
+            for (version, expected) in [
+                (UnityVersion::Supported("6000.0.1f1".into()), supported),
+                (UnityVersion::Unsupported("2021.3.0f1".into()), unsupported),
+                (UnityVersion::Invalid, invalid),
+                (UnityVersion::Unknown, unknown),
+            ] {
+                let note = strings.unity_note(&version);
+                assert!(note.contains(guard), "{note}");
+                assert!(note.contains(expected), "{note}");
+                assert!(note.contains("2022.3"), "{note}");
+            }
+        }
+    }
+}

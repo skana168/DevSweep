@@ -25,12 +25,20 @@ pub struct Rule {
 
 impl Rule {
     fn applies_to(&self, stack: Stack) -> bool {
-        self.stack.is_none_or(|required| required == stack)
+        if stack == Stack::Unity {
+            matches!(
+                (self.id.as_str(), self.rel.as_str()),
+                ("unity.library", "Library") | ("unity.temp", "Temp")
+            ) && self.stack == Some(Stack::Unity)
+        } else {
+            self.stack.is_none_or(|required| required == stack)
+        }
     }
 
     /// Recheck Rule-specific eligibility at discovery and immediately before planning.
     pub(crate) fn accepts(&self, root: &Path, stack: Stack, path: &Path) -> bool {
         self.applies_to(stack)
+            && (stack != Stack::Unity || crate::unity::valid_target(root, path))
             && path.strip_prefix(root).is_ok_and(|rel| {
                 if is_recursive_cache_rule(self) {
                     valid_recursive_cache(root, path)
@@ -68,6 +76,8 @@ fn rule(id: &str, stack: Option<Stack>, rel: &str, default_checked: bool, danger
 /// The built-in table. `id`s are stable once released: users' `rules.toml` refers to them.
 pub fn builtin_rules() -> Vec<Rule> {
     vec![
+        rule("unity.library", Some(Stack::Unity), "Library", false, true),
+        rule("unity.temp", Some(Stack::Unity), "Temp", true, false),
         rule("flutter.build", Some(Stack::Flutter), "build", true, false),
         rule(
             "flutter.dart_tool",
@@ -356,6 +366,7 @@ fn parse_stack(stack: &str) -> Option<Option<Stack>> {
         "python" => Some(Some(Stack::Python)),
         "rust" => Some(Some(Stack::Rust)),
         "dotnet" => Some(Some(Stack::Dotnet)),
+        "unity" => Some(Some(Stack::Unity)),
         _ => None,
     }
 }
@@ -371,6 +382,11 @@ fn is_plain_rel(rel: &str) -> bool {
 /// Resolve the rules that apply to `project` into existing paths.
 pub fn expand_targets(project: &Project, rules: &[Rule]) -> Vec<Target> {
     let mut targets = Vec::new();
+    if crate::scan::inside_unity(&project.path)
+        && (project.stack != Stack::Unity || !crate::scan::is_unity(&project.path))
+    {
+        return targets;
+    }
     for rule in rules {
         if !rule.applies_to(project.stack) {
             continue;
@@ -396,7 +412,7 @@ pub fn expand_targets(project: &Project, rules: &[Rule]) -> Vec<Target> {
                 size: None,
                 checked: rule.default_checked,
                 default_checked: rule.default_checked,
-                dangerous: rule.dangerous,
+                dangerous: rule.dangerous || rule.id == "unity.library",
                 label: rule.label.clone(),
             });
         }
