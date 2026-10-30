@@ -310,6 +310,8 @@ fn visuals(theme: Theme, t: &Tokens) -> Visuals {
         w.fg_stroke = Stroke::new(1.0, fg);
         w.expansion = 0.0;
     }
+    // Panel separators sit outside their frame fill, so precompose the translucent border.
+    v.widgets.noninteractive.bg_stroke.color = t.surface.blend(t.border);
     v
 }
 
@@ -353,6 +355,37 @@ pub fn install(ctx: &Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn panel_separator_matches_a_hairline_on_the_surface() {
+        for theme in [Theme::Dark, Theme::Light] {
+            let ctx = Context::default();
+            install(&ctx);
+            ctx.set_theme(theme);
+            let t = tokens(theme);
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                egui::Panel::left("scan_roots")
+                    .exact_size(220.0)
+                    .resizable(false)
+                    .frame(egui::Frame::new().fill(t.surface).inner_margin(16))
+                    .show(ui, |_| {});
+            });
+            output.textures_delta.clear();
+            let strokes: Vec<_> = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::LineSegment { stroke, .. } => Some(*stroke),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                strokes,
+                vec![Stroke::new(1.0, t.surface.blend(t.border))],
+                "{theme:?}"
+            );
+        }
+    }
 
     /// Every family ends at the Chinese face, and that face really has every hanzi the UI can
     /// show: the default language is Chinese, the Latin faces carry none of it, and the bundled
