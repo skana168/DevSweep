@@ -260,6 +260,10 @@ fn install_fonts(ctx: &Context) {
         icon_name.clone(),
         Arc::new(FontData::from_owned(icon_font.font.as_ref().to_vec())),
     );
+    // Mixed text/icon buttons keep their text face and fall back to Rounded for icons.
+    for stack in fonts.families.values_mut() {
+        stack.push(icon_name.clone());
+    }
     fonts
         .families
         .insert(FontFamily::Name(icon_name.clone().into()), vec![icon_name]);
@@ -401,7 +405,7 @@ mod tests {
     /// show: the default language is Chinese, the Latin faces carry none of it, and the bundled
     /// face is a GB2312 subset rather than the full font.
     #[test]
-    fn every_family_can_draw_the_ui_chinese() {
+    fn every_family_can_draw_the_ui_chinese_and_icons() {
         let ctx = Context::default();
         install(&ctx);
         let mut output = ctx.run_ui(egui::RawInput::default(), |_| {});
@@ -412,6 +416,27 @@ mod tests {
             .filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c))
             .collect();
         assert!(hanzi.chars().count() > 100, "the fixture lost its Chinese");
+        let icons: String = [
+            egui_icons::icons::ICON_ADD,
+            egui_icons::icons::ICON_CLOSE,
+            egui_icons::icons::ICON_ARROW_UPWARD,
+            egui_icons::icons::ICON_ARROW_DOWNWARD,
+            egui_icons::icons::ICON_MORE_HORIZ,
+            egui_icons::icons::ICON_SETTINGS,
+            egui_icons::icons::ICON_REMOVE,
+            egui_icons::icons::ICON_CROP_SQUARE,
+            egui_icons::icons::ICON_FILTER_NONE,
+            egui_icons::icons::ICON_REFRESH,
+        ]
+        .iter()
+        .map(|icon| icon.codepoint)
+        .collect();
+        ctx.fonts_mut(|fonts| {
+            assert!(fonts.has_glyphs(
+                &FontId::new(18.0, FontFamily::Name(egui_icons::FONT_FAMILY.into())),
+                &icons,
+            ));
+        });
         for family in [
             FontFamily::Proportional,
             FontFamily::Monospace,
@@ -422,8 +447,9 @@ mod tests {
         ] {
             ctx.fonts_mut(|fonts| {
                 assert!(
-                    fonts.has_glyphs(&FontId::new(14.0, family.clone()), &hanzi),
-                    "{family:?} cannot draw the UI's Chinese"
+                    fonts.has_glyphs(&FontId::new(14.0, family.clone()), &hanzi)
+                        && fonts.has_glyphs(&FontId::new(14.0, family.clone()), &icons),
+                    "{family:?} cannot draw the UI's Chinese or icons"
                 );
             });
         }
