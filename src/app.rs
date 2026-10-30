@@ -1280,7 +1280,10 @@ impl DevSweepApp {
                 } else {
                     None
                 };
-                if refresh_icon(ui, t, s.refresh_projects, reason) {
+                let refreshing = self.project_scan.is_some()
+                    || self.measurement.is_some()
+                    || self.go_query.is_some();
+                if refresh_icon(ui, t, s.refresh_projects, reason, refreshing) {
                     self.refresh_projects(ui.ctx());
                 }
             });
@@ -2235,7 +2238,13 @@ fn settings_icon(ui: &mut Ui, t: &Tokens, label: &str, active: bool) -> bool {
 }
 
 /// A themed vector refresh button with the same square icon treatment as row actions.
-fn refresh_icon(ui: &mut Ui, t: &Tokens, label: &str, reason: Option<&str>) -> bool {
+fn refresh_icon(
+    ui: &mut Ui,
+    t: &Tokens,
+    label: &str,
+    reason: Option<&str>,
+    refreshing: bool,
+) -> bool {
     let response = ui
         .add_enabled_ui(reason.is_none(), |ui| {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::hover());
@@ -2245,16 +2254,29 @@ fn refresh_icon(ui: &mut Ui, t: &Tokens, label: &str, reason: Option<&str>) -> b
             let p = ui.painter();
             p.rect(rect, CornerRadius::ZERO, fill, border, StrokeKind::Inside);
             let c = rect.center();
+            let angle = if refreshing {
+                ui.ctx().request_repaint_after(Duration::from_millis(16));
+                ui.input(|input| (input.time % 1.0) as f32) * std::f32::consts::TAU
+            } else {
+                0.0
+            };
+            let rotation = egui::emath::Rot2::from_angle(angle);
             let points: Vec<_> = (0..=24)
                 .map(|i| {
                     let angle = std::f32::consts::TAU * (0.12 + 0.76 * i as f32 / 24.0);
-                    c + egui::vec2(angle.cos(), angle.sin()) * 6.0
+                    c + rotation * egui::vec2(angle.cos(), angle.sin()) * 6.0
                 })
                 .collect();
             let end = *points.last().unwrap();
             p.add(egui::Shape::line(points, Stroke::new(1.5, ink)));
-            p.line_segment([end + egui::vec2(-3.5, -1.0), end], Stroke::new(1.5, ink));
-            p.line_segment([end + egui::vec2(-0.5, 3.5), end], Stroke::new(1.5, ink));
+            p.line_segment(
+                [end + rotation * egui::vec2(-3.5, -1.0), end],
+                Stroke::new(1.5, ink),
+            );
+            p.line_segment(
+                [end + rotation * egui::vec2(-0.5, 3.5), end],
+                Stroke::new(1.5, ink),
+            );
             response.widget_info(|| {
                 egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label)
             });
@@ -3382,6 +3404,75 @@ mod tests {
                 assert_eq!(app.go_query.is_some(), state == 2);
                 assert_eq!(app.measurement.is_some(), state == 1);
             }
+        }
+    }
+
+    #[test]
+    fn refresh_icon_rotates_only_while_discovering_or_measuring() {
+        fn arc(shape: &egui::Shape) -> Option<Vec<egui::Pos2>> {
+            match shape {
+                egui::Shape::Path(path) if path.points.len() == 25 => Some(path.points.clone()),
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(arc),
+                _ => None,
+            }
+        }
+        for state in 0..4 {
+            let mut app = app_with_rows(0);
+            let (scan_tx, scan_rx) = std::sync::mpsc::channel();
+            let (size_tx, size_rx) = std::sync::mpsc::channel();
+            let (go_tx, go_rx) = std::sync::mpsc::channel();
+            match state {
+                1 => app.project_scan = Some(scan_rx),
+                2 => {
+                    app.measurement = Some(Measurement {
+                        shown: false,
+                        done: 0,
+                        total: 1,
+                        rx: size_rx,
+                    })
+                }
+                3 => app.go_query = Some(go_rx),
+                _ => {}
+            }
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            let mut points = Vec::new();
+            for time in [0.0, 0.25] {
+                let mut input = raw_input(vec![]);
+                input.time = Some(time);
+                let output = sidebar_frame(&mut app, &ctx, input);
+                points.push(
+                    output
+                        .shapes
+                        .iter()
+                        .find_map(|shape| arc(&shape.shape))
+                        .unwrap(),
+                );
+            }
+            assert_eq!(points[0] != points[1], state != 0, "state {state}");
+            app.project_scan = None;
+            app.measurement = None;
+            app.go_query = None;
+            let mut input = raw_input(vec![]);
+            input.time = Some(0.5);
+            let output = sidebar_frame(&mut app, &ctx, input);
+            let stopped = output
+                .shapes
+                .iter()
+                .find_map(|shape| arc(&shape.shape))
+                .unwrap();
+            let mut input = raw_input(vec![]);
+            input.time = Some(0.75);
+            let output = sidebar_frame(&mut app, &ctx, input);
+            assert_eq!(
+                stopped,
+                output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| arc(&shape.shape))
+                    .unwrap()
+            );
+            drop((scan_tx, size_tx, go_tx));
         }
     }
 
