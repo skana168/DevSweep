@@ -176,6 +176,7 @@ fn reset_draft(targets: &mut [Target]) {
 }
 
 struct Measurement {
+    shown: bool,
     done: usize,
     total: usize,
     rx: Receiver<SizeEvent>,
@@ -468,7 +469,12 @@ impl DevSweepApp {
         let total = requests.len();
         let (tx, rx) = std::sync::mpsc::channel();
         size::measure(requests, tx);
-        self.measurement = Some(Measurement { done: 0, total, rx });
+        self.measurement = Some(Measurement {
+            shown: false,
+            done: 0,
+            total,
+            rx,
+        });
         ctx.request_repaint();
     }
 
@@ -476,6 +482,11 @@ impl DevSweepApp {
         let Some(measurement) = &mut self.measurement else {
             return;
         };
+        // A fast worker can finish between the sidebar click and the first status-bar paint.
+        if !measurement.shown {
+            ctx.request_repaint();
+            return;
+        }
         let mut changed = false;
         let mut finished = false;
 
@@ -1854,7 +1865,8 @@ impl eframe::App for DevSweepApp {
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if let Some(measurement) = &self.measurement {
+                    if let Some(measurement) = &mut self.measurement {
+                        measurement.shown = true;
                         ui.label(
                             RichText::new(format!(
                                 "{} {}/{}",
@@ -3073,6 +3085,61 @@ mod tests {
     }
 
     #[test]
+    fn fast_sidebar_refresh_shows_size_progress_before_completed_work_is_cleared() {
+        fn frame(
+            app: &mut DevSweepApp,
+            ctx: &egui::Context,
+            input: egui::RawInput,
+        ) -> egui::FullOutput {
+            let mut output = ctx.run_ui(input, |ui| {
+                eframe::App::ui(app, ui, &mut eframe::Frame::_new_kittest());
+            });
+            output.textures_delta.clear();
+            output
+        }
+        fn has_text(shape: &egui::Shape, text: &str) -> bool {
+            match shape {
+                egui::Shape::Text(shape) => shape.galley.job.text.contains(text),
+                egui::Shape::Vec(shapes) => shapes.iter().any(|shape| has_text(shape, text)),
+                _ => false,
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("new/node_modules")).unwrap();
+        std::fs::write(root.join("new/package.json"), "{}").unwrap();
+        let mut app = app_with_rows(0);
+        app.config.roots = vec![root];
+        app.rules = rules::builtin_rules();
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        frame(&mut app, &ctx, raw_input(vec![]));
+        let rect = ctx
+            .read_response(egui::Id::unique("sidebar-refresh"))
+            .unwrap()
+            .rect;
+        frame(&mut app, &ctx, input(rect.center(), true));
+        frame(&mut app, &ctx, input(rect.center(), false));
+
+        // Replay the real worker's result as already complete before the next frame.
+        let event = app.measurement.as_ref().unwrap().rx.recv().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(event).unwrap();
+        drop(tx);
+        app.measurement.as_mut().unwrap().rx = rx;
+        app.poll_measurement(&ctx);
+        let output = frame(&mut app, &ctx, raw_input(vec![]));
+        assert!(
+            output
+                .shapes
+                .iter()
+                .any(|shape| has_text(&shape.shape, "Measuring sizes 0/1"))
+        );
+        app.poll_measurement(&ctx);
+        assert!(app.measurement.is_none());
+    }
+
+    #[test]
     fn sidebar_refresh_disabled_states_explain_why_in_both_languages_and_ignore_clicks() {
         for lang in [Lang::Zh, Lang::En] {
             for state in 0..8 {
@@ -3092,6 +3159,7 @@ mod tests {
                     }
                     1 => {
                         app.measurement = Some(Measurement {
+                            shown: false,
                             done: 0,
                             total: 1,
                             rx: size_rx,
