@@ -250,18 +250,21 @@ impl DevSweepApp {
             return;
         };
         let path = std::fs::canonicalize(&path).unwrap_or(path);
+        self.add_root(path, ctx);
+        self.persist();
+    }
+
+    fn add_root(&mut self, path: PathBuf, ctx: &egui::Context) {
         if self.config.roots.contains(&path) {
             self.root_notice = Some(self.strings().root_duplicate);
             return;
         }
-        self.refresh.scan = None;
-        // Only the new subtree is walked; existing projects keep their sizes.
-        self.projects.add_root(&path, &self.rules);
+        self.refresh
+            .root_added(&path, &self.rules, &mut RefreshWorker(ctx.clone()));
         self.config.roots.push(path);
         self.root_notice = None;
         self.refresh_go_caches(ctx);
         self.measure_missing(ctx);
-        self.persist();
         self.last_scan = Instant::now();
     }
 
@@ -1377,6 +1380,7 @@ impl DevSweepApp {
         }
         if let Some(index) = remove {
             self.remove_root(index, ui.ctx());
+            self.persist();
         }
 
         ui.add_space(8.0);
@@ -1405,13 +1409,16 @@ impl DevSweepApp {
     }
 
     fn remove_root(&mut self, index: usize, ctx: &egui::Context) {
-        self.refresh.scan = None;
         self.config.roots.remove(index);
         self.root_notice = None;
-        self.projects.remove_root(&self.config.roots, &self.rules);
+        self.refresh.roots_removed(
+            &mut self.projects,
+            &self.config.roots,
+            &self.rules,
+            &mut RefreshWorker(ctx.clone()),
+        );
         self.refresh_go_caches(ctx);
         self.measure_missing(ctx);
-        self.persist();
         self.last_scan = Instant::now();
     }
 
@@ -3085,6 +3092,29 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn root_edits_apply_scope_before_background_discovery_is_consumed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("node_modules")).unwrap();
+        std::fs::write(root.join("package.json"), "{}").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app_with_rows(0);
+        app.rules = rules::builtin_rules();
+        app.config.roots.clear();
+        app.add_root(root.clone(), &ctx);
+        assert_eq!(app.config.roots, vec![root.clone()]);
+        assert!(app.projects.entries().is_empty());
+        assert!(app.refresh.scan.is_some());
+        finish_project_scan(&mut app, &ctx);
+        assert!(app.projects.entry(&root).is_some());
+        app.remove_root(0, &ctx);
+        assert!(app.projects.entries().is_empty());
+        assert!(app.refresh.scan.is_some());
+        finish_project_scan(&mut app, &ctx);
+        assert!(app.projects.entries().is_empty());
     }
 
     #[test]

@@ -13,15 +13,17 @@ use std::{
 struct Controlled {
     discoveries: Vec<Sender<ProjectRefresh>>,
     measurements: Vec<Sender<SizeEvent>>,
+    roots: Vec<Vec<PathBuf>>,
 }
 impl RefreshExecutor for Controlled {
     fn discover(
         &mut self,
         _: ProjectRefresh,
-        _: Vec<PathBuf>,
+        roots: Vec<PathBuf>,
         _: Vec<Rule>,
     ) -> Receiver<ProjectRefresh> {
         let (tx, rx) = mpsc::channel();
+        self.roots.push(roots);
         self.discoveries.push(tx);
         rx
     }
@@ -230,4 +232,106 @@ fn queued_measurements_skip_targets_that_became_known() {
     refresh.poll_discovery(&mut projects, &[root], &rules, &mut executor);
     assert!(refresh.measurement.is_none());
     assert!(executor.measurements.is_empty());
+}
+
+#[test]
+fn root_edits_reject_old_discovery_and_restore_retained_child_in_background() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let child = root.join("android");
+    std::fs::create_dir_all(child.join("build")).unwrap();
+    std::fs::create_dir_all(root.join("build")).unwrap();
+    std::fs::write(root.join("pubspec.yaml"), "").unwrap();
+    std::fs::write(child.join("build.gradle"), "").unwrap();
+    let rules = devsweep::rules::builtin_rules();
+    let mut projects = ProjectRefresh::default();
+    projects.refresh(std::slice::from_ref(&root), &rules);
+    let old = projects.clone();
+    let mut refresh = Refresh::default();
+    let mut executor = Controlled::default();
+    refresh.measure(projects.measurement_requests(), &mut executor);
+    // Root edits supersede discovery even while an earlier measurement is alive.
+    refresh.roots_removed(
+        &mut projects,
+        std::slice::from_ref(&root),
+        &rules,
+        &mut executor,
+    );
+    refresh.roots_removed(
+        &mut projects,
+        std::slice::from_ref(&child),
+        &rules,
+        &mut executor,
+    );
+    assert!(
+        projects.entries().is_empty(),
+        "removed ownership changes immediately"
+    );
+    executor.measurements[0]
+        .send(SizeEvent {
+            project: root.clone(),
+            sizes: vec![(root.join("build"), 99)],
+        })
+        .unwrap();
+    executor.measurements.clear();
+    refresh.present_progress();
+    refresh.poll_measurement(&mut projects);
+    assert!(
+        projects.entries().is_empty(),
+        "late sizes cannot restore a removed Project"
+    );
+    let _ = executor.discoveries[0].send(old);
+    refresh.poll_discovery(
+        &mut projects,
+        std::slice::from_ref(&child),
+        &rules,
+        &mut executor,
+    );
+    assert!(projects.entries().is_empty());
+    let mut found = ProjectRefresh::default();
+    found.refresh(std::slice::from_ref(&child), &rules);
+    executor.discoveries[1].send(found).unwrap();
+    refresh.poll_discovery(
+        &mut projects,
+        std::slice::from_ref(&child),
+        &rules,
+        &mut executor,
+    );
+    assert_eq!(projects.entries().len(), 1);
+    assert!(projects.entry(&child).is_some());
+}
+
+#[test]
+fn repeated_additions_scan_only_new_subtrees_and_merge_latest_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let a = root.join("a");
+    let b = root.join("b");
+    let c = root.join("c");
+    for path in [&a, &b, &c] {
+        std::fs::create_dir_all(path.join("node_modules")).unwrap();
+        std::fs::write(path.join("package.json"), "{}").unwrap();
+    }
+    let rules = devsweep::rules::builtin_rules();
+    let mut projects = ProjectRefresh::default();
+    projects.refresh(std::slice::from_ref(&a), &rules);
+    projects.targets_mut(&a).unwrap()[0].size = Some(41);
+    let mut refresh = Refresh::default();
+    let mut executor = Controlled::default();
+    refresh.root_added(&b, &rules, &mut executor);
+    refresh.root_added(&c, &rules, &mut executor);
+    assert_eq!(
+        executor.roots,
+        vec![vec![b.clone()], vec![b.clone(), c.clone()]]
+    );
+    projects.targets_mut(&a).unwrap()[0].checked = false;
+    let mut found = ProjectRefresh::default();
+    found.refresh(&[b.clone(), c.clone()], &rules);
+    let _ = executor.discoveries[0].send(ProjectRefresh::default());
+    executor.discoveries[1].send(found).unwrap();
+    refresh.poll_discovery(&mut projects, &[a.clone(), b, c], &rules, &mut executor);
+    assert_eq!(projects.entries().len(), 3);
+    let target = &projects.entry(&a).unwrap().targets[0];
+    assert_eq!(target.size, Some(41));
+    assert!(!target.checked);
 }
