@@ -18,3 +18,9 @@ to the file in assets/fonts/.
 - Geist Mono, Vercel               assets/fonts/GeistMono-Variable.ttf
 - Maple Mono CN, The Maple Mono Project Authors, v7.9. The bundled file is a
   GB2312 subset built by scripts/subset-maple.sh, not the original release.
+
+Icon font
+---------
+Material Symbols Rounded (Filled), Copyright 2026 Google LLC. All Rights Reserved.
+Provided by egui_icons (https://github.com/Jayuda/egui_icons), with the font under
+the Apache License 2.0 (docs/third-party/LICENSE-APACHE.txt).

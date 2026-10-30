@@ -2237,7 +2237,7 @@ fn settings_icon(ui: &mut Ui, t: &Tokens, label: &str, active: bool) -> bool {
         .clicked()
 }
 
-/// A themed vector refresh button with the same square icon treatment as row actions.
+/// A Rounded refresh glyph with the same square icon treatment as row actions.
 fn refresh_icon(
     ui: &mut Ui,
     t: &Tokens,
@@ -2260,20 +2260,14 @@ fn refresh_icon(
             } else {
                 0.0
             };
-            let rotation = egui::emath::Rot2::from_angle(angle);
-            let points: Vec<_> = (0..=24)
-                .map(|i| {
-                    let angle = std::f32::consts::TAU * (0.12 + 0.76 * i as f32 / 24.0);
-                    c + rotation * egui::vec2(angle.cos(), angle.sin()) * 6.0
-                })
-                .collect();
-            let end = *points.last().unwrap();
-            let radial = (end - c).normalized();
-            let tangent = egui::vec2(-radial.y, radial.x);
-            let base = end - tangent * 3.5;
-            p.add(egui::Shape::line(points, Stroke::new(1.5, ink)));
-            p.line_segment([base + radial * 2.5, end], Stroke::new(1.5, ink));
-            p.line_segment([base - radial * 2.5, end], Stroke::new(1.5, ink));
+            let galley = p.layout_no_wrap(
+                egui_icons::icons::ICON_REFRESH.codepoint.to_owned(),
+                egui::FontId::new(18.0, egui::FontFamily::Name(egui_icons::FONT_FAMILY.into())),
+                ink,
+            );
+            let pos =
+                c - egui::emath::Rot2::from_angle(angle) * galley.mesh_bounds.center().to_vec2();
+            p.add(egui::epaint::TextShape::new(pos, galley, ink).with_angle(angle));
             response.widget_info(|| {
                 egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label)
             });
@@ -3405,82 +3399,23 @@ mod tests {
     }
 
     #[test]
-    fn refresh_arrowhead_is_centered_behind_the_arc_tip_at_every_rotation() {
-        fn collect(
-            shape: &egui::Shape,
-            arc: &mut Vec<egui::Pos2>,
-            wings: &mut Vec<[egui::Pos2; 2]>,
-        ) {
+    fn rounded_refresh_glyph_stays_centered_and_rotates_only_while_busy() {
+        fn glyph(shape: &egui::Shape) -> Option<&egui::epaint::TextShape> {
             match shape {
-                egui::Shape::Path(path) if path.points.len() == 25 => *arc = path.points.clone(),
-                egui::Shape::LineSegment { points, .. } => wings.push(*points),
-                egui::Shape::Vec(shapes) => {
-                    for shape in shapes {
-                        collect(shape, arc, wings);
-                    }
+                egui::Shape::Text(text)
+                    if text.galley.job.text == egui_icons::icons::ICON_REFRESH.codepoint =>
+                {
+                    Some(text)
                 }
-                _ => {}
-            }
-        }
-        for (refreshing, time) in [
-            (false, 0.0),
-            (true, 0.0),
-            (true, 0.25),
-            (true, 0.5),
-            (true, 0.75),
-        ] {
-            let mut app = app_with_rows(0);
-            let (_tx, rx) = std::sync::mpsc::channel();
-            app.project_scan = refreshing.then_some(rx);
-            let ctx = egui::Context::default();
-            theme::install(&ctx);
-            let mut input = raw_input(vec![]);
-            input.time = Some(time);
-            let output = sidebar_frame(&mut app, &ctx, input);
-            let center = ctx
-                .read_response(egui::Id::unique("sidebar-refresh"))
-                .unwrap()
-                .rect
-                .center();
-            let mut arc = Vec::new();
-            let mut lines = Vec::new();
-            for shape in &output.shapes {
-                collect(&shape.shape, &mut arc, &mut lines);
-            }
-            let tip = *arc.last().unwrap();
-            let radial = (tip - center).normalized();
-            let tangent = egui::vec2(-radial.y, radial.x);
-            let wings: Vec<_> = lines
-                .iter()
-                .filter(|points| points[1].distance(tip) < 0.001)
-                .map(|points| points[0] - tip)
-                .collect();
-            assert_eq!(wings.len(), 2);
-            assert!(
-                wings.iter().all(|wing| wing.dot(tangent) < 0.0),
-                "arrow wings must trail the tip at {time}"
-            );
-            assert!(
-                (wings[0] + wings[1]).dot(radial).abs() < 0.01,
-                "arrowhead must be symmetric about the tangent at {time}"
-            );
-        }
-    }
-
-    #[test]
-    fn refresh_icon_rotates_only_while_discovering_or_measuring() {
-        fn arc(shape: &egui::Shape) -> Option<Vec<egui::Pos2>> {
-            match shape {
-                egui::Shape::Path(path) if path.points.len() == 25 => Some(path.points.clone()),
-                egui::Shape::Vec(shapes) => shapes.iter().find_map(arc),
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(glyph),
                 _ => None,
             }
         }
         for state in 0..4 {
             let mut app = app_with_rows(0);
-            let (scan_tx, scan_rx) = std::sync::mpsc::channel();
-            let (size_tx, size_rx) = std::sync::mpsc::channel();
-            let (go_tx, go_rx) = std::sync::mpsc::channel();
+            let (_scan_tx, scan_rx) = std::sync::mpsc::channel();
+            let (_size_tx, size_rx) = std::sync::mpsc::channel();
+            let (_go_tx, go_rx) = std::sync::mpsc::channel();
             match state {
                 1 => app.project_scan = Some(scan_rx),
                 2 => {
@@ -3496,43 +3431,45 @@ mod tests {
             }
             let ctx = egui::Context::default();
             theme::install(&ctx);
-            let mut points = Vec::new();
-            for time in [0.0, 0.25] {
+            let mut angles = Vec::new();
+            for time in [0.0, 0.25, 0.5, 0.75] {
                 let mut input = raw_input(vec![]);
                 input.time = Some(time);
                 let output = sidebar_frame(&mut app, &ctx, input);
-                points.push(
-                    output
-                        .shapes
-                        .iter()
-                        .find_map(|shape| arc(&shape.shape))
-                        .unwrap(),
+                let icon = output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| glyph(&shape.shape))
+                    .unwrap();
+                let rect = ctx
+                    .read_response(egui::Id::unique("sidebar-refresh"))
+                    .unwrap()
+                    .rect;
+                assert!(icon.visual_bounding_rect().center().distance(rect.center()) < 0.01);
+                let font = &icon.galley.job.sections[0].format.font_id;
+                assert_eq!(
+                    font.family,
+                    egui::FontFamily::Name(egui_icons::FONT_FAMILY.into())
                 );
+                ctx.fonts_mut(|fonts| {
+                    assert!(fonts.has_glyphs(font, egui_icons::icons::ICON_REFRESH.codepoint))
+                });
+                angles.push(icon.angle);
             }
-            assert_eq!(points[0] != points[1], state != 0, "state {state}");
+            assert_eq!(angles[0] != angles[1], state != 0, "state {state}");
             app.project_scan = None;
             app.measurement = None;
             app.go_query = None;
-            let mut input = raw_input(vec![]);
-            input.time = Some(0.5);
-            let output = sidebar_frame(&mut app, &ctx, input);
-            let stopped = output
-                .shapes
-                .iter()
-                .find_map(|shape| arc(&shape.shape))
-                .unwrap();
-            let mut input = raw_input(vec![]);
-            input.time = Some(0.75);
-            let output = sidebar_frame(&mut app, &ctx, input);
+            let output = sidebar_frame(&mut app, &ctx, raw_input(vec![]));
             assert_eq!(
-                stopped,
                 output
                     .shapes
                     .iter()
-                    .find_map(|shape| arc(&shape.shape))
+                    .find_map(|shape| glyph(&shape.shape))
                     .unwrap()
+                    .angle,
+                0.0
             );
-            drop((scan_tx, size_tx, go_tx));
         }
     }
 
