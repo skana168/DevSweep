@@ -30,12 +30,49 @@ pub struct Measurement {
 pub struct Refresh {
     pub scan: Option<Receiver<ProjectRefresh>>,
     queued: bool,
+    additions: Vec<PathBuf>,
     pending_measurements: Vec<SizeRequest>,
     pub measurement: Option<Measurement>,
     pub failed: bool,
 }
 
 impl Refresh {
+    /// Discover only newly added subtrees; superseded additions are retried together.
+    pub fn root_added(
+        &mut self,
+        root: &std::path::Path,
+        rules: &[Rule],
+        executor: &mut impl RefreshExecutor,
+    ) {
+        // A superseded full Refresh still needs a follow-up over the final roots.
+        self.queued |= self.scan.is_some() && self.additions.is_empty();
+        if !self.additions.iter().any(|known| known == root) {
+            self.additions.push(root.to_path_buf());
+        }
+        self.failed = false;
+        self.scan = Some(executor.discover(
+            ProjectRefresh::default(),
+            self.additions.clone(),
+            rules.to_vec(),
+        ));
+    }
+
+    /// Root removal takes effect immediately; recovery discovery runs in the adapter.
+    pub fn roots_removed(
+        &mut self,
+        projects: &mut ProjectRefresh,
+        roots: &[PathBuf],
+        rules: &[Rule],
+        executor: &mut impl RefreshExecutor,
+    ) {
+        projects.retain_roots(roots);
+        self.additions.clear();
+        self.scan = None;
+        self.queued = false;
+        self.failed = false;
+        self.scan = Some(executor.discover(projects.clone(), roots.to_vec(), rules.to_vec()));
+    }
+
     /// Start measurements, including independent cache requests supplied by the adapter.
     pub fn measure(&mut self, requests: Vec<SizeRequest>, executor: &mut impl RefreshExecutor) {
         if requests.is_empty() {
@@ -134,7 +171,11 @@ impl Refresh {
         };
         let changed = match rx.try_recv() {
             Ok(found) => {
-                projects.apply_refresh(found);
+                if self.additions.is_empty() {
+                    projects.apply_refresh(found);
+                } else {
+                    projects.apply_addition(found);
+                }
                 true
             }
             Err(TryRecvError::Empty) => return false,
@@ -144,6 +185,7 @@ impl Refresh {
             }
         };
         self.scan = None;
+        self.additions.clear();
         if changed {
             self.measure(projects.measurement_requests(), executor);
         }
