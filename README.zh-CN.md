@@ -78,7 +78,7 @@ Go 缓存拒绝危险目录、链接，以及与已知项目或其他缓存重�
 ## 安装
 
 从 [Releases](https://github.com/skana168/DevSweep/releases/latest) 下载对应文件，或在
-[全部版本](https://github.com/skana168/DevSweep/releases) 里挑选。`<版本>` 是版本号，例如 `0.3.0`。
+[全部版本](https://github.com/skana168/DevSweep/releases) 里挑选。`<版本>` 是版本号，例如 `0.4.0`。
 
 | 平台 | 文件 | 用法 |
 |---|---|---|
@@ -144,7 +144,7 @@ C#、F#、Visual Basic 共用 `.NET` 项目类型和筛选项。目录中存在�
 
 自定义输出路径、集中式 `artifacts/`、`.vs/`、`TestResults/` 和 NuGet 全局缓存不在这些内置规则内。
 DevSweep 不运行 dotnet 或 MSBuild，整目录清理不等价于 `dotnet clean`。请先停止构建：不检测或锁定
-正在进行的构建，验证与删除之间仍可能发生文件系统变化。.NET 支持已在源码中实现，尚未发布。
+正在进行的构建，验证与删除之间仍可能发生文件系统变化。.NET 支持自 v0.4.0 起发布。
 
 ### Unity 项目
 

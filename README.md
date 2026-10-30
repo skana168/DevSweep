@@ -81,7 +81,7 @@ remaining contents are measured again; partial deletion cannot be rolled back.
 
 ## Install
 
-Download the build for your computer from the [latest release](https://github.com/skana168/DevSweep/releases/latest), or browse [all releases](https://github.com/skana168/DevSweep/releases). `<version>` is the version number, for example `0.3.0`.
+Download the build for your computer from the [latest release](https://github.com/skana168/DevSweep/releases/latest), or browse [all releases](https://github.com/skana168/DevSweep/releases). `<version>` is the version number, for example `0.4.0`.
 
 | Platform | File | What it is |
 |---|---|---|
@@ -160,8 +160,7 @@ default selection, but retain the dangerous label and validation.
 Custom output paths, centralized `artifacts/`, `.vs/`, `TestResults/`, and NuGet global caches
 are outside these built-in rules. DevSweep does not run dotnet or MSBuild; this is not equivalent
 to `dotnet clean`. Stop builds before cleaning: active builds are not detected or locked, and
-filesystem changes between validation and deletion remain possible. .NET support is implemented
-in source and has not yet been released.
+filesystem changes between validation and deletion remain possible. .NET support is available starting with v0.4.0.
 
 ### Unity projects
 
