@@ -28,6 +28,10 @@ _Avoid_: 框架、平台、子项目类型
 统一涵盖 C#、F#、Visual Basic Project 的 Stack 家族；三种语言不分别成为项目类型。
 _Avoid_: C# 类型、F# 类型、Visual Basic 类型
 
+**Unity（项目类型，已确认待实现）**：
+独立的 Stack 家族，表示由 Unity Editor 管理的 Project；生成的 .NET 工程属于该 Project，不使其成为 .NET Project。
+_Avoid_: Unity C# 项目、Unity 子类型
+
 **Platform directory（平台子目录）**：
 Project 内的 `android/`、`ios/`、`macos/`、`windows/`、`linux/`、`web/`；属于所在项目，从不单独成为 Project。
 _Avoid_: 子项目

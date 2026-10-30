@@ -13,3 +13,5 @@ Python 支持：将 Python 追加到优先级末尾，成为 Flutter > iOS > And
 Rust 支持：将 Rust 追加到优先级末尾，成为 Flutter > iOS > Android > Java > Node > Python > Rust，仍以保留已有混合项目的归类与清理行为为先。同目录的 `Cargo.toml` 不叠加 Rust 规则；独立子目录中的 Rust Project 可单独识别。代价是同目录同时有更高优先级 Marker 时，Rust 构建产物不被自动覆盖。
 
 .NET 支持：C#、F#、Visual Basic 共用一个 `.NET` Stack，追加至优先级末尾，成为 Flutter > iOS > Android > Java > Node > Python > Rust > .NET，以保留已有项目归类。代价是同目录存在更高优先级 Marker 时不自动覆盖 bin/obj；独立子目录继续按既有项目发现规则处理，不因解决方案文件聚合 Project。
+
+Unity 支持（已确认待实现）：Unity 优先于全部现有 Stack，避免生成的 .NET 工程或同目录其他标记扩大清理范围；Unity Project 内不再发现独立 Project。代价是内部插件和工具项目不单独列出，也不自动应用其 Stack 的规则；这是有意限定 Unity 清理边界，区别于其他 Stack 继续递归发现子项目的惯例。需求见 [.scratch/unity-support/spec.md](../../.scratch/unity-support/spec.md)。
