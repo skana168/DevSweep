@@ -7,12 +7,13 @@ use crate::rules::{self, Rule, Target};
 use crate::scan::{self, Project};
 use crate::size::{SizeEvent, SizeRequest};
 
+#[derive(Clone)]
 pub struct ProjectEntry {
     pub project: Project,
     pub targets: Vec<Target>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ProjectRefresh {
     entries: Vec<ProjectEntry>,
 }
@@ -82,6 +83,23 @@ impl ProjectRefresh {
                 ProjectEntry { project, targets }
             })
             .collect();
+    }
+
+    /// Apply background discovery while keeping drafts and cleanup changes made since it started.
+    pub fn apply_refresh(&mut self, mut refreshed: Self) {
+        let mut current: HashMap<_, _> = self
+            .entries
+            .drain(..)
+            .map(|entry| (entry.project.path, (entry.project.stack, entry.targets)))
+            .collect();
+        for entry in &mut refreshed.entries {
+            if let Some((stack, targets)) = current.remove(&entry.project.path)
+                && stack == entry.project.stack
+            {
+                entry.targets = targets;
+            }
+        }
+        *self = refreshed;
     }
 
     pub fn measurement_requests(&self) -> Vec<SizeRequest> {

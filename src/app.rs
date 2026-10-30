@@ -63,6 +63,8 @@ pub struct DevSweepApp {
     root_notice: Option<&'static str>,
     view: View,
     projects: ProjectRefresh,
+    // shortcut: discarded scans finish in background; add cancellation if root edits cause I/O contention.
+    project_scan: Option<Receiver<ProjectRefresh>>,
     caches: Vec<CacheRow>,
     go_snapshot: Option<GoCacheSnapshot>,
     go_query: Option<Receiver<GoCacheSnapshot>>,
@@ -213,6 +215,7 @@ impl DevSweepApp {
             root_notice: None,
             view: View::Projects,
             projects: ProjectRefresh::default(),
+            project_scan: None,
             caches: cache::entries()
                 .into_iter()
                 .map(|entry| CacheRow {
@@ -265,6 +268,7 @@ impl DevSweepApp {
             self.root_notice = Some(self.strings().root_duplicate);
             return;
         }
+        self.project_scan = None;
         // Only the new subtree is walked; existing projects keep their sizes.
         self.projects.add_root(&path, &self.rules);
         self.config.roots.push(path);
@@ -276,6 +280,7 @@ impl DevSweepApp {
     }
 
     fn rescan(&mut self, ctx: &egui::Context) {
+        self.project_scan = None;
         self.projects.refresh(&self.config.roots, &self.rules);
         self.refresh_go_caches(ctx);
         // A cache recreated since the last scan becomes measurable again.
@@ -287,6 +292,47 @@ impl DevSweepApp {
         }
         self.measure_missing(ctx);
         self.last_scan = Instant::now();
+    }
+
+    fn refresh_projects(&mut self, ctx: &egui::Context) {
+        let mut projects = self.projects.clone();
+        let roots = self.config.roots.clone();
+        let rules = self.rules.clone();
+        let repaint = ctx.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.project_scan = Some(rx);
+        self.root_notice = None;
+        std::thread::spawn(move || {
+            projects.refresh(&roots, &rules);
+            let _ = tx.send(projects);
+            repaint.request_repaint();
+        });
+        ctx.request_repaint();
+    }
+
+    fn poll_project_scan(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.project_scan else { return };
+        match rx.try_recv() {
+            Ok(projects) => {
+                self.project_scan = None;
+                self.projects.apply_refresh(projects);
+                self.measure_requests(ctx, self.projects.measurement_requests());
+                self.last_scan = Instant::now();
+                if let Some(mut panel) = self.panel.take() {
+                    panel.replan(ctx, self.project_plan_task(&panel.project));
+                    self.panel = Some(panel);
+                }
+                ctx.request_repaint();
+            }
+            Err(TryRecvError::Empty) => {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.project_scan = None;
+                self.root_notice = Some(self.strings().refresh_failed);
+                ctx.request_repaint();
+            }
+        }
     }
 
     fn project_size(&self, index: usize) -> Option<u64> {
@@ -1221,7 +1267,9 @@ impl DevSweepApp {
         ui.horizontal(|ui| {
             ui.label(theme::hud(s.roots, t.text_muted));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let reason = if self.measurement.is_some() || self.go_query.is_some() {
+                let reason = if self.project_scan.is_some() {
+                    Some(s.refresh_scanning)
+                } else if self.measurement.is_some() || self.go_query.is_some() {
                     Some(s.refresh_measuring)
                 } else if self.execution.is_some() {
                     Some(s.refresh_cleaning)
@@ -1233,10 +1281,7 @@ impl DevSweepApp {
                     None
                 };
                 if refresh_icon(ui, t, s.refresh_projects, reason) {
-                    self.projects.refresh(&self.config.roots, &self.rules);
-                    // Manual Refresh must not enqueue or replace global-cache work.
-                    self.measure_requests(ui.ctx(), self.projects.measurement_requests());
-                    self.last_scan = Instant::now();
+                    self.refresh_projects(ui.ctx());
                 }
             });
         });
@@ -1360,6 +1405,7 @@ impl DevSweepApp {
     }
 
     fn remove_root(&mut self, index: usize, ctx: &egui::Context) {
+        self.project_scan = None;
         self.config.roots.remove(index);
         self.root_notice = None;
         self.projects.remove_root(&self.config.roots, &self.rules);
@@ -1820,6 +1866,7 @@ impl DevSweepApp {
 
 impl eframe::App for DevSweepApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_project_scan(ctx);
         self.poll_go_caches(ctx);
         self.poll_measurement(ctx);
         self.poll_execution(ctx);
@@ -1837,6 +1884,7 @@ impl eframe::App for DevSweepApp {
         if focused == Some(true)
             && self.was_focused == Some(false)
             && self.last_scan.elapsed() >= REFRESH_AFTER
+            && self.project_scan.is_none()
         {
             self.rescan(ctx);
         }
@@ -1865,6 +1913,13 @@ impl eframe::App for DevSweepApp {
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    if self.project_scan.is_some() {
+                        ui.label(
+                            RichText::new(s.refresh_scanning)
+                                .size(11.0)
+                                .color(t.text_muted),
+                        );
+                    }
                     if let Some(measurement) = &mut self.measurement {
                         measurement.shown = true;
                         ui.label(
@@ -2955,6 +3010,7 @@ mod tests {
             root_notice: None,
             view: View::Projects,
             projects,
+            project_scan: None,
             caches: Vec::new(),
             go_snapshot: None,
             go_query: None,
@@ -2992,6 +3048,14 @@ mod tests {
         });
         output.textures_delta.clear();
         output
+    }
+
+    fn finish_project_scan(app: &mut DevSweepApp, ctx: &egui::Context) {
+        let projects = app.project_scan.take().unwrap().recv().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(projects).unwrap();
+        app.project_scan = Some(rx);
+        app.poll_project_scan(ctx);
     }
 
     #[test]
@@ -3037,6 +3101,8 @@ mod tests {
         assert!(response.enabled());
         sidebar_frame(&mut app, &ctx, input(response.rect.center(), true));
         sidebar_frame(&mut app, &ctx, input(response.rect.center(), false));
+        assert!(app.project_scan.is_some());
+        finish_project_scan(&mut app, &ctx);
         assert!(app.projects.entry(&root.join("new")).is_some());
         assert!(app.last_scan > before);
         assert_eq!(
@@ -3121,6 +3187,15 @@ mod tests {
         frame(&mut app, &ctx, input(rect.center(), true));
         frame(&mut app, &ctx, input(rect.center(), false));
 
+        let output = frame(&mut app, &ctx, raw_input(vec![]));
+        assert!(
+            output
+                .shapes
+                .iter()
+                .any(|shape| has_text(&shape.shape, "Refreshing project list"))
+        );
+        finish_project_scan(&mut app, &ctx);
+
         // Replay the real worker's result as already complete before the next frame.
         let event = app.measurement.as_ref().unwrap().rx.recv().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -3140,9 +3215,78 @@ mod tests {
     }
 
     #[test]
+    fn focus_does_not_start_a_second_scan_while_manual_refresh_is_running() {
+        let mut app = app_with_rows(0);
+        let (_tx, rx) = std::sync::mpsc::channel();
+        app.project_scan = Some(rx);
+        app.was_focused = Some(false);
+        app.last_scan = Instant::now() - REFRESH_AFTER;
+        let before = app.last_scan;
+        let ctx = egui::Context::default();
+        let mut input = raw_input(vec![]);
+        input
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .unwrap()
+            .focused = Some(true);
+        let mut output = ctx.run_ui(input, |ui| {
+            eframe::App::logic(&mut app, ui.ctx(), &mut eframe::Frame::_new_kittest());
+        });
+        output.textures_delta.clear();
+        assert!(app.project_scan.is_some());
+        assert!(app.go_query.is_none());
+        assert_eq!(app.last_scan, before);
+    }
+
+    #[test]
+    fn failed_background_refresh_keeps_projects_and_allows_retry() {
+        let mut app = app_with_rows(1);
+        let ctx = egui::Context::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.project_scan = Some(rx);
+        drop(tx);
+        let before = app.last_scan;
+        app.poll_project_scan(&ctx);
+        assert!(app.project_scan.is_none());
+        assert_eq!(app.projects.entries().len(), 1);
+        assert_eq!(app.root_notice, Some(app.strings().refresh_failed));
+        assert_eq!(app.last_scan, before);
+    }
+
+    #[test]
+    #[ignore = "performance probe: creates a large directory tree"]
+    fn sidebar_refresh_click_does_not_wait_for_directory_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        for index in 0..4000 {
+            std::fs::create_dir(root.join(format!("folder-{index}"))).unwrap();
+        }
+        let mut app = app_with_rows(0);
+        app.config.roots = vec![root];
+        app.rules = rules::builtin_rules();
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        sidebar_frame(&mut app, &ctx, raw_input(vec![]));
+        let rect = ctx
+            .read_response(egui::Id::unique("sidebar-refresh"))
+            .unwrap()
+            .rect;
+        sidebar_frame(&mut app, &ctx, input(rect.center(), true));
+        let started = Instant::now();
+        sidebar_frame(&mut app, &ctx, input(rect.center(), false));
+        let elapsed = started.elapsed();
+        finish_project_scan(&mut app, &ctx);
+        eprintln!("refresh click frame: {elapsed:?}");
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "refresh blocked UI for {elapsed:?}"
+        );
+    }
+
+    #[test]
     fn sidebar_refresh_disabled_states_explain_why_in_both_languages_and_ignore_clicks() {
         for lang in [Lang::Zh, Lang::En] {
-            for state in 0..8 {
+            for state in 0..9 {
                 let ctx = egui::Context::default();
                 theme::install(&ctx);
                 ctx.enable_accesskit();
@@ -3199,7 +3343,7 @@ mod tests {
                         });
                         s.refresh_cleaning
                     }
-                    _ => {
+                    7 => {
                         app.execution = Some(Execution {
                             done: 0,
                             total: 1,
@@ -3211,6 +3355,11 @@ mod tests {
                             global_cache: true,
                         });
                         s.refresh_cleaning
+                    }
+                    _ => {
+                        let (_tx, rx) = std::sync::mpsc::channel();
+                        app.project_scan = Some(rx);
+                        s.refresh_scanning
                     }
                 };
                 let before = app.last_scan;
