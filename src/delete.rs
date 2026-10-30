@@ -126,7 +126,25 @@ fn execute_inner(
     let total = groups.len();
     let groups = Arc::new(groups);
     let next = Arc::new(AtomicUsize::new(0));
-    let acc = Arc::new(Mutex::new(Accumulator::default()));
+    // The post-confirmation plan can reject Unity before any deletion starts.
+    let failures = plan
+        .skipped
+        .into_iter()
+        .filter_map(|skip| {
+            let crate::plan::SkipReason::UnityBlocked(reason) = skip.reason else {
+                return None;
+            };
+            Some(Failure {
+                project_path: skip.path.parent()?.to_path_buf(),
+                path: skip.path,
+                reason: FailureReason::UnityBlocked(reason),
+            })
+        })
+        .collect();
+    let acc = Arc::new(Mutex::new(Accumulator {
+        failures,
+        ..Accumulator::default()
+    }));
 
     thread::scope(|scope| {
         for _ in 0..total.min(CONCURRENCY) {
@@ -443,6 +461,22 @@ mod unity_safety_tests {
                     .iter()
                     .all(|s| s.reason == crate::plan::SkipReason::UnityBlocked(reason))
             );
+            let (tx, _) = std::sync::mpsc::channel();
+            let report = execute_inner(
+                blocked,
+                DeleteMode::Direct,
+                &AtomicBool::new(false),
+                tx,
+                delete_item,
+                idle,
+            );
+            assert_eq!(report.failures.len(), 2);
+            assert!(report.failures.iter().all(|failure| {
+                failure.reason == FailureReason::UnityBlocked(reason)
+                    && failure.project_path == game
+            }));
+            assert!(game.join("Library").is_dir());
+            assert!(game.join("Temp").is_dir());
             for delete in [delete_item, delete_module_item] {
                 for mode in [DeleteMode::Direct, DeleteMode::Trash] {
                     fs::create_dir_all(other.join("node_modules")).unwrap();
