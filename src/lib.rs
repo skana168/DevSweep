@@ -4,6 +4,7 @@ pub mod delete;
 pub mod go_cache;
 pub mod plan;
 pub mod projects;
+pub mod refresh;
 pub mod rules;
 pub mod scan;
 pub mod size;
