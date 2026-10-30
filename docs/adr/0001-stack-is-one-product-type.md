@@ -14,4 +14,4 @@ Rust 支持：将 Rust 追加到优先级末尾，成为 Flutter > iOS > Android
 
 .NET 支持：C#、F#、Visual Basic 共用一个 `.NET` Stack，追加至优先级末尾，成为 Flutter > iOS > Android > Java > Node > Python > Rust > .NET，以保留已有项目归类。代价是同目录存在更高优先级 Marker 时不自动覆盖 bin/obj；独立子目录继续按既有项目发现规则处理，不因解决方案文件聚合 Project。
 
-Unity 只读支持：Unity 优先于全部现有 Stack，避免生成的 .NET 工程或同目录其他标记扩大清理范围；Unity Project 内不再发现独立 Project。代价是内部插件和工具项目不单独列出，也不自动应用其 Stack 的规则；这是有意限定 Unity 清理边界，区别于其他 Stack 继续递归发现子项目的惯例。当前阶段仅识别、筛选与版本提示，所有 Unity 清理均被禁止；Library/Temp 与进程保护属于后继票。需求见 [.scratch/unity-support/spec.md](../../.scratch/unity-support/spec.md)。
+Unity 支持：Unity 优先于全部现有 Stack，避免生成的 .NET 工程或同目录其他标记扩大清理范围；Unity Project 内不再发现独立 Project。代价是内部插件和工具项目不单独列出，也不自动应用其 Stack 的规则；这是有意限定 Unity 清理边界，区别于其他 Stack 继续递归发现子项目的惯例。仅允许内置 Library/Temp 规则；通用及 Extra rule 不扩大范围。版本和任意 Editor 运行/未知保护作用于整个 Project，不能通过规则覆盖关闭。计划与执行前的检查不是跨进程锁；双平台真实 Editor 验收仍是未通过的交付门槛。需求见 [.scratch/unity-support/spec.md](../../.scratch/unity-support/spec.md)。

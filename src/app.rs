@@ -738,6 +738,14 @@ impl DevSweepApp {
                 ui.add_space(12.0);
                 stat_row(ui, s.items, &format!("{chosen} / {}", targets.len()), t);
                 stat_row(ui, s.total, &size::format_size(panel.plan.total_bytes), t);
+                if stack == Stack::Unity {
+                    ui.label(
+                        RichText::new(s.unity_note(&scan::unity_version(&path)))
+                            .size(12.0)
+                            .color(t.danger),
+                    );
+                    ui.label(RichText::new(s.unity_notice).size(12.0).color(t.danger));
+                }
                 if stack == Stack::Dotnet {
                     ui.label(
                         RichText::new(s.dotnet_clean_note)
@@ -2275,7 +2283,7 @@ fn project_table_row(
 ) -> Option<RowAction> {
     let project = &entry.project;
     let mut action = None;
-    let cleanable = project.stack != Stack::Unity && !entry.targets.is_empty();
+    let cleanable = !entry.targets.is_empty();
 
     row.col(|ui| {
         if !last {

@@ -40,6 +40,8 @@ Extras are always checked by default and are never marked dangerous. Their ids a
 
 | Stack | Id | Path | Checked by default |
 |---|---|---|---|
+| Unity | `unity.library` | `Library` | **no** (dangerous) |
+| Unity | `unity.temp` | `Temp` | yes |
 | Flutter | `flutter.build` | `build` | yes |
 | Flutter | `flutter.dart_tool` | `.dart_tool` | yes |
 | Flutter | `flutter.ios_pods` | `ios/Pods` | yes |
@@ -82,7 +84,7 @@ Extras are always checked by default and are never marked dangerous. Their ids a
 | .NET | `dotnet.bin` | `bin` | **no** (dangerous) |
 | .NET | `dotnet.obj` | `obj` | **no** (dangerous) |
 
-A project carries one stack, chosen by priority Flutter > iOS > Android > Java > Node > Python > Rust > .NET, so only that
+A project carries one stack, chosen by priority Unity > Flutter > iOS > Android > Java > Node > Python > Rust > .NET, so only that
 stack's rules apply to it (see [ADR 0001](adr/0001-stack-is-one-product-type.md)). A `pom.xml`
 marks a Java project; a Gradle project counts as Android even when it builds plain JVM code.
 
@@ -221,3 +223,12 @@ No privilege escalation or Go clean command is used, and Trash failure never fal
 A failed item is not reported as fully cleaned or counted as fully freed; remaining contents are
 measured again. Partial deletions and permission changes cannot be rolled back. Stop builds, tests
 and downloads before cleaning; the filesystem race between validation and deletion still exists.
+
+## Unity projects
+
+Only the built-in `unity.library` and `unity.temp` rules apply. Extras (including `stack = "*"`
+and `stack = "unity"`) cannot add targets. Both paths must be whole real directories directly
+under the Unity Project; files, links, nested paths and other directories are rejected again in
+planning and execution. Library keeps its dangerous label even if `[defaults]` opts in. Disabling
+a rule or changing its default does not disable version (2022.3+) or Editor process checks.
+See [Unity support](../README.md#unity-projects) and [pending real-platform acceptance](unity-validation.md).

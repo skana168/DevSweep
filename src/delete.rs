@@ -41,7 +41,7 @@ pub struct Failure {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureReason {
-    UnityReadOnly,
+    UnityBlocked(crate::unity::BlockReason),
     PermissionDenied,
     InUse,
     Missing,
@@ -79,7 +79,14 @@ pub fn execute(
     abort: &AtomicBool,
     tx: Sender<DeleteEvent>,
 ) -> DeleteReport {
-    execute_inner(plan, mode, abort, tx, delete_item)
+    execute_inner(
+        plan,
+        mode,
+        abort,
+        tx,
+        delete_item,
+        crate::unity::editor_state,
+    )
 }
 
 /// Execute a validated Go module cache plan, handling its read-only dependencies.
@@ -89,7 +96,14 @@ pub fn execute_go_module(
     abort: &AtomicBool,
     tx: Sender<DeleteEvent>,
 ) -> DeleteReport {
-    execute_inner(plan, mode, abort, tx, delete_module_item)
+    execute_inner(
+        plan,
+        mode,
+        abort,
+        tx,
+        delete_module_item,
+        crate::unity::editor_state,
+    )
 }
 
 fn execute_inner(
@@ -98,6 +112,7 @@ fn execute_inner(
     abort: &AtomicBool,
     tx: Sender<DeleteEvent>,
     delete: fn(&PlanItem, DeleteMode) -> Result<(), FailureReason>,
+    probe: fn() -> crate::unity::EditorState,
 ) -> DeleteReport {
     // Plan items are sorted by project, so grouping keeps project order.
     let mut groups: Vec<(PathBuf, Vec<PlanItem>)> = Vec::new();
@@ -134,11 +149,23 @@ fn execute_inner(
                     let mut failures = Vec::new();
                     let mut deleted = Vec::new();
                     let mut freed = 0;
+                    let state = if items
+                        .iter()
+                        .any(|item| crate::unity::concerns(project, &item.target_path))
+                    {
+                        probe()
+                    } else {
+                        crate::unity::EditorState::Idle
+                    };
                     for item in items {
-                        let result = if crate::scan::inside_unity(project)
-                            || crate::scan::inside_unity(&item.target_path)
-                        {
-                            Err(FailureReason::UnityReadOnly)
+                        let result = if crate::unity::concerns(project, &item.target_path) {
+                            fs::symlink_metadata(&item.target_path)
+                                .map_err(io_reason)
+                                .and_then(|_| {
+                                    crate::unity::check(project, &item.target_path, state)
+                                        .map_err(FailureReason::UnityBlocked)
+                                })
+                                .and_then(|()| delete(item, mode))
                         } else {
                             delete(item, mode)
                         };
@@ -342,5 +369,123 @@ fn trash_reason(err: &trash::Error) -> FailureReason {
             _ => FailureReason::Other,
         },
         _ => FailureReason::Other,
+    }
+}
+
+#[cfg(test)]
+mod unity_safety_tests {
+    use super::*;
+    use crate::{
+        plan::{PlanProject, plan_for_test},
+        rules,
+        scan::{self, Stack},
+        unity::{BlockReason, EditorState},
+    };
+
+    fn idle() -> EditorState {
+        EditorState::Idle
+    }
+    fn busy() -> EditorState {
+        EditorState::Busy
+    }
+    fn unknown() -> EditorState {
+        EditorState::Unknown
+    }
+
+    #[test]
+    fn unity_discovery_plan_execute_rechecks_system_boundary_and_continues_other_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = fs::canonicalize(dir.path()).unwrap();
+        let game = base.join("game");
+        for path in ["Assets", "ProjectSettings", "Library", "Temp"] {
+            fs::create_dir_all(game.join(path)).unwrap();
+        }
+        fs::write(
+            game.join("ProjectSettings/ProjectVersion.txt"),
+            "m_EditorVersion: 6000.0.1f1",
+        )
+        .unwrap();
+        let other = base.join("web");
+        fs::create_dir_all(other.join("node_modules")).unwrap();
+        fs::write(other.join("package.json"), "{}").unwrap();
+        let rules = rules::builtin_rules();
+        let projects = scan::scan(&[base]);
+        let mut targets: Vec<_> = projects
+            .iter()
+            .map(|p| rules::expand_targets(p, &rules))
+            .collect();
+        for ts in &mut targets {
+            for t in ts {
+                t.checked = true;
+                t.size = Some(7);
+            }
+        }
+        let inputs: Vec<_> = projects
+            .iter()
+            .zip(&targets)
+            .map(|(p, ts)| PlanProject {
+                path: &p.path,
+                stack: p.stack,
+                targets: ts,
+            })
+            .collect();
+        for (probe, reason) in [
+            (busy as fn() -> EditorState, BlockReason::Busy),
+            (unknown, BlockReason::Unknown),
+        ] {
+            fs::create_dir_all(other.join("node_modules")).unwrap();
+            let blocked = plan_for_test(&inputs, &rules, probe);
+            assert_eq!(blocked.items.len(), 1);
+            assert_eq!(blocked.skipped.len(), 2);
+            assert!(
+                blocked
+                    .skipped
+                    .iter()
+                    .all(|s| s.reason == crate::plan::SkipReason::UnityBlocked(reason))
+            );
+            for delete in [delete_item, delete_module_item] {
+                for mode in [DeleteMode::Direct, DeleteMode::Trash] {
+                    fs::create_dir_all(other.join("node_modules")).unwrap();
+                    let plan = plan_for_test(&inputs, &rules, idle);
+                    assert_eq!(plan.items.len(), 3);
+                    let (tx, _) = std::sync::mpsc::channel();
+                    let report =
+                        execute_inner(plan, mode, &AtomicBool::new(false), tx, delete, probe);
+                    assert_eq!(report.failures.len(), 2);
+                    assert!(
+                        report
+                            .failures
+                            .iter()
+                            .all(|f| f.reason == FailureReason::UnityBlocked(reason))
+                    );
+                    assert_eq!(report.freed_bytes, 7);
+                    assert!(game.join("Library").is_dir());
+                    assert!(game.join("Temp").is_dir());
+                    assert!(!other.join("node_modules").exists());
+                }
+            }
+        }
+        for delete in [delete_item, delete_module_item] {
+            for mode in [DeleteMode::Direct, DeleteMode::Trash] {
+                for path in [
+                    game.join("Library"),
+                    game.join("Temp"),
+                    other.join("node_modules"),
+                ] {
+                    fs::create_dir_all(path).unwrap();
+                }
+                let plan = plan_for_test(&inputs, &rules, idle);
+                let (tx, _) = std::sync::mpsc::channel();
+                let report = execute_inner(plan, mode, &AtomicBool::new(false), tx, delete, idle);
+                assert!(report.failures.is_empty(), "{report:?}");
+                assert_eq!(report.freed_bytes, 21);
+                assert!(!game.join("Library").exists());
+                assert!(game.join("Assets").exists());
+            }
+        }
+        assert_eq!(
+            projects.iter().filter(|p| p.stack == Stack::Unity).count(),
+            1
+        );
     }
 }

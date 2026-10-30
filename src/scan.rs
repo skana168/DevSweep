@@ -25,7 +25,7 @@ pub struct Project {
     pub stack: Stack,
 }
 
-/// Version qualification does not enable cleanup: Unity is currently read-only.
+/// Version qualification is independent of the Editor process and path checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnityVersion {
     Supported(String),

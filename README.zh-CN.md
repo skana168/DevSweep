@@ -135,7 +135,7 @@ C#、F#、Visual Basic 共用 `.NET` 项目类型和筛选项。目录中存在�
 显示一个项目；仅有 `.sln`、`.slnx`、`global.json` 或源码不触发识别。
 
 .NET 优先级最低，保留已有混合项目归类；独立 .NET 子目录仍可单独出现。沿用五层扫描深度和平台
-子目录归属规则。Unity 项目优先于生成的 .NET 工程，见下方只读支持说明。
+子目录归属规则。Unity 项目优先于生成的 .NET 工程，见下方 Unity 支持说明。
 
 清理仅覆盖每个 .NET 项目根目录直属、名称精确小写的真实 `bin/`、`obj/` 整个目录。两项分别统计和
 勾选，均为危险项、默认不勾选；未勾选时也计入项目大小。删除所选目录也会删除其中手工放入的内容。
@@ -146,20 +146,28 @@ C#、F#、Visual Basic 共用 `.NET` 项目类型和筛选项。目录中存在�
 DevSweep 不运行 dotnet 或 MSBuild，整目录清理不等价于 `dotnet clean`。请先停止构建：不检测或锁定
 正在进行的构建，验证与删除之间仍可能发生文件系统变化。.NET 支持已在源码中实现，尚未发布。
 
-### Unity 项目（只读）
+### Unity 项目
 
-同目录存在 `Assets/`、`ProjectSettings/` 目录及 `ProjectSettings/ProjectVersion.txt` 文件时，
-识别为独立 Unity 类型，不依赖生成的 `.csproj`。Unity 优先于所有其他类型；内部 Packages、插件、
-工具不单独列为项目，即使把内部目录另加为扫描根。类型筛选提供 Unity；项目行展示只读及版本说明，
-截断的说明可悬停查看全文。
+以 `Assets/`、`ProjectSettings/` 目录和 `ProjectSettings/ProjectVersion.txt` 文件识别，无需生成
+`.csproj`。Unity 优先于所有其他类型，内部工具和嵌套扫描根不另列项目；类型筛选与项目行展示版本说明。
 
-支持版本下限为 Unity 2022.3，按数值排序，包含 Unity 6 的 `6000.x` 格式。旧版、损坏或未知版本仍然
-展示；这个下限仅表示支持范围，不代表所有早期版本都不安全。**本版所有 Unity 项目均只读，符合版本
-范围也不能清理**；暂不提供 Unity 清理项或缓存体积。通用规则、自定义规则、规则覆盖均不能开放清理；
-计划与执行入口都会拒绝 Unity 清理，包括手工构造的计划。
+只提供根下完整、真实的 `Library/`、`Temp/` 目录及体积。Library 是危险项，默认不选：下次打开需重新
+导入资源，可能耗时较长。Temp 默认选。规则覆盖可关闭或改默认勾选，不能去掉危险标记；通用规则和
+Extra rule 不能新增 Unity 清理路径。保留 Assets、Packages、ProjectSettings；不处理 obj、Logs、
+UserSettings、构建交付物、安装目录或全局缓存。
 
-Library/Temp 清理及 Editor 忙碌/空闲/未知检查由后继票交付，本票未实现；尚无真实 Unity Editor 或
-Windows Editor 验证证据。
+只允许 Unity 2022.3+，按数值排序并支持 Unity 6 的 `6000.x` 格式。旧版、损坏、未知版本可展示但不能
+清理；支持下限不代表所有旧版都不安全。计划和两个执行入口复查版本与路径，拒绝符号链接和越界伪造计划。
+
+任意 Editor（含 batch mode、无 projectPath 参数）运行时禁止全部 Unity 清理；仅 Hub 不阻止。
+枚举失败或候选身份不明也禁止，无强制绕过。macOS 用 `ps -Aww -o ucomm=` 的内核记账名；Windows 用
+本机 PowerShell `Get-CimInstance Win32_Process` 的 Name/ExecutablePath；其他平台返回未知。
+计划时、每个项目执行前分别检查。锁文件不作为空闲证明，也不自动删除；受阻时其他项目继续。
+清理期间不要启动 Editor：预检不是跨进程锁，检查后启动或文件系统变化仍有竞态。
+
+Trash 始终默认，不因体积大切换 Direct；需自行清空废纸篓才释放空间，Direct 不可恢复。
+**尚未完成 macOS/Windows 真实 Editor 验收，不宣称进程保护已实机验证**；自动化边界测试不能代替实机证据。
+详见[验收步骤](docs/unity-validation.md)。
 
 ## 自定义规则
 

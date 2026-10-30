@@ -148,7 +148,7 @@ source files alone do not identify a project.
 .NET has the lowest stack priority, preserving existing mixed-project classifications; an
 independent .NET subdirectory can still appear. Discovery keeps the five-level depth and platform
 subdirectory ownership rules. Unity projects take priority over generated .NET project files;
-see the read-only Unity support below.
+see Unity support below.
 
 Cleanup includes only the whole real `bin/` and `obj/` directories directly under each .NET
 project, matched with exact lowercase names. They are separate dangerous entries, unchecked by
@@ -163,24 +163,35 @@ to `dotnet clean`. Stop builds before cleaning: active builds are not detected o
 filesystem changes between validation and deletion remain possible. .NET support is implemented
 in source and has not yet been released.
 
-### Unity projects (read-only)
+### Unity projects
 
-Unity is recognized by `Assets/` and `ProjectSettings/` directories plus the file
-`ProjectSettings/ProjectVersion.txt`; generated `.csproj` files are not required.
-Unity takes priority over all other stacks. Its internal Packages, plugins, and tools do not
-appear as separate projects, including when an internal directory is added as a scan root.
-The Unity type filter and project row show read-only support and version qualification
-(hover over a truncated note for the full reason).
+Unity is recognized by `Assets/`, `ProjectSettings/`, and `ProjectSettings/ProjectVersion.txt`,
+without generated `.csproj` files. It takes priority over other stacks and owns its entire tree,
+including nested scan roots. The Unity filter and project row show version qualification.
 
-The support floor is Unity 2022.3, with numeric ordering including Unity 6's `6000.x` versions.
-Earlier, malformed, and unknown versions remain visible. This floor describes support scope;
-it does not claim all earlier versions are unsafe. **All Unity projects remain read-only in
-this release, including supported versions.** No Unity targets or cache sizes are offered yet.
-Generic/custom rules and rule overrides cannot enable cleanup; planning and execution both
-reject Unity cleanup, including manually constructed plans.
+Only whole, real root-level `Library/` and `Temp/` directories are offered, with their full sizes.
+Library is dangerous and unchecked by default: the next project open reimports resources and may
+be slow. Temp starts checked. Rule overrides can disable either rule or change default selection;
+generic and extra rules cannot add Unity targets or remove the dangerous label. Assets, Packages,
+ProjectSettings, obj, Logs, UserSettings, builds, installations and global caches are excluded.
 
-Library/Temp cleanup and Editor busy/idle/unknown checks belong to the next ticket and are not
-implemented here. No real Unity Editor or Windows Editor validation has been completed.
+Cleanup requires Unity 2022.3 or later, including Unity 6's numeric `6000.x` format. Earlier,
+malformed and unknown versions remain visible but cannot be cleaned; this floor describes support
+scope, not a claim that all earlier versions are unsafe. Planning and both execution entrypoints
+validate paths and version, rejecting symbolic links and manually constructed out-of-scope plans.
+
+Any running Unity Editor blocks all Unity cleanup, including batch mode and Editors without a
+projectPath argument. Hub alone is allowed. Enumeration failure or ambiguous candidate identity
+blocks cleanup, without a force option. macOS uses `ps -Aww -o ucomm=` (kernel accounting names);
+Windows uses local PowerShell `Get-CimInstance Win32_Process` Name/ExecutablePath. Unsupported
+platforms report unknown. Processes are checked while planning and before each project's execution.
+Lockfiles are neither an idle signal nor automatically removed. Other projects continue when Unity
+is blocked. Close all Editors and do not start one during cleanup: preflight is not a cross-process
+lock, and a later Editor start or filesystem change can still race with deletion.
+
+Trash remains the default regardless of size; empty Trash yourself to release disk space. Direct
+remains permanent. **Real Editor acceptance on macOS and Windows is still outstanding**; automated
+system-boundary tests are not field validation. See [the acceptance protocol](docs/unity-validation.md).
 
 ## Custom rules
 

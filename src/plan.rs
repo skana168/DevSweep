@@ -38,7 +38,7 @@ pub struct Skip {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipReason {
-    UnityReadOnly,
+    UnityBlocked(crate::unity::BlockReason),
     OutsideProject,
     ProjectRoot,
     Home,
@@ -51,9 +51,27 @@ pub enum SkipReason {
     Overlap,
 }
 
-/// Build a delete plan from the checked targets of `projects`. Pure logic: it
-/// reads metadata to validate paths but changes nothing on disk.
+/// Build a delete plan from checked targets; validate paths and Unity process state
+/// without changing anything on disk.
 pub fn plan(projects: &[PlanProject<'_>], roots: &[PathBuf], rules: &[Rule]) -> DeletePlan {
+    plan_inner(projects, roots, rules, crate::unity::editor_state)
+}
+
+#[cfg(test)]
+pub(crate) fn plan_for_test(
+    projects: &[PlanProject<'_>],
+    rules: &[Rule],
+    probe: fn() -> crate::unity::EditorState,
+) -> DeletePlan {
+    plan_inner(projects, &[], rules, probe)
+}
+
+fn plan_inner(
+    projects: &[PlanProject<'_>],
+    roots: &[PathBuf],
+    rules: &[Rule],
+    probe: fn() -> crate::unity::EditorState,
+) -> DeletePlan {
     let home = home_dir();
     let roots: Vec<PathBuf> = roots
         .iter()
@@ -67,6 +85,16 @@ pub fn plan(projects: &[PlanProject<'_>], roots: &[PathBuf], rules: &[Rule]) -> 
     for project in projects {
         let project_root =
             fs::canonicalize(project.path).unwrap_or_else(|_| project.path.to_path_buf());
+        let state = if project.stack == Stack::Unity
+            || project
+                .targets
+                .iter()
+                .any(|t| crate::unity::concerns(project.path, &t.path))
+        {
+            probe()
+        } else {
+            crate::unity::EditorState::Idle
+        };
         for target in project.targets.iter().filter(|target| target.checked) {
             let reason = match check_target(
                 target,
@@ -75,6 +103,7 @@ pub fn plan(projects: &[PlanProject<'_>], roots: &[PathBuf], rules: &[Rule]) -> 
                 &roots,
                 home.as_deref(),
                 rules,
+                state,
             ) {
                 Ok((canonical, is_link)) => {
                     candidates.push((
@@ -146,15 +175,16 @@ fn check_target(
     roots: &[PathBuf],
     home: Option<&Path>,
     rules: &[Rule],
+    state: crate::unity::EditorState,
 ) -> Result<(PathBuf, bool), SkipReason> {
-    if project.stack == Stack::Unity
-        || crate::scan::inside_unity(project.path)
-        || crate::scan::inside_unity(&target.path)
-    {
-        return Err(SkipReason::UnityReadOnly);
+    let meta = fs::symlink_metadata(&target.path).map_err(|_| SkipReason::Missing)?;
+    if project.stack == Stack::Unity || crate::unity::concerns(project.path, &target.path) {
+        crate::unity::check(project.path, &target.path, state).map_err(SkipReason::UnityBlocked)?;
+        if project.stack != Stack::Unity {
+            return Err(SkipReason::OutsideRules);
+        }
     }
     // A symlink is one entry; canonicalizing it only validates where it points.
-    let meta = fs::symlink_metadata(&target.path).map_err(|_| SkipReason::Missing)?;
     let is_link = meta.file_type().is_symlink();
 
     let canonical = fs::canonicalize(&target.path).map_err(|_| SkipReason::Unresolvable)?;
