@@ -253,6 +253,16 @@ fn install_fonts(ctx: &Context) {
     for stack in fonts.families.values_mut() {
         stack.push("MapleMono-CN".to_owned());
     }
+    // egui_icons targets egui 0.36; register its Rounded font bytes with our egui 0.37.
+    let icon_font = egui_icons::font_insert().data;
+    let icon_name = egui_icons::FONT_FAMILY.to_owned();
+    fonts.font_data.insert(
+        icon_name.clone(),
+        Arc::new(FontData::from_owned(icon_font.font.as_ref().to_vec())),
+    );
+    fonts
+        .families
+        .insert(FontFamily::Name(icon_name.clone().into()), vec![icon_name]);
     ctx.set_fonts(fonts);
 }
 

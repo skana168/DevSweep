@@ -28,10 +28,13 @@ fn refresh_preserves_surviving_target_drafts_and_sizes_and_measures_only_new_pro
     });
     projects.targets_mut(&alpha).unwrap()[0].checked = false;
     project(&root.join("beta"));
+    // Refresh discovers Projects, not newly created Targets inside surviving Projects.
+    fs::create_dir(alpha.join("dist")).unwrap();
 
     projects.refresh(std::slice::from_ref(&root), &rules);
 
     assert_eq!(projects.entries().len(), 2);
+    assert_eq!(projects.entry(&alpha).unwrap().targets.len(), 1);
     let target = &projects.entry(&alpha).unwrap().targets[0];
     assert_eq!(target.size, Some(37));
     assert!(!target.checked);
@@ -132,4 +135,37 @@ fn refresh_drops_vanished_projects_and_late_results_cannot_restore_projects_or_d
     assert!(projects.entries()[0].targets.is_empty());
     assert!(projects.entry(&beta).is_none());
     assert!(projects.measurement_requests().is_empty());
+}
+
+#[test]
+fn background_refresh_preserves_edits_and_cleaned_targets_made_while_discovering() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let alpha = root.join("alpha");
+    project(&alpha);
+    fs::create_dir(alpha.join("dist")).unwrap();
+    project(&root.join("gone"));
+    let rules = builtin_rules();
+    let mut current = ProjectRefresh::default();
+    current.refresh(std::slice::from_ref(&root), &rules);
+    let mut background = current.clone();
+    project(&root.join("new"));
+    fs::remove_dir_all(root.join("gone")).unwrap();
+    background.refresh(std::slice::from_ref(&root), &rules);
+
+    let targets = current.targets_mut(&alpha).unwrap();
+    targets.retain(|target| target.path == alpha.join("node_modules"));
+    targets[0].checked = false;
+    targets[0].size = Some(37);
+    current.apply_refresh(background);
+
+    let targets = &current.entry(&alpha).unwrap().targets;
+    assert_eq!(targets.len(), 1, "a cleaned target must not return");
+    assert!(!targets[0].checked);
+    assert_eq!(targets[0].size, Some(37));
+    assert!(current.entry(&root.join("gone")).is_none());
+    assert!(current.entry(&root.join("new")).is_some());
+    let requests = current.measurement_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].project, root.join("new"));
 }

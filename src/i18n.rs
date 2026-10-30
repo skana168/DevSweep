@@ -39,6 +39,13 @@ impl Lang {
 
 pub struct Strings {
     pub roots: &'static str,
+    pub refresh_projects: &'static str,
+    pub refresh_scanning: &'static str,
+    pub refresh_failed: &'static str,
+    pub refresh_measuring: &'static str,
+    pub refresh_cleaning: &'static str,
+    pub refresh_confirmation: &'static str,
+    pub refresh_no_roots: &'static str,
     pub add_directory: &'static str,
     pub remove: &'static str,
     pub projects: &'static str,
@@ -244,6 +251,13 @@ impl Strings {
 
 static ZH: Strings = Strings {
     roots: "扫描根",
+    refresh_projects: "刷新项目列表",
+    refresh_scanning: "正在刷新项目列表",
+    refresh_failed: "刷新未完成，请重试",
+    refresh_measuring: "体积计算中，请等待完成后刷新",
+    refresh_cleaning: "正在清理，请等待完成后刷新",
+    refresh_confirmation: "请先关闭清理面板或确认对话框",
+    refresh_no_roots: "请先添加扫描根",
     add_directory: "添加目录",
     remove: "移除",
     projects: "项目",
@@ -363,6 +377,13 @@ static ZH: Strings = Strings {
 
 static EN: Strings = Strings {
     roots: "Scan roots",
+    refresh_projects: "Refresh project list",
+    refresh_scanning: "Refreshing project list",
+    refresh_failed: "Refresh did not finish. Try again.",
+    refresh_measuring: "Wait for size measurement to finish before refreshing",
+    refresh_cleaning: "Wait for cleanup to finish before refreshing",
+    refresh_confirmation: "Close the cleanup panel or confirmation dialog first",
+    refresh_no_roots: "Add a scan root first",
     add_directory: "Add directory",
     remove: "Remove",
     projects: "Projects",
