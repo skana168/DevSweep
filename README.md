@@ -121,7 +121,7 @@ A directory containing a `Cargo.toml` file is recognized as a Rust project witho
 manifest. This includes workspace roots with no package of their own. Workspace roots and member
 directories appear separately, even when they have no cleanable items; membership is not resolved.
 Discovery stays within the scan roots, up to five levels deep, and skips build and dependency folders.
-Each project has one stack: Flutter > iOS > Android > Java > Node > Python > Rust > .NET. Higher-priority markers
+Each project has one stack: Unity > Flutter > iOS > Android > Java > Node > Python > Rust > .NET. Higher-priority markers
 win when they share a directory with `Cargo.toml`; independent Rust subdirectories can still appear.
 
 Rust cleanup covers the whole real `target/` directory directly under each Rust project. It is
@@ -147,8 +147,8 @@ source files alone do not identify a project.
 
 .NET has the lowest stack priority, preserving existing mixed-project classifications; an
 independent .NET subdirectory can still appear. Discovery keeps the five-level depth and platform
-subdirectory ownership rules. Generated project files, including Unity's, use the same detection
-rules; this does not add Unity cleanup support.
+subdirectory ownership rules. Unity projects take priority over generated .NET project files;
+see the read-only Unity support below.
 
 Cleanup includes only the whole real `bin/` and `obj/` directories directly under each .NET
 project, matched with exact lowercase names. They are separate dangerous entries, unchecked by
@@ -162,6 +162,25 @@ are outside these built-in rules. DevSweep does not run dotnet or MSBuild; this 
 to `dotnet clean`. Stop builds before cleaning: active builds are not detected or locked, and
 filesystem changes between validation and deletion remain possible. .NET support is implemented
 in source and has not yet been released.
+
+### Unity projects (read-only)
+
+Unity is recognized by `Assets/` and `ProjectSettings/` directories plus the file
+`ProjectSettings/ProjectVersion.txt`; generated `.csproj` files are not required.
+Unity takes priority over all other stacks. Its internal Packages, plugins, and tools do not
+appear as separate projects, including when an internal directory is added as a scan root.
+The Unity type filter and project row show read-only support and version qualification
+(hover over a truncated note for the full reason).
+
+The support floor is Unity 2022.3, with numeric ordering including Unity 6's `6000.x` versions.
+Earlier, malformed, and unknown versions remain visible. This floor describes support scope;
+it does not claim all earlier versions are unsafe. **All Unity projects remain read-only in
+this release, including supported versions.** No Unity targets or cache sizes are offered yet.
+Generic/custom rules and rule overrides cannot enable cleanup; planning and execution both
+reject Unity cleanup, including manually constructed plans.
+
+Library/Temp cleanup and Editor busy/idle/unknown checks belong to the next ticket and are not
+implemented here. No real Unity Editor or Windows Editor validation has been completed.
 
 ## Custom rules
 

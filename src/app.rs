@@ -1151,6 +1151,7 @@ impl DevSweepApp {
         ui.add_space(4.0);
         let filters = std::iter::once((None, s.all)).chain(
             [
+                Stack::Unity,
                 Stack::Flutter,
                 Stack::Android,
                 Stack::Ios,
@@ -1553,16 +1554,24 @@ impl DevSweepApp {
                             let entry = &entries[index];
                             let project = &entry.project;
                             let last = Some(index) == last_index;
-                            body.row(ROW_H, |mut row| {
-                                let hit =
-                                    project_table_row(&mut row, entry, last, running, t, s, span)
-                                        .map(|action| (project.path.clone(), action));
-                                // Only one row can be clicked per frame; later rows
-                                // must not clear an action an earlier row just set.
-                                if hit.is_some() {
-                                    action = hit;
-                                }
-                            });
+                            body.row(
+                                if project.stack == Stack::Unity {
+                                    76.0
+                                } else {
+                                    ROW_H
+                                },
+                                |mut row| {
+                                    let hit = project_table_row(
+                                        &mut row, entry, last, running, t, s, span,
+                                    )
+                                    .map(|action| (project.path.clone(), action));
+                                    // Only one row can be clicked per frame; later rows
+                                    // must not clear an action an earlier row just set.
+                                    if hit.is_some() {
+                                        action = hit;
+                                    }
+                                },
+                            );
                         }
                     });
             });
@@ -2266,7 +2275,7 @@ fn project_table_row(
 ) -> Option<RowAction> {
     let project = &entry.project;
     let mut action = None;
-    let cleanable = !entry.targets.is_empty();
+    let cleanable = project.stack != Stack::Unity && !entry.targets.is_empty();
 
     row.col(|ui| {
         if !last {
@@ -2293,6 +2302,15 @@ fn project_table_row(
             .selectable(false);
             ui.add(path)
                 .on_hover_text(project.path.display().to_string());
+            if project.stack == Stack::Unity {
+                let note = s.unity_note(&scan::unity_version(&project.path));
+                ui.add(
+                    Label::new(RichText::new(&note).size(12.0).color(t.text_muted))
+                        .truncate()
+                        .selectable(false),
+                )
+                .on_hover_text(note);
+            }
         });
         if cleanable
             && open
@@ -2786,6 +2804,89 @@ mod tests {
             failures_open: false,
             failures: Vec::new(),
             settings_open: false,
+        }
+    }
+
+    #[test]
+    fn type_filter_displays_unity_and_keeps_existing_types_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let game = root.join("game");
+        std::fs::create_dir_all(game.join("Assets")).unwrap();
+        std::fs::create_dir_all(game.join("ProjectSettings")).unwrap();
+        std::fs::write(
+            game.join("ProjectSettings/ProjectVersion.txt"),
+            "m_EditorVersion: 6000.0.1f1",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("web")).unwrap();
+        std::fs::write(root.join("web/package.json"), "{}").unwrap();
+        let mut app = app_with_rows(0);
+        app.config.roots = vec![root];
+        app.projects
+            .refresh(&app.config.roots, &rules::builtin_rules());
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        for lang in [Lang::Zh, Lang::En] {
+            app.lang = lang;
+            for (filter, game_visible, web_visible) in [
+                (None, true, true),
+                (Some(Stack::Unity), true, false),
+                (Some(Stack::Node), false, true),
+            ] {
+                app.filter = filter;
+                let mut text = String::new();
+                for _ in 0..2 {
+                    let mut output = ctx.run_ui(raw_input(Vec::new()), |ui| {
+                        let t = theme::tokens(egui::Theme::Dark);
+                        let s = app.strings();
+                        egui::Panel::left("filters")
+                            .exact_size(200.0)
+                            .show(ui, |ui| app.sidebar(ui, t, s));
+                        egui::CentralPanel::default().show(ui, |ui| {
+                            app.content(ui, t, s, &app.visible());
+                        });
+                    });
+                    fn collect(shape: &egui::Shape, text: &mut String) {
+                        match shape {
+                            egui::Shape::Text(shape) => {
+                                text.push_str(&shape.galley.job.text);
+                                text.push('\n');
+                            }
+                            egui::Shape::Vec(shapes) => {
+                                for shape in shapes {
+                                    collect(shape, text);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    text.clear();
+                    for clipped in &output.shapes {
+                        collect(&clipped.shape, &mut text);
+                    }
+                    output.textures_delta.clear();
+                }
+                assert!(text.contains("Unity  1"), "{text}");
+                assert_eq!(
+                    text.lines().any(|line| line == "game"),
+                    game_visible,
+                    "{text}"
+                );
+                assert_eq!(
+                    text.lines().any(|line| line == "web"),
+                    web_visible,
+                    "{text}"
+                );
+                if game_visible {
+                    assert!(
+                        text.contains("6000.0.1f1")
+                            || text.contains("只读")
+                            || text.contains("read-only"),
+                        "{text}"
+                    );
+                }
+            }
         }
     }
 

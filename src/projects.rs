@@ -74,9 +74,13 @@ impl ProjectRefresh {
         self.entries = projects
             .into_iter()
             .map(|project| {
-                let targets = targets
-                    .remove(&project.path)
-                    .unwrap_or_else(|| rules::expand_targets(&project, rules));
+                let targets = if project.stack == scan::Stack::Unity {
+                    Vec::new()
+                } else {
+                    targets
+                        .remove(&project.path)
+                        .unwrap_or_else(|| rules::expand_targets(&project, rules))
+                };
                 ProjectEntry { project, targets }
             })
             .collect();

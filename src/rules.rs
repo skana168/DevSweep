@@ -25,7 +25,7 @@ pub struct Rule {
 
 impl Rule {
     fn applies_to(&self, stack: Stack) -> bool {
-        self.stack.is_none_or(|required| required == stack)
+        stack != Stack::Unity && self.stack.is_none_or(|required| required == stack)
     }
 
     /// Recheck Rule-specific eligibility at discovery and immediately before planning.
@@ -356,6 +356,7 @@ fn parse_stack(stack: &str) -> Option<Option<Stack>> {
         "python" => Some(Some(Stack::Python)),
         "rust" => Some(Some(Stack::Rust)),
         "dotnet" => Some(Some(Stack::Dotnet)),
+        "unity" => Some(Some(Stack::Unity)),
         _ => None,
     }
 }
@@ -371,6 +372,9 @@ fn is_plain_rel(rel: &str) -> bool {
 /// Resolve the rules that apply to `project` into existing paths.
 pub fn expand_targets(project: &Project, rules: &[Rule]) -> Vec<Target> {
     let mut targets = Vec::new();
+    if crate::scan::inside_unity(&project.path) {
+        return targets;
+    }
     for rule in rules {
         if !rule.applies_to(project.stack) {
             continue;

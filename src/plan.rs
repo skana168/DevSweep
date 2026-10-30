@@ -38,6 +38,7 @@ pub struct Skip {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipReason {
+    UnityReadOnly,
     OutsideProject,
     ProjectRoot,
     Home,
@@ -146,6 +147,12 @@ fn check_target(
     home: Option<&Path>,
     rules: &[Rule],
 ) -> Result<(PathBuf, bool), SkipReason> {
+    if project.stack == Stack::Unity
+        || crate::scan::inside_unity(project.path)
+        || crate::scan::inside_unity(&target.path)
+    {
+        return Err(SkipReason::UnityReadOnly);
+    }
     // A symlink is one entry; canonicalizing it only validates where it points.
     let meta = fs::symlink_metadata(&target.path).map_err(|_| SkipReason::Missing)?;
     let is_link = meta.file_type().is_symlink();

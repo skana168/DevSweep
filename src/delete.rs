@@ -41,6 +41,7 @@ pub struct Failure {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureReason {
+    UnityReadOnly,
     PermissionDenied,
     InUse,
     Missing,
@@ -134,7 +135,14 @@ fn execute_inner(
                     let mut deleted = Vec::new();
                     let mut freed = 0;
                     for item in items {
-                        match delete(item, mode) {
+                        let result = if crate::scan::inside_unity(project)
+                            || crate::scan::inside_unity(&item.target_path)
+                        {
+                            Err(FailureReason::UnityReadOnly)
+                        } else {
+                            delete(item, mode)
+                        };
+                        match result {
                             Ok(()) => {
                                 freed += item.bytes;
                                 deleted.push(item.target_path.clone());

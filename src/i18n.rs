@@ -89,6 +89,11 @@ pub struct Strings {
     pub stack_node: &'static str,
     pub stack_python: &'static str,
     pub stack_rust: &'static str,
+    pub unity_supported: &'static str,
+    pub unity_unsupported: &'static str,
+    pub unity_invalid: &'static str,
+    pub unity_unknown: &'static str,
+    pub unity_read_only: &'static str,
     pub stack_dotnet: &'static str,
     pub dotnet_clean_note: &'static str,
     pub global_caches: &'static str,
@@ -147,6 +152,17 @@ pub struct Strings {
 }
 
 impl Strings {
+    pub fn unity_note(&self, version: &devsweep::scan::UnityVersion) -> String {
+        use devsweep::scan::UnityVersion;
+        let qualification = match version {
+            UnityVersion::Supported(version) => format!("{version}: {}", self.unity_supported),
+            UnityVersion::Unsupported(version) => format!("{version}: {}", self.unity_unsupported),
+            UnityVersion::Invalid => self.unity_invalid.to_string(),
+            UnityVersion::Unknown => self.unity_unknown.to_string(),
+        };
+        format!("{} {qualification}", self.unity_read_only)
+    }
+
     pub fn go_cache_error(&self, error: GoCacheError) -> &'static str {
         match error {
             GoCacheError::Changed => self.go_cache_changed,
@@ -174,6 +190,7 @@ impl Strings {
             Stack::Python => self.stack_python,
             Stack::Rust => self.stack_rust,
             Stack::Dotnet => self.stack_dotnet,
+            Stack::Unity => "Unity",
         }
     }
 
@@ -186,6 +203,7 @@ impl Strings {
 
     pub fn skip_reason(&self, reason: SkipReason) -> &'static str {
         match reason {
+            SkipReason::UnityReadOnly => self.unity_read_only,
             SkipReason::OutsideProject => self.skip_outside_project,
             SkipReason::ProjectRoot => self.skip_project_root,
             SkipReason::Home => self.skip_home,
@@ -200,6 +218,7 @@ impl Strings {
 
     pub fn failure_reason(&self, reason: FailureReason) -> &'static str {
         match reason {
+            FailureReason::UnityReadOnly => self.unity_read_only,
             FailureReason::PermissionDenied => self.fail_permission,
             FailureReason::InUse => self.fail_in_use,
             FailureReason::Missing => self.fail_missing,
@@ -260,6 +279,11 @@ static ZH: Strings = Strings {
     stack_node: "Node",
     stack_python: "Python",
     stack_rust: "Rust",
+    unity_supported: "符合 Unity 2022.3+ 版本范围，仍未开放清理。",
+    unity_unsupported: "低于支持下限 Unity 2022.3；这不表示所有早期版本都不安全。",
+    unity_invalid: "版本信息损坏，无法确认是否符合 Unity 2022.3+ 范围。",
+    unity_unknown: "版本未知，无法确认是否符合 Unity 2022.3+ 范围。",
+    unity_read_only: "Unity 仅支持只读展示，清理能力尚未开放。",
     stack_dotnet: ".NET",
     dotnet_clean_note: "将删除所选 bin/obj 整个目录，包括手工放入的内容。请先停止构建。",
     global_caches: "全局缓存",
@@ -369,6 +393,11 @@ static EN: Strings = Strings {
     stack_node: "Node",
     stack_python: "Python",
     stack_rust: "Rust",
+    unity_supported: "meets the Unity 2022.3+ version range; cleanup remains unavailable.",
+    unity_unsupported: "below the Unity 2022.3 support floor; this does not mean all earlier versions are unsafe.",
+    unity_invalid: "Malformed version; cannot confirm the Unity 2022.3+ version range.",
+    unity_unknown: "Unknown version; cannot confirm the Unity 2022.3+ version range.",
+    unity_read_only: "Unity is read-only; cleanup is not available yet.",
     stack_dotnet: ".NET",
     dotnet_clean_note: "Deletes each selected bin/obj directory in full, including files you added. Stop builds first.",
     global_caches: "Global caches",
@@ -425,3 +454,33 @@ static EN: Strings = Strings {
     root_covered: "Covered by a parent root",
     root_duplicate: "This directory is already listed",
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use devsweep::scan::UnityVersion;
+
+    #[test]
+    fn unity_messages_explain_read_only_and_version_qualification_in_both_languages() {
+        let zh = Lang::Zh.strings();
+        let en = Lang::En.strings();
+        assert_eq!(zh.stack(Stack::Unity), "Unity");
+        assert_eq!(en.stack(Stack::Unity), "Unity");
+        for (strings, read_only, supported, unsupported, invalid, unknown) in [
+            (zh, "只读", "符合", "低于", "损坏", "未知"),
+            (en, "read-only", "meets", "below", "Malformed", "Unknown"),
+        ] {
+            for (version, expected) in [
+                (UnityVersion::Supported("6000.0.1f1".into()), supported),
+                (UnityVersion::Unsupported("2021.3.0f1".into()), unsupported),
+                (UnityVersion::Invalid, invalid),
+                (UnityVersion::Unknown, unknown),
+            ] {
+                let note = strings.unity_note(&version);
+                assert!(note.contains(read_only), "{note}");
+                assert!(note.contains(expected), "{note}");
+                assert!(note.contains("2022.3"), "{note}");
+            }
+        }
+    }
+}
