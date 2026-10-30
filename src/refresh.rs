@@ -31,6 +31,7 @@ pub struct Refresh {
     pub scan: Option<Receiver<ProjectRefresh>>,
     queued: bool,
     additions: Vec<PathBuf>,
+    clean_locked: bool,
     pending_measurements: Vec<SizeRequest>,
     pub measurement: Option<Measurement>,
     pub failed: bool,
@@ -71,6 +72,17 @@ impl Refresh {
         self.queued = false;
         self.failed = false;
         self.scan = Some(executor.discover(projects.clone(), roots.to_vec(), rules.to_vec()));
+    }
+
+    /// Observe Clean lifecycle state. Only discovery is deferred; running discovery
+    /// and measurements may still finish and merge into current Project state.
+    pub fn coordinate(
+        &mut self,
+        clean: Option<&crate::project_clean::ProjectClean>,
+        execution: Option<&crate::project_clean::ProjectExecution>,
+    ) {
+        self.clean_locked = clean.is_some_and(|clean| clean.locked())
+            || execution.is_some_and(|execution| execution.running());
     }
 
     /// Start measurements, including independent cache requests supplied by the adapter.
@@ -132,7 +144,7 @@ impl Refresh {
         rules: &[Rule],
         executor: &mut impl RefreshExecutor,
     ) {
-        if self.scan.is_some() || self.measurement.is_some() {
+        if self.clean_locked || self.scan.is_some() || self.measurement.is_some() {
             self.queued = true;
             return;
         }

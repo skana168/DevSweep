@@ -335,3 +335,150 @@ fn repeated_additions_scan_only_new_subtrees_and_merge_latest_state() {
     assert_eq!(target.size, Some(41));
     assert!(!target.checked);
 }
+
+#[test]
+fn confirmation_defers_repeated_refresh_until_cancel_and_idle_does_not_refresh() {
+    use devsweep::project_clean::ProjectClean;
+    let mut clean = ProjectClean::new("project".into(), vec![]);
+    clean.plan.items.push(devsweep::plan::PlanItem {
+        project_path: "project".into(),
+        target_path: "project/target".into(),
+        bytes: 10,
+        large: false,
+    });
+    assert!(clean.confirm());
+    let mut refresh = Refresh::default();
+    let mut executor = Controlled::default();
+    let mut projects = ProjectRefresh::default();
+    refresh.coordinate(Some(&clean), None);
+    for _ in 0..3 {
+        refresh.request(&projects, &[], &[], &mut executor);
+        refresh.poll_discovery(&mut projects, &[], &[], &mut executor);
+    }
+    assert!(executor.discoveries.is_empty());
+    clean.cancel_confirmation();
+    refresh.coordinate(Some(&clean), None);
+    refresh.poll_discovery(&mut projects, &[], &[], &mut executor);
+    assert_eq!(executor.discoveries.len(), 1);
+    executor.discoveries[0]
+        .send(ProjectRefresh::default())
+        .unwrap();
+    refresh.poll_discovery(&mut projects, &[], &[], &mut executor);
+    refresh.poll_discovery(&mut projects, &[], &[], &mut executor);
+    assert_eq!(executor.discoveries.len(), 1);
+}
+
+#[test]
+fn execution_holds_refresh_through_abort_and_releases_on_report_or_disconnect() {
+    use devsweep::{
+        delete::{DeleteEvent, DeleteReport},
+        project_clean::ProjectExecution,
+    };
+    use std::sync::{Arc, atomic::AtomicBool};
+    for disconnect in [false, true] {
+        for requested in [false, true] {
+            let (tx, rx) = mpsc::channel();
+            let mut execution = ProjectExecution::new(rx, vec![], Arc::new(AtomicBool::new(false)));
+            let mut refresh = Refresh::default();
+            let mut executor = Controlled::default();
+            let mut projects = ProjectRefresh::default();
+            refresh.coordinate(None, Some(&execution));
+            if requested {
+                for _ in 0..3 {
+                    refresh.request(&projects, &[], &[], &mut executor);
+                }
+            }
+            execution.request_abort();
+            execution.poll_projects(&mut projects);
+            refresh.coordinate(None, Some(&execution));
+            refresh.poll_discovery(&mut projects, &[], &[], &mut executor);
+            assert!(executor.discoveries.is_empty());
+            if !disconnect {
+                tx.send(DeleteEvent::Finished(DeleteReport {
+                    aborted: true,
+                    freed_bytes: 0,
+                    failures: vec![],
+                    projects_done: 0,
+                    projects_total: 1,
+                }))
+                .unwrap();
+            }
+            drop(tx);
+            execution.poll_projects(&mut projects);
+            assert!(!execution.running());
+            refresh.coordinate(None, Some(&execution));
+            refresh.poll_discovery(&mut projects, &[], &[], &mut executor);
+            assert_eq!(executor.discoveries.len(), usize::from(requested));
+        }
+    }
+}
+
+#[test]
+fn running_discovery_and_late_measurement_keep_successful_deletions() {
+    use devsweep::{
+        delete::DeleteEvent,
+        plan::PlanItem,
+        project_clean::{ProjectClean, ProjectExecution},
+    };
+    use std::sync::{Arc, atomic::AtomicBool};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("node_modules")).unwrap();
+    std::fs::write(root.join("package.json"), "{}").unwrap();
+    let rules = devsweep::rules::builtin_rules();
+    let mut projects = ProjectRefresh::default();
+    projects.refresh(std::slice::from_ref(&root), &rules);
+    let mut refresh = Refresh::default();
+    let mut executor = Controlled::default();
+    // Ordinary preview does not defer discovery.
+    let clean = ProjectClean::new(root.clone(), projects.entry(&root).unwrap().targets.clone());
+    refresh.coordinate(Some(&clean), None);
+    refresh.request(
+        &projects,
+        std::slice::from_ref(&root),
+        &rules,
+        &mut executor,
+    );
+    let stale = projects.clone();
+    refresh.measure(projects.measurement_requests(), &mut executor);
+    let target = root.join("node_modules");
+    let (tx, rx) = mpsc::channel();
+    let mut execution = ProjectExecution::new(
+        rx,
+        vec![PlanItem {
+            project_path: root.clone(),
+            target_path: target.clone(),
+            bytes: 37,
+            large: false,
+        }],
+        Arc::new(AtomicBool::new(false)),
+    );
+    tx.send(DeleteEvent::ProjectDone {
+        project: root.clone(),
+        deleted: vec![target.clone()],
+    })
+    .unwrap();
+    drop(tx);
+    execution.poll_projects(&mut projects);
+    executor.discoveries[0].send(stale).unwrap();
+    refresh.coordinate(None, Some(&execution));
+    refresh.poll_discovery(
+        &mut projects,
+        std::slice::from_ref(&root),
+        &rules,
+        &mut executor,
+    );
+    executor.measurements[0]
+        .send(SizeEvent {
+            project: root.clone(),
+            sizes: vec![(target, 37)],
+        })
+        .unwrap();
+    executor.measurements.clear();
+    refresh.present_progress();
+    refresh.poll_measurement(&mut projects);
+    assert!(projects.entry(&root).unwrap().targets.is_empty());
+    assert_eq!(execution.freed_bytes, 37);
+    assert!(execution.interrupted);
+    assert_eq!(executor.discoveries.len(), 1);
+}

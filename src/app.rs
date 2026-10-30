@@ -288,7 +288,17 @@ impl DevSweepApp {
         self.last_scan = Instant::now();
     }
 
+    fn coordinate_refresh(&mut self) {
+        self.refresh.coordinate(
+            self.panel.as_ref(),
+            self.execution
+                .as_ref()
+                .and_then(|execution| execution.project.as_ref()),
+        );
+    }
+
     fn refresh_projects(&mut self, ctx: &egui::Context) {
+        self.coordinate_refresh();
         self.refresh.request(
             &self.projects,
             &self.config.roots,
@@ -300,6 +310,7 @@ impl DevSweepApp {
     }
 
     fn poll_project_scan(&mut self, ctx: &egui::Context) {
+        self.coordinate_refresh();
         let changed = self.refresh.poll_discovery(
             &mut self.projects,
             &self.config.roots,
@@ -1325,7 +1336,9 @@ impl DevSweepApp {
                     Some(s.refresh_measuring)
                 } else if self.execution.is_some() {
                     Some(s.refresh_cleaning)
-                } else if self.pending.is_some() || self.panel.is_some() {
+                } else if self.pending.is_some()
+                    || self.panel.as_ref().is_some_and(|panel| panel.locked())
+                {
                     Some(s.refresh_confirmation)
                 } else if self.config.roots.is_empty() {
                     Some(s.refresh_no_roots)
@@ -3377,6 +3390,41 @@ mod tests {
     }
 
     #[test]
+    fn preview_allows_manual_refresh_and_confirmation_queues_until_cancel() {
+        let mut app = app_with_rows(1);
+        let entry = &app.projects.entries()[0];
+        let mut panel = Panel::new(entry.project.path.clone(), entry.targets.clone());
+        panel.plan.items.push(plan::PlanItem {
+            project_path: entry.project.path.clone(),
+            target_path: entry.targets[0].path.clone(),
+            bytes: 1024,
+            large: false,
+        });
+        app.panel = Some(panel);
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        sidebar_frame(&mut app, &ctx, raw_input(vec![]));
+        assert!(
+            ctx.read_response(egui::Id::unique("sidebar-refresh"))
+                .unwrap()
+                .enabled()
+        );
+        assert!(app.panel.as_mut().unwrap().confirm());
+        for _ in 0..3 {
+            app.refresh_projects(&ctx);
+            app.poll_project_scan(&ctx);
+        }
+        assert!(app.refresh.scan.is_none());
+        assert!(app.go_query.is_none());
+        app.panel.as_mut().unwrap().cancel_confirmation();
+        app.poll_project_scan(&ctx);
+        assert!(app.refresh.scan.is_some());
+        assert!(app.go_query.is_none());
+        finish_project_scan(&mut app, &ctx);
+        assert!(app.refresh.scan.is_none());
+    }
+
+    #[test]
     fn failed_background_refresh_keeps_projects_and_allows_retry() {
         let mut app = app_with_rows(1);
         let ctx = egui::Context::default();
@@ -3453,7 +3501,15 @@ mod tests {
                         s.refresh_measuring
                     }
                     3 => {
-                        app.panel = Some(Panel::new(PathBuf::new(), vec![]));
+                        let mut panel = Panel::new(PathBuf::new(), vec![]);
+                        panel.plan.items.push(plan::PlanItem {
+                            project_path: PathBuf::new(),
+                            target_path: "target".into(),
+                            bytes: 1,
+                            large: false,
+                        });
+                        assert!(panel.confirm());
+                        app.panel = Some(panel);
                         s.refresh_confirmation
                     }
                     4 => {
