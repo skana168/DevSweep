@@ -2268,15 +2268,12 @@ fn refresh_icon(
                 })
                 .collect();
             let end = *points.last().unwrap();
+            let radial = (end - c).normalized();
+            let tangent = egui::vec2(-radial.y, radial.x);
+            let base = end - tangent * 3.5;
             p.add(egui::Shape::line(points, Stroke::new(1.5, ink)));
-            p.line_segment(
-                [end + rotation * egui::vec2(-3.5, -1.0), end],
-                Stroke::new(1.5, ink),
-            );
-            p.line_segment(
-                [end + rotation * egui::vec2(-0.5, 3.5), end],
-                Stroke::new(1.5, ink),
-            );
+            p.line_segment([base + radial * 2.5, end], Stroke::new(1.5, ink));
+            p.line_segment([base - radial * 2.5, end], Stroke::new(1.5, ink));
             response.widget_info(|| {
                 egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label)
             });
@@ -3404,6 +3401,69 @@ mod tests {
                 assert_eq!(app.go_query.is_some(), state == 2);
                 assert_eq!(app.measurement.is_some(), state == 1);
             }
+        }
+    }
+
+    #[test]
+    fn refresh_arrowhead_is_centered_behind_the_arc_tip_at_every_rotation() {
+        fn collect(
+            shape: &egui::Shape,
+            arc: &mut Vec<egui::Pos2>,
+            wings: &mut Vec<[egui::Pos2; 2]>,
+        ) {
+            match shape {
+                egui::Shape::Path(path) if path.points.len() == 25 => *arc = path.points.clone(),
+                egui::Shape::LineSegment { points, .. } => wings.push(*points),
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, arc, wings);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (refreshing, time) in [
+            (false, 0.0),
+            (true, 0.0),
+            (true, 0.25),
+            (true, 0.5),
+            (true, 0.75),
+        ] {
+            let mut app = app_with_rows(0);
+            let (_tx, rx) = std::sync::mpsc::channel();
+            app.project_scan = refreshing.then_some(rx);
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            let mut input = raw_input(vec![]);
+            input.time = Some(time);
+            let output = sidebar_frame(&mut app, &ctx, input);
+            let center = ctx
+                .read_response(egui::Id::unique("sidebar-refresh"))
+                .unwrap()
+                .rect
+                .center();
+            let mut arc = Vec::new();
+            let mut lines = Vec::new();
+            for shape in &output.shapes {
+                collect(&shape.shape, &mut arc, &mut lines);
+            }
+            let tip = *arc.last().unwrap();
+            let radial = (tip - center).normalized();
+            let tangent = egui::vec2(-radial.y, radial.x);
+            let wings: Vec<_> = lines
+                .iter()
+                .filter(|points| points[1].distance(tip) < 0.001)
+                .map(|points| points[0] - tip)
+                .collect();
+            assert_eq!(wings.len(), 2);
+            assert!(
+                wings.iter().all(|wing| wing.dot(tangent) < 0.0),
+                "arrow wings must trail the tip at {time}"
+            );
+            assert!(
+                (wings[0] + wings[1]).dot(radial).abs() < 0.01,
+                "arrowhead must be symmetric about the tangent at {time}"
+            );
         }
     }
 
