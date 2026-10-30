@@ -8,7 +8,8 @@ use devsweep::cache::{self, CacheRule};
 use devsweep::config::{self, Config, LanguageChoice, ThemeChoice};
 use devsweep::delete::{self, DeleteEvent, DeleteMode, Failure};
 use devsweep::go_cache::{self, GoCacheClean, GoCacheContext, GoCacheError, GoCacheSnapshot};
-use devsweep::plan::{self, DeletePlan, PlanProject};
+use devsweep::plan::{self, DeletePlan};
+use devsweep::project_clean::ProjectExecution;
 use devsweep::projects::{ProjectEntry, ProjectRefresh};
 #[cfg(test)]
 use devsweep::refresh::Measurement;
@@ -172,10 +173,11 @@ impl RefreshExecutor for RefreshWorker {
 }
 
 struct Execution {
+    project: Option<ProjectExecution>,
     done: usize,
     total: usize,
     current: Option<String>,
-    rx: Receiver<DeleteEvent>,
+    rx: Option<Receiver<DeleteEvent>>,
     abort: Arc<AtomicBool>,
     go_cache: bool,
     go_check: Option<Receiver<(GoCacheSnapshot, Option<GoCacheError>)>>,
@@ -184,6 +186,8 @@ struct Execution {
 }
 
 struct Flash {
+    interrupted: bool,
+    skipped: Vec<devsweep::plan::Skip>,
     bytes: u64,
     aborted: bool,
     global_cache: bool,
@@ -517,37 +521,6 @@ impl DevSweepApp {
         }
     }
 
-    /// The plan the panel's current draft would delete, for one project.
-    fn project_plan_task(&self, path: &Path) -> impl FnOnce() -> DeletePlan + Send + 'static {
-        let entry = self.projects.entry(path).map(|entry| {
-            (
-                entry.project.path.clone(),
-                entry.project.stack,
-                self.panel
-                    .as_ref()
-                    .filter(|panel| panel.project == path && panel.locked())
-                    .map(|panel| panel.targets().to_vec())
-                    .unwrap_or_else(|| entry.targets.clone()),
-            )
-        });
-        let roots = self.config.roots.clone();
-        let rules = self.rules.clone();
-        move || {
-            let Some((path, stack, targets)) = entry else {
-                return empty_plan();
-            };
-            plan::plan(
-                &[PlanProject {
-                    path: &path,
-                    stack,
-                    targets: &targets,
-                }],
-                &roots,
-                &rules,
-            )
-        }
-    }
-
     /// Open the panel without waiting for the process query on the UI thread.
     fn open_panel(&mut self, ctx: &egui::Context, path: &Path) {
         let Some(targets) = self.projects.targets_mut(path) else {
@@ -621,10 +594,41 @@ impl DevSweepApp {
             Cleanup::GoCache(rule, _) => rule.id == "go.module",
             Cleanup::Project(_) => false,
         };
-        let project_task = match &cleanup {
-            Cleanup::Project(path) => Some(self.project_plan_task(path)),
-            _ => None,
-        };
+        if let Cleanup::Project(path) = &cleanup {
+            let Some(panel) = self.panel.take().filter(|panel| panel.project == *path) else {
+                return;
+            };
+            let Some(entry) = self.projects.entry(path) else {
+                return;
+            };
+            let Some(project) = panel.execute(
+                entry.project.stack,
+                self.config.roots.clone(),
+                self.rules.clone(),
+                self.config.delete_mode,
+                |task| {
+                    std::thread::spawn(task);
+                },
+            ) else {
+                return;
+            };
+            self.execution = Some(Execution {
+                abort: Arc::clone(&project.abort),
+                project: Some(project),
+                done: 0,
+                total: 0,
+                current: None,
+                rx: None,
+                go_cache: false,
+                go_check: None,
+                global_cache: false,
+            });
+            self.flash = None;
+            self.failures.clear();
+            self.failures_open = false;
+            ctx.request_repaint();
+            return;
+        }
         let plan = self.plan_for(cleanup);
         if plan.items.is_empty() {
             return;
@@ -646,17 +650,16 @@ impl DevSweepApp {
                 }
                 .execute(mode, &flag, tx, check_tx);
             } else {
-                // Confirmation is only a preview: observe real process state again here.
-                let plan = project_task.map_or(plan, |task| task());
                 delete::execute(plan, mode, &flag, tx);
             }
         });
 
         self.execution = Some(Execution {
+            project: None,
             done: 0,
             total: 0,
             current: None,
-            rx,
+            rx: Some(rx),
             abort,
             go_cache: is_go,
             go_check: is_go.then_some(check_rx),
@@ -670,7 +673,11 @@ impl DevSweepApp {
 
     fn stop_execution(&self) {
         if let Some(execution) = &self.execution {
-            execution.abort.store(true, Ordering::Relaxed);
+            if let Some(project) = &execution.project {
+                project.request_abort();
+            } else {
+                execution.abort.store(true, Ordering::Relaxed);
+            }
         }
     }
 
@@ -678,6 +685,30 @@ impl DevSweepApp {
         let Some(execution) = &mut self.execution else {
             return;
         };
+        if let Some(project) = &mut execution.project {
+            project.poll_projects(&mut self.projects);
+            execution.done = project.done;
+            execution.total = project.total;
+            execution.current = project.current.as_deref().map(project_name);
+            if !project.running() {
+                self.flash = Some(Flash {
+                    bytes: project.freed_bytes,
+                    interrupted: project.interrupted,
+                    skipped: project.skipped.clone(),
+                    aborted: project.report.as_ref().is_some_and(|report| report.aborted),
+                    global_cache: false,
+                });
+                self.failures = project
+                    .report
+                    .as_ref()
+                    .map(|report| report.failures.clone())
+                    .unwrap_or_default();
+                self.failures_open = !self.failures.is_empty() || !project.skipped.is_empty();
+                self.execution = None;
+            }
+            ctx.request_repaint_after(Duration::from_millis(100));
+            return;
+        }
         let global_cache = execution.global_cache;
         let is_go = execution.go_cache;
         let mut changed = false;
@@ -685,7 +716,12 @@ impl DevSweepApp {
         let mut lost = false;
 
         loop {
-            match execution.rx.try_recv() {
+            match execution
+                .rx
+                .as_ref()
+                .expect("cache execution receiver")
+                .try_recv()
+            {
                 Ok(DeleteEvent::Started { project, total }) => {
                     execution.total = total;
                     execution.current = Some(project_name(&project));
@@ -739,6 +775,8 @@ impl DevSweepApp {
         if let Some(report) = finished {
             self.execution = None;
             self.flash = Some(Flash {
+                interrupted: false,
+                skipped: vec![],
                 bytes: report.freed_bytes,
                 aborted: report.aborted,
                 global_cache,
@@ -968,6 +1006,9 @@ impl DevSweepApp {
             size::format_size(flash.bytes)
         };
         let mut label = format!("{} {freed}", s.freed);
+        if flash.interrupted {
+            label = format!("{label} · {}", s.clean_execution_interrupted);
+        }
         if flash.aborted {
             label = format!("{label} · {}", s.aborted);
         }
@@ -975,6 +1016,11 @@ impl DevSweepApp {
             label = format!("{label} · {}", s.cache_redownload);
         }
         let failure_count = self.failures.len();
+        let skipped_count = flash.skipped.len();
+        let result_label = format!(
+            "{} ({failure_count}) · {} ({skipped_count})",
+            s.failures, s.skipped
+        );
         let mut dismiss = false;
         let mut show_failures = false;
 
@@ -983,10 +1029,13 @@ impl DevSweepApp {
             .inner_margin(egui::Margin::symmetric(16, 10))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(label).size(14.0).color(t.good));
-                    if failure_count > 0 {
-                        let text =
-                            RichText::new(format!("{} ({failure_count})", s.failures)).size(13.0);
+                    ui.label(RichText::new(label).size(14.0).color(if flash.interrupted {
+                        t.danger
+                    } else {
+                        t.good
+                    }));
+                    if failure_count + skipped_count > 0 {
+                        let text = RichText::new(result_label).size(13.0);
                         if text_button(ui, text, t.danger, t.text_strong).clicked() {
                             show_failures = true;
                         }
@@ -1148,7 +1197,13 @@ impl DevSweepApp {
             .show(ctx, |ui| {
                 ui.set_width(560.0);
                 ui.label(theme::title(
-                    format!("{} ({})", s.failures, self.failures.len()),
+                    format!(
+                        "{} ({}) · {} ({})",
+                        s.failures,
+                        self.failures.len(),
+                        s.skipped,
+                        self.flash.as_ref().map_or(0, |flash| flash.skipped.len())
+                    ),
                     20.0,
                     t.danger,
                 ));
@@ -1157,6 +1212,15 @@ impl DevSweepApp {
                     .max_height(320.0)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
+                        if let Some(flash) = &self.flash {
+                            for skip in &flash.skipped {
+                                ui.label(format!(
+                                    "{} · {}",
+                                    skip.path.display(),
+                                    s.skip_reason(skip.reason)
+                                ));
+                            }
+                        }
                         for failure in &self.failures {
                             ui.horizontal(|ui| {
                                 let rel = failure
@@ -3370,10 +3434,11 @@ mod tests {
                     }
                     6 => {
                         app.execution = Some(Execution {
+                            project: None,
                             done: 0,
                             total: 1,
                             current: None,
-                            rx: delete_rx,
+                            rx: Some(delete_rx),
                             abort: Arc::new(AtomicBool::new(false)),
                             go_cache: false,
                             go_check: None,
@@ -3383,10 +3448,11 @@ mod tests {
                     }
                     7 => {
                         app.execution = Some(Execution {
+                            project: None,
                             done: 0,
                             total: 1,
                             current: None,
-                            rx: delete_rx,
+                            rx: Some(delete_rx),
                             abort: Arc::new(AtomicBool::new(false)),
                             go_cache: true,
                             go_check: None,
@@ -3895,6 +3961,57 @@ mod tests {
     }
 
     #[test]
+    fn project_abort_keeps_ui_locked_until_disconnect_and_shows_partial_result() {
+        let mut app = app_with_rows(1);
+        let project = app.projects.entries()[0].project.path.clone();
+        let target = app.projects.entry(&project).unwrap().targets[0]
+            .path
+            .clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let abort = Arc::new(AtomicBool::new(false));
+        app.execution = Some(Execution {
+            project: Some(ProjectExecution::new(
+                rx,
+                vec![devsweep::plan::PlanItem {
+                    project_path: project.clone(),
+                    target_path: target.clone(),
+                    bytes: 1024,
+                    large: false,
+                }],
+                Arc::clone(&abort),
+            )),
+            rx: None,
+            abort,
+            done: 0,
+            total: 0,
+            current: None,
+            go_cache: false,
+            go_check: None,
+            global_cache: false,
+        });
+        let ctx = egui::Context::default();
+        app.stop_execution();
+        tx.send(DeleteEvent::ProjectDone {
+            project: project.clone(),
+            deleted: vec![target],
+        })
+        .unwrap();
+        app.poll_execution(&ctx);
+        assert!(app.execution.is_some(), "abort is only a request");
+        assert!(app.projects.entry(&project).unwrap().targets.is_empty());
+        drop(tx);
+        app.poll_execution(&ctx);
+        assert!(app.execution.is_none());
+        let flash = app.flash.as_ref().unwrap();
+        assert!(flash.interrupted);
+        assert_eq!(flash.bytes, 1024);
+        assert!(
+            !flash.aborted,
+            "disconnect must not masquerade as a final report"
+        );
+    }
+
+    #[test]
     fn project_execution_rechecks_the_fixed_confirmation_selection() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
@@ -3925,7 +4042,7 @@ mod tests {
             target.checked = target.path.ends_with("dist");
         }
         app.start_execution(&ctx, Cleanup::Project(root.clone()));
-        let execution = app.execution.take().unwrap();
+        let execution = app.execution.take().unwrap().project.unwrap();
         loop {
             if let DeleteEvent::Finished(report) = execution.rx.recv().unwrap() {
                 assert_eq!(report.freed_bytes, 10);
