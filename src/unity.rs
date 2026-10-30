@@ -57,6 +57,36 @@ mod tests {
             EditorState::Idle
         );
     }
+    #[cfg(unix)]
+    #[test]
+    fn hung_process_query_returns_unknown_within_deadline() {
+        let start = std::time::Instant::now();
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "echo $$ > \"$1\"; echo Unity; exec /bin/sleep 2",
+            "query",
+        ]);
+        command.arg(&pid_file);
+        let output = query_output(&mut command, std::time::Duration::from_millis(50));
+        assert_eq!(
+            classify_names(output.as_deref().ok_or(())),
+            EditorState::Unknown
+        );
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        let pid = fs::read_to_string(pid_file).unwrap();
+        assert!(
+            !std::process::Command::new("/bin/kill")
+                .args(["-0", pid.trim()])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success(),
+            "query child must be terminated and reaped"
+        );
+    }
     #[cfg(target_os = "macos")]
     #[test]
     fn native_macos_query_detects_a_headless_editor_named_process() {
@@ -99,25 +129,24 @@ pub enum EditorState {
 /// Enumerate all users' processes, including headless Editor instances.
 pub fn editor_state() -> EditorState {
     #[cfg(target_os = "macos")]
-    let output = std::process::Command::new("/bin/ps")
-        .args(["-Aww", "-o", "ucomm="])
-        .output();
+    let mut command = std::process::Command::new("/bin/ps");
+    #[cfg(target_os = "macos")]
+    command.args(["-Aww", "-o", "ucomm="]);
     #[cfg(target_os = "windows")]
-    let output = {
+    let mut command = {
         use std::os::windows::process::CommandExt;
-        std::process::Command::new("powershell.exe").creation_flags(0x08000000).args([
+        let mut command = std::process::Command::new("powershell.exe");
+        command.creation_flags(0x08000000).args([
             "-NoProfile", "-NonInteractive", "-Command",
             "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); Get-CimInstance Win32_Process | ForEach-Object { $_.Name + [char]9 + $_.ExecutablePath }",
-        ]).output()
+        ]);
+        command
     };
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     return EditorState::Unknown;
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
-        let text = output
-            .ok()
-            .filter(|out| out.status.success() && out.stderr.is_empty())
-            .and_then(|out| String::from_utf8(out.stdout).ok());
+        let text = query_output(&mut command, std::time::Duration::from_secs(3));
         #[cfg(target_os = "macos")]
         {
             classify_names(text.as_deref().ok_or(()))
@@ -227,4 +256,69 @@ fn classify_names(output: Result<&str, ()>) -> EditorState {
         }
     }
     state
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+fn query_output(
+    command: &mut std::process::Command,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + timeout;
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    // Drain both pipes concurrently so a full pipe cannot stall the process query.
+    let (tx, rx) = std::sync::mpsc::channel();
+    for (stderr, mut pipe) in [
+        (
+            false,
+            Box::new(child.stdout.take()?) as Box<dyn Read + Send>,
+        ),
+        (true, Box::new(child.stderr.take()?) as Box<dyn Read + Send>),
+    ] {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let result = pipe.read_to_end(&mut bytes).map(|_| bytes);
+            let _ = tx.send((stderr, result));
+        });
+    }
+    let result = (|| {
+        let status = loop {
+            if let Some(status) = child.try_wait().ok()? {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        if !status.success() {
+            return None;
+        }
+        let mut stdout = None;
+        for _ in 0..2 {
+            let (stderr, bytes) = rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .ok()?;
+            let bytes = bytes.ok()?;
+            if stderr {
+                if !bytes.is_empty() {
+                    return None;
+                }
+            } else {
+                stdout = String::from_utf8(bytes).ok();
+            }
+        }
+        stdout
+    })();
+    // Always terminate and reap an unfinished child, including timeout/error paths.
+    let _ = child.kill();
+    let _ = child.wait();
+    result
 }

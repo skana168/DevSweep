@@ -16,6 +16,23 @@ macOS and Windows. Automated process-boundary inputs are simulations, not Editor
   discovery → plan → execution; both public execution wrappers retain real process observation.
   No environment variable, CLI flag, public injected-state API or force option bypasses protection.
 
+## Process query timeout and UI behavior
+
+- Each native process query has a 3-second deadline. Timeout, process failure, nonempty stderr
+  or malformed output returns Unknown; unfinished query children are killed and waited for.
+  Both output pipes are drained concurrently while waiting, so large CIM output cannot fill a
+  pipe and stall the query.
+- Project draft plans run on a worker using the existing thread/channel pattern. Replacing or
+  closing the draft discards its receiver; late results cannot overwrite a newer draft.
+  Confirmation displays the completed preview without enumerating processes every frame.
+- Confirming starts a fresh real plan on the execution worker; execution still independently
+  checks each Unity Project. Preview results never authorize deletion by themselves. Cancel
+  remains available while planning/executing; it does not interrupt an in-flight OS query,
+  which is bounded by the deadline.
+- Automated regressions use a synthetic hung process (including partial Editor output), check
+  Unknown/deadline/child reaping, and verify nonblocking draft results and stale-result rejection.
+  These tests do not replace real Editor or Windows acceptance evidence.
+
 ## Required real-machine record
 
 Use disposable copies of a Unity 2022.3+ project (also repeat with a Unity 6 `6000.x` version),
