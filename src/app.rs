@@ -8,8 +8,12 @@ use devsweep::cache::{self, CacheRule};
 use devsweep::config::{self, Config, LanguageChoice, ThemeChoice};
 use devsweep::delete::{self, DeleteEvent, DeleteMode, Failure};
 use devsweep::go_cache::{self, GoCacheClean, GoCacheContext, GoCacheError, GoCacheSnapshot};
-use devsweep::plan::{self, DeletePlan, PlanProject};
+use devsweep::plan::{self, DeletePlan};
+use devsweep::project_clean::ProjectExecution;
 use devsweep::projects::{ProjectEntry, ProjectRefresh};
+#[cfg(test)]
+use devsweep::refresh::Measurement;
+use devsweep::refresh::{Refresh, RefreshExecutor};
 use devsweep::rules::{self, Rule, Target};
 use devsweep::scan::{self, Stack};
 use devsweep::size::{self, SizeEvent, SizeRequest};
@@ -64,13 +68,11 @@ pub struct DevSweepApp {
     root_notice: Option<&'static str>,
     view: View,
     projects: ProjectRefresh,
-    // shortcut: discarded scans finish in background; add cancellation if root edits cause I/O contention.
-    project_scan: Option<Receiver<ProjectRefresh>>,
+    refresh: Refresh,
     caches: Vec<CacheRow>,
     go_snapshot: Option<GoCacheSnapshot>,
     go_query: Option<Receiver<GoCacheSnapshot>>,
     go_notice: Option<GoCacheError>,
-    measurement: Option<Measurement>,
     search: String,
     filter: Option<Stack>,
     sort: Sort,
@@ -121,40 +123,7 @@ enum RowAction {
     Terminal,
 }
 
-/// An open clean panel: the project plus the plan its current draft would delete.
-struct Panel {
-    project: PathBuf,
-    plan: DeletePlan,
-    query: Option<Receiver<DeletePlan>>,
-}
-
-impl Panel {
-    fn replan(&mut self, ctx: &egui::Context, task: impl FnOnce() -> DeletePlan + Send + 'static) {
-        self.plan = empty_plan();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let repaint = ctx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(task());
-            repaint.request_repaint();
-        });
-        self.query = Some(rx);
-    }
-
-    fn poll(&mut self) {
-        if let Some(rx) = &self.query {
-            match rx.try_recv() {
-                Ok(plan) => {
-                    self.plan = plan;
-                    self.query = None;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    self.query = None;
-                }
-                Err(TryRecvError::Empty) => {}
-            }
-        }
-    }
-}
+type Panel = devsweep::project_clean::ProjectClean;
 
 struct CacheRow {
     rule: &'static CacheRule,
@@ -178,18 +147,37 @@ fn reset_draft(targets: &mut [Target]) {
     }
 }
 
-struct Measurement {
-    shown: bool,
-    done: usize,
-    total: usize,
-    rx: Receiver<SizeEvent>,
+/// Filesystem execution adapter; lifecycle decisions belong to Refresh.
+struct RefreshWorker(egui::Context);
+impl RefreshExecutor for RefreshWorker {
+    fn discover(
+        &mut self,
+        mut projects: ProjectRefresh,
+        roots: Vec<PathBuf>,
+        rules: Vec<Rule>,
+    ) -> Receiver<ProjectRefresh> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = self.0.clone();
+        std::thread::spawn(move || {
+            projects.refresh(&roots, &rules);
+            let _ = tx.send(projects);
+            ctx.request_repaint();
+        });
+        rx
+    }
+    fn measure(&mut self, requests: Vec<SizeRequest>) -> Receiver<SizeEvent> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        size::measure(requests, tx);
+        rx
+    }
 }
 
 struct Execution {
+    project: Option<ProjectExecution>,
     done: usize,
     total: usize,
     current: Option<String>,
-    rx: Receiver<DeleteEvent>,
+    rx: Option<Receiver<DeleteEvent>>,
     abort: Arc<AtomicBool>,
     go_cache: bool,
     go_check: Option<Receiver<(GoCacheSnapshot, Option<GoCacheError>)>>,
@@ -197,7 +185,23 @@ struct Execution {
     global_cache: bool,
 }
 
+impl Execution {
+    fn progress(&self) -> (usize, usize, Option<String>) {
+        if let Some(project) = &self.project {
+            (
+                project.done,
+                project.total,
+                project.current.as_deref().map(project_name),
+            )
+        } else {
+            (self.done, self.total, self.current.clone())
+        }
+    }
+}
+
 struct Flash {
+    interrupted: bool,
+    skipped: Vec<devsweep::plan::Skip>,
     bytes: u64,
     aborted: bool,
     global_cache: bool,
@@ -216,7 +220,7 @@ impl DevSweepApp {
             root_notice: None,
             view: View::Projects,
             projects: ProjectRefresh::default(),
-            project_scan: None,
+            refresh: Refresh::default(),
             caches: cache::entries()
                 .into_iter()
                 .map(|entry| CacheRow {
@@ -230,7 +234,6 @@ impl DevSweepApp {
             go_snapshot: None,
             go_query: None,
             go_notice: None,
-            measurement: None,
             search: String::new(),
             filter: None,
             sort: Sort::Name,
@@ -253,6 +256,8 @@ impl DevSweepApp {
     }
 
     fn persist(&self) {
+        // UI tests may exercise settings controls; never write real user settings.
+        #[cfg(not(test))]
         config::save(&self.config);
     }
 
@@ -261,28 +266,36 @@ impl DevSweepApp {
     }
 
     fn add_directory(&mut self, ctx: &egui::Context) {
+        if self.root_edits_locked() {
+            return;
+        }
         let Some(path) = rfd::FileDialog::new().pick_folder() else {
             return;
         };
         let path = std::fs::canonicalize(&path).unwrap_or(path);
+        self.add_root(path, ctx);
+        self.persist();
+    }
+
+    fn add_root(&mut self, path: PathBuf, ctx: &egui::Context) {
+        if self.root_edits_locked() {
+            return;
+        }
         if self.config.roots.contains(&path) {
             self.root_notice = Some(self.strings().root_duplicate);
             return;
         }
-        self.project_scan = None;
-        // Only the new subtree is walked; existing projects keep their sizes.
-        self.projects.add_root(&path, &self.rules);
+        self.refresh
+            .root_added(&path, &self.rules, &mut RefreshWorker(ctx.clone()));
         self.config.roots.push(path);
         self.root_notice = None;
         self.refresh_go_caches(ctx);
         self.measure_missing(ctx);
-        self.persist();
         self.last_scan = Instant::now();
     }
 
     fn rescan(&mut self, ctx: &egui::Context) {
-        self.project_scan = None;
-        self.projects.refresh(&self.config.roots, &self.rules);
+        self.refresh_projects(ctx);
         self.refresh_go_caches(ctx);
         // A cache recreated since the last scan becomes measurable again.
         for row in &mut self.caches {
@@ -295,44 +308,48 @@ impl DevSweepApp {
         self.last_scan = Instant::now();
     }
 
+    fn coordinate_refresh(&mut self) {
+        self.refresh.coordinate(
+            self.panel.as_ref(),
+            self.execution
+                .as_ref()
+                .and_then(|execution| execution.project.as_ref()),
+        );
+    }
+
     fn refresh_projects(&mut self, ctx: &egui::Context) {
-        let mut projects = self.projects.clone();
-        let roots = self.config.roots.clone();
-        let rules = self.rules.clone();
-        let repaint = ctx.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.project_scan = Some(rx);
+        self.coordinate_refresh();
+        self.refresh.request(
+            &self.projects,
+            &self.config.roots,
+            &self.rules,
+            &mut RefreshWorker(ctx.clone()),
+        );
         self.root_notice = None;
-        std::thread::spawn(move || {
-            projects.refresh(&roots, &rules);
-            let _ = tx.send(projects);
-            repaint.request_repaint();
-        });
         ctx.request_repaint();
     }
 
     fn poll_project_scan(&mut self, ctx: &egui::Context) {
-        let Some(rx) = &self.project_scan else { return };
-        match rx.try_recv() {
-            Ok(projects) => {
-                self.project_scan = None;
-                self.projects.apply_refresh(projects);
-                self.measure_requests(ctx, self.projects.measurement_requests());
-                self.last_scan = Instant::now();
-                if let Some(mut panel) = self.panel.take() {
-                    panel.replan(ctx, self.project_plan_task(&panel.project));
-                    self.panel = Some(panel);
-                }
-                ctx.request_repaint();
+        self.coordinate_refresh();
+        let changed = self.refresh.poll_discovery(
+            &mut self.projects,
+            &self.config.roots,
+            &self.rules,
+            &mut RefreshWorker(ctx.clone()),
+        );
+        if changed {
+            self.last_scan = Instant::now();
+            if let Some(mut panel) = self.panel.take() {
+                self.replan_panel(ctx, &mut panel);
+                self.panel = Some(panel);
             }
-            Err(TryRecvError::Empty) => {
-                ctx.request_repaint_after(Duration::from_millis(100));
-            }
-            Err(TryRecvError::Disconnected) => {
-                self.project_scan = None;
-                self.root_notice = Some(self.strings().refresh_failed);
-                ctx.request_repaint();
-            }
+            ctx.request_repaint();
+        }
+        if self.refresh.failed {
+            self.root_notice = Some(self.strings().refresh_failed);
+        }
+        if self.refresh.scan.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(100));
         }
     }
 
@@ -508,97 +525,35 @@ impl DevSweepApp {
     }
 
     fn measure_requests(&mut self, ctx: &egui::Context, requests: Vec<SizeRequest>) {
-        if requests.is_empty() {
-            self.measurement = None;
-            return;
-        }
-
-        let total = requests.len();
-        let (tx, rx) = std::sync::mpsc::channel();
-        size::measure(requests, tx);
-        self.measurement = Some(Measurement {
-            shown: false,
-            done: 0,
-            total,
-            rx,
-        });
+        self.refresh
+            .measure(requests, &mut RefreshWorker(ctx.clone()));
         ctx.request_repaint();
     }
 
     fn poll_measurement(&mut self, ctx: &egui::Context) {
-        let Some(measurement) = &mut self.measurement else {
-            return;
-        };
-        // A fast worker can finish between the sidebar click and the first status-bar paint.
-        if !measurement.shown {
-            ctx.request_repaint();
-            return;
-        }
-        let mut changed = false;
-        let mut finished = false;
-
-        loop {
-            match measurement.rx.try_recv() {
-                Ok(event) => {
-                    measurement.done += 1;
-                    self.projects.apply_measurement(&event);
-                    let SizeEvent { project, sizes } = event;
-                    if let Some(row) = self.caches.iter_mut().find(|row| {
-                        !go_cache::is_go_cache(row.rule.id) && row.path.as_ref() == Some(&project)
-                    }) && let Some((_, size)) = sizes.first()
-                        && !row.cleaned
-                    {
-                        row.size = Some(*size);
-                    }
-                    changed = true;
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    finished = true;
-                    break;
-                }
+        let events = self.refresh.poll_measurement(&mut self.projects);
+        let changed = !events.is_empty();
+        for SizeEvent { project, sizes } in events {
+            if let Some(row) = self.caches.iter_mut().find(|row| {
+                !go_cache::is_go_cache(row.rule.id) && row.path.as_ref() == Some(&project)
+            }) && let Some((_, size)) = sizes.first()
+                && !row.cleaned
+            {
+                row.size = Some(*size);
             }
         }
-
-        if finished {
-            self.measurement = None;
+        if self.refresh.failed {
+            self.root_notice = Some(self.strings().refresh_failed);
         }
         if changed {
             if let Some(mut panel) = self.panel.take() {
-                panel.replan(ctx, self.project_plan_task(&panel.project));
+                self.replan_panel(ctx, &mut panel);
                 self.panel = Some(panel);
             }
             ctx.request_repaint();
         }
-        if self.measurement.is_some() {
+        if self.refresh.measurement.is_some() {
             ctx.request_repaint_after(Duration::from_millis(100));
-        }
-    }
-
-    /// The plan the panel's current draft would delete, for one project.
-    fn project_plan_task(&self, path: &Path) -> impl FnOnce() -> DeletePlan + Send + 'static {
-        let entry = self.projects.entry(path).map(|entry| {
-            (
-                entry.project.path.clone(),
-                entry.project.stack,
-                entry.targets.clone(),
-            )
-        });
-        let roots = self.config.roots.clone();
-        let rules = self.rules.clone();
-        move || {
-            let Some((path, stack, targets)) = entry else {
-                return empty_plan();
-            };
-            plan::plan(
-                &[PlanProject {
-                    path: &path,
-                    stack,
-                    targets: &targets,
-                }],
-                &roots,
-                &rules,
-            )
         }
     }
 
@@ -608,13 +563,30 @@ impl DevSweepApp {
             return;
         };
         reset_draft(targets);
-        let mut panel = Panel {
-            project: path.to_path_buf(),
-            plan: empty_plan(),
-            query: None,
-        };
-        panel.replan(ctx, self.project_plan_task(path));
+        let mut panel = Panel::new(path.to_path_buf(), targets.clone());
+        self.replan_panel(ctx, &mut panel);
         self.panel = Some(panel);
+    }
+
+    fn replan_panel(&self, ctx: &egui::Context, panel: &mut Panel) {
+        let Some(entry) = self.projects.entry(&panel.project) else {
+            return;
+        };
+        panel.refresh(
+            entry.project.stack,
+            entry.targets.clone(),
+            self.config.roots.clone(),
+            self.rules.clone(),
+            |task| {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let repaint = ctx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(task());
+                    repaint.request_repaint();
+                });
+                rx
+            },
+        );
     }
 
     fn plan_for(&self, cleanup: Cleanup) -> DeletePlan {
@@ -658,10 +630,41 @@ impl DevSweepApp {
             Cleanup::GoCache(rule, _) => rule.id == "go.module",
             Cleanup::Project(_) => false,
         };
-        let project_task = match &cleanup {
-            Cleanup::Project(path) => Some(self.project_plan_task(path)),
-            _ => None,
-        };
+        if let Cleanup::Project(path) = &cleanup {
+            let Some(panel) = self.panel.take().filter(|panel| panel.project == *path) else {
+                return;
+            };
+            let Some(entry) = self.projects.entry(path) else {
+                return;
+            };
+            let Some(project) = panel.execute(
+                entry.project.stack,
+                self.config.roots.clone(),
+                self.rules.clone(),
+                self.config.delete_mode,
+                |task| {
+                    std::thread::spawn(task);
+                },
+            ) else {
+                return;
+            };
+            self.execution = Some(Execution {
+                abort: Arc::clone(&project.abort),
+                project: Some(project),
+                done: 0,
+                total: 0,
+                current: None,
+                rx: None,
+                go_cache: false,
+                go_check: None,
+                global_cache: false,
+            });
+            self.flash = None;
+            self.failures.clear();
+            self.failures_open = false;
+            ctx.request_repaint();
+            return;
+        }
         let plan = self.plan_for(cleanup);
         if plan.items.is_empty() {
             return;
@@ -683,17 +686,16 @@ impl DevSweepApp {
                 }
                 .execute(mode, &flag, tx, check_tx);
             } else {
-                // Confirmation is only a preview: observe real process state again here.
-                let plan = project_task.map_or(plan, |task| task());
                 delete::execute(plan, mode, &flag, tx);
             }
         });
 
         self.execution = Some(Execution {
+            project: None,
             done: 0,
             total: 0,
             current: None,
-            rx,
+            rx: Some(rx),
             abort,
             go_cache: is_go,
             go_check: is_go.then_some(check_rx),
@@ -715,6 +717,27 @@ impl DevSweepApp {
         let Some(execution) = &mut self.execution else {
             return;
         };
+        if let Some(project) = &mut execution.project {
+            project.poll_projects(&mut self.projects);
+            if !project.running() {
+                self.flash = Some(Flash {
+                    bytes: project.freed_bytes,
+                    interrupted: project.interrupted,
+                    skipped: project.skipped.clone(),
+                    aborted: project.report.as_ref().is_some_and(|report| report.aborted),
+                    global_cache: false,
+                });
+                self.failures = project
+                    .report
+                    .as_ref()
+                    .map(|report| report.failures.clone())
+                    .unwrap_or_default();
+                self.failures_open = !self.failures.is_empty() || !project.skipped.is_empty();
+                self.execution = None;
+            }
+            ctx.request_repaint_after(Duration::from_millis(100));
+            return;
+        }
         let global_cache = execution.global_cache;
         let is_go = execution.go_cache;
         let mut changed = false;
@@ -722,7 +745,12 @@ impl DevSweepApp {
         let mut lost = false;
 
         loop {
-            match execution.rx.try_recv() {
+            match execution
+                .rx
+                .as_ref()
+                .expect("cache execution receiver")
+                .try_recv()
+            {
                 Ok(DeleteEvent::Started { project, total }) => {
                     execution.total = total;
                     execution.current = Some(project_name(&project));
@@ -776,6 +804,8 @@ impl DevSweepApp {
         if let Some(report) = finished {
             self.execution = None;
             self.flash = Some(Flash {
+                interrupted: false,
+                skipped: vec![],
                 bytes: report.freed_bytes,
                 aborted: report.aborted,
                 global_cache,
@@ -802,18 +832,23 @@ impl DevSweepApp {
 
     /// The project's clean panel: details, a draft of what to delete, and the two exits.
     fn clean_panel(&mut self, ctx: &egui::Context, t: &Tokens, s: &Strings) {
+        if self.panel.as_ref().is_some_and(|panel| panel.locked()) {
+            return;
+        }
         let Some(mut panel) = self.panel.take() else {
             return;
         };
         panel.poll();
+        if panel.query.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
         let path = panel.project.clone();
         let Some(entry) = self.projects.entry(&path) else {
             return;
         };
         let (name, stack) = (entry.project.name.clone(), entry.project.stack);
-        let Some(targets) = self.projects.targets_mut(&path) else {
-            return;
-        };
+        let mut draft = panel.targets().to_vec();
+        let targets = &mut draft;
         let chosen = targets.iter().filter(|target| target.checked).count();
         let mut dirty = false;
         let mut close = false;
@@ -854,6 +889,9 @@ impl DevSweepApp {
                 ui.add_space(12.0);
                 stat_row(ui, s.items, &format!("{chosen} / {}", targets.len()), t);
                 stat_row(ui, s.total, &size::format_size(panel.plan.total_bytes), t);
+                if panel.failed() {
+                    ui.label(RichText::new(s.clean_preview_failed).color(t.danger));
+                }
                 if stack == Stack::Unity {
                     ui.label(
                         RichText::new(s.unity_note(&scan::unity_version(&path)))
@@ -958,7 +996,7 @@ impl DevSweepApp {
                         .iter()
                         .filter(|target| target.checked)
                         .all(|target| target.size.is_some());
-                    if danger_button(ui, &label, t, planned > 0 && known) {
+                    if danger_button(ui, &label, t, planned > 0 && known && !dirty) {
                         clean = true;
                     }
                     ui.add_space(4.0);
@@ -970,12 +1008,17 @@ impl DevSweepApp {
 
         // Discard the old result while the changed draft is checked.
         if dirty {
-            panel.replan(ctx, self.project_plan_task(&path));
+            panel.edit(draft.clone());
+            if let Some(targets) = self.projects.targets_mut(&path) {
+                *targets = draft;
+            }
+            self.replan_panel(ctx, &mut panel);
         }
-        if clean {
+        if clean && panel.confirm() {
             self.pending_plan = panel.plan.clone();
             self.pending = Some(Cleanup::Project(path));
             self.confirm_large_ack = false;
+            self.panel = Some(panel);
         } else if !close && !modal.should_close() {
             self.panel = Some(panel);
         }
@@ -992,6 +1035,9 @@ impl DevSweepApp {
             size::format_size(flash.bytes)
         };
         let mut label = format!("{} {freed}", s.freed);
+        if flash.interrupted {
+            label = format!("{label} · {}", s.clean_execution_interrupted);
+        }
         if flash.aborted {
             label = format!("{label} · {}", s.aborted);
         }
@@ -999,6 +1045,11 @@ impl DevSweepApp {
             label = format!("{label} · {}", s.cache_redownload);
         }
         let failure_count = self.failures.len();
+        let skipped_count = flash.skipped.len();
+        let result_label = format!(
+            "{} ({failure_count}) · {} ({skipped_count})",
+            s.failures, s.skipped
+        );
         let mut dismiss = false;
         let mut show_failures = false;
 
@@ -1007,10 +1058,13 @@ impl DevSweepApp {
             .inner_margin(egui::Margin::symmetric(16, 10))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(label).size(14.0).color(t.good));
-                    if failure_count > 0 {
-                        let text =
-                            RichText::new(format!("{} ({failure_count})", s.failures)).size(13.0);
+                    ui.label(RichText::new(label).size(14.0).color(if flash.interrupted {
+                        t.danger
+                    } else {
+                        t.good
+                    }));
+                    if failure_count + skipped_count > 0 {
+                        let text = RichText::new(result_label).size(13.0);
                         if text_button(ui, text, t.danger, t.text_strong).clicked() {
                             show_failures = true;
                         }
@@ -1145,8 +1199,14 @@ impl DevSweepApp {
         if confirm {
             self.pending = None;
             self.start_execution(ctx, cleanup);
+            self.panel = None;
         } else if close || modal.backdrop_response.clicked() {
             self.pending = None;
+            if let Some(mut panel) = self.panel.take() {
+                panel.cancel_confirmation();
+                self.replan_panel(ctx, &mut panel);
+                self.panel = Some(panel);
+            }
         }
     }
 
@@ -1166,7 +1226,13 @@ impl DevSweepApp {
             .show(ctx, |ui| {
                 ui.set_width(560.0);
                 ui.label(theme::title(
-                    format!("{} ({})", s.failures, self.failures.len()),
+                    format!(
+                        "{} ({}) · {} ({})",
+                        s.failures,
+                        self.failures.len(),
+                        s.skipped,
+                        self.flash.as_ref().map_or(0, |flash| flash.skipped.len())
+                    ),
                     20.0,
                     t.danger,
                 ));
@@ -1175,6 +1241,15 @@ impl DevSweepApp {
                     .max_height(320.0)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
+                        if let Some(flash) = &self.flash {
+                            for skip in &flash.skipped {
+                                ui.label(format!(
+                                    "{} · {}",
+                                    skip.path.display(),
+                                    s.skip_reason(skip.reason)
+                                ));
+                            }
+                        }
                         for failure in &self.failures {
                             ui.horizontal(|ui| {
                                 let rel = failure
@@ -1268,21 +1343,23 @@ impl DevSweepApp {
         ui.horizontal(|ui| {
             ui.label(theme::hud(s.roots, t.text_muted));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let reason = if self.project_scan.is_some() {
+                let reason = if self.refresh.scan.is_some() {
                     Some(s.refresh_scanning)
-                } else if self.measurement.is_some() || self.go_query.is_some() {
+                } else if self.refresh.measurement.is_some() || self.go_query.is_some() {
                     Some(s.refresh_measuring)
                 } else if self.execution.is_some() {
                     Some(s.refresh_cleaning)
-                } else if self.pending.is_some() || self.panel.is_some() {
+                } else if self.pending.is_some()
+                    || self.panel.as_ref().is_some_and(|panel| panel.locked())
+                {
                     Some(s.refresh_confirmation)
                 } else if self.config.roots.is_empty() {
                     Some(s.refresh_no_roots)
                 } else {
                     None
                 };
-                let refreshing = self.project_scan.is_some()
-                    || self.measurement.is_some()
+                let refreshing = self.refresh.scan.is_some()
+                    || self.refresh.measurement.is_some()
                     || self.go_query.is_some();
                 if refresh_icon(ui, t, s.refresh_projects, reason, refreshing) {
                     self.refresh_projects(ui.ctx());
@@ -1348,8 +1425,19 @@ impl DevSweepApp {
         }
     }
 
+    fn root_edits_locked(&self) -> bool {
+        self.pending.is_some()
+            || self.execution.is_some()
+            || self.panel.as_ref().is_some_and(|panel| panel.locked())
+    }
+
     /// The scan-root list, shared by the sidebar and the settings sheet.
     fn roots_editor(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings) {
+        let locked = self.root_edits_locked();
+        ui.add_enabled_ui(!locked, |ui| self.roots_editor_contents(ui, t, s));
+    }
+
+    fn roots_editor_contents(&mut self, ui: &mut Ui, t: &Tokens, s: &Strings) {
         let covering = scan::covering_roots(&self.config.roots);
         let mut remove = None;
         for (index, root) in self.config.roots.iter().enumerate() {
@@ -1390,6 +1478,7 @@ impl DevSweepApp {
         }
         if let Some(index) = remove {
             self.remove_root(index, ui.ctx());
+            self.persist();
         }
 
         ui.add_space(8.0);
@@ -1418,13 +1507,19 @@ impl DevSweepApp {
     }
 
     fn remove_root(&mut self, index: usize, ctx: &egui::Context) {
-        self.project_scan = None;
+        if self.root_edits_locked() {
+            return;
+        }
         self.config.roots.remove(index);
         self.root_notice = None;
-        self.projects.remove_root(&self.config.roots, &self.rules);
+        self.refresh.roots_removed(
+            &mut self.projects,
+            &self.config.roots,
+            &self.rules,
+            &mut RefreshWorker(ctx.clone()),
+        );
         self.refresh_go_caches(ctx);
         self.measure_missing(ctx);
-        self.persist();
         self.last_scan = Instant::now();
     }
 
@@ -1909,7 +2004,7 @@ impl eframe::App for DevSweepApp {
         if focused == Some(true)
             && self.was_focused == Some(false)
             && self.last_scan.elapsed() >= REFRESH_AFTER
-            && self.project_scan.is_none()
+            && self.refresh.scan.is_none()
         {
             self.rescan(ctx);
         }
@@ -1938,15 +2033,15 @@ impl eframe::App for DevSweepApp {
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if self.project_scan.is_some() {
+                    if self.refresh.scan.is_some() {
                         ui.label(
                             RichText::new(s.refresh_scanning)
                                 .size(11.0)
                                 .color(t.text_muted),
                         );
                     }
-                    if let Some(measurement) = &mut self.measurement {
-                        measurement.shown = true;
+                    self.refresh.present_progress();
+                    if let Some(measurement) = &self.refresh.measurement {
                         ui.label(
                             RichText::new(format!(
                                 "{} {}/{}",
@@ -1957,13 +2052,14 @@ impl eframe::App for DevSweepApp {
                         );
                     }
                     if let Some(execution) = &self.execution {
+                        let (done, total, current) = execution.progress();
                         ui.label(
                             RichText::new(format!(
                                 "{} {}/{} · {}",
                                 s.cleaning,
-                                execution.done,
-                                execution.total,
-                                execution.current.as_deref().unwrap_or_default()
+                                done,
+                                total,
+                                current.as_deref().unwrap_or_default()
                             ))
                             .size(11.0)
                             .color(t.text),
@@ -2023,12 +2119,13 @@ impl eframe::App for DevSweepApp {
         if let Some(cleanup) = self.pending.clone() {
             let pending_plan = self.plan_for(cleanup.clone());
             let known = match &cleanup {
-                Cleanup::Project(path) => self.projects.entry(path).is_some_and(|entry| {
-                    entry
-                        .targets
-                        .iter()
-                        .filter(|target| target.checked)
-                        .all(|target| target.size.is_some())
+                Cleanup::Project(_) => self.panel.as_ref().is_some_and(|panel| {
+                    panel.locked()
+                        && panel
+                            .targets()
+                            .iter()
+                            .filter(|target| target.checked)
+                            .all(|target| target.size.is_some())
                 }),
                 Cleanup::Cache(_) | Cleanup::GoCache(..) => true,
             };
@@ -2937,37 +3034,6 @@ mod tests {
         assert!(cache_present(&row(None, true)));
     }
 
-    #[test]
-    fn planning_does_not_block_ui_and_late_results_cannot_replace_new_draft() {
-        let ctx = egui::Context::default();
-        let start = Instant::now();
-        let mut panel = Panel {
-            project: PathBuf::new(),
-            plan: empty_plan(),
-            query: None,
-        };
-        panel.replan(&ctx, move || {
-            std::thread::sleep(Duration::from_millis(200));
-            empty_plan()
-        });
-        assert!(start.elapsed() < Duration::from_millis(100));
-        panel.poll();
-        assert!(panel.query.is_some());
-        let mut newer = empty_plan();
-        newer.total_bytes = 42;
-        panel.replan(&ctx, move || newer);
-
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while panel.query.is_some() && Instant::now() < deadline {
-            panel.poll();
-            std::thread::yield_now();
-        }
-        assert_eq!(panel.plan.total_bytes, 42);
-        std::thread::sleep(Duration::from_millis(250));
-        panel.poll();
-        assert_eq!(panel.plan.total_bytes, 42);
-    }
-
     /// The hint must fit the box's inner width, or egui elides it. English is the
     /// longest today.
     #[test]
@@ -3022,12 +3088,11 @@ mod tests {
             root_notice: None,
             view: View::Projects,
             projects,
-            project_scan: None,
+            refresh: Refresh::default(),
             caches: Vec::new(),
             go_snapshot: None,
             go_query: None,
             go_notice: None,
-            measurement: None,
             search: String::new(),
             filter: None,
             sort: Sort::Name,
@@ -3063,11 +3128,95 @@ mod tests {
     }
 
     fn finish_project_scan(app: &mut DevSweepApp, ctx: &egui::Context) {
-        let projects = app.project_scan.take().unwrap().recv().unwrap();
+        let projects = app.refresh.scan.take().unwrap().recv().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(projects).unwrap();
-        app.project_scan = Some(rx);
+        app.refresh.scan = Some(rx);
         app.poll_project_scan(ctx);
+    }
+
+    #[test]
+    fn refresh_and_measurement_invalidate_preview_but_preserve_confirmation() {
+        for discovery in [false, true] {
+            for confirmed in [false, true] {
+                let mut app = app_with_rows(1);
+                let entry = &app.projects.entries()[0];
+                let path = entry.project.path.clone();
+                let mut panel = Panel::new(path.clone(), entry.targets.clone());
+                let snapshot = panel.targets().to_vec();
+                let mut plan = empty_plan();
+                plan.items.push(plan::PlanItem {
+                    project_path: path.clone(),
+                    target_path: snapshot[0].path.clone(),
+                    bytes: 1024,
+                    large: false,
+                });
+                let (old_tx, old_rx) = std::sync::mpsc::channel();
+                panel.preview(old_rx);
+                if confirmed {
+                    old_tx.send(plan.clone()).unwrap();
+                    panel.poll();
+                    assert!(panel.confirm());
+                }
+                app.panel = Some(panel);
+                let ctx = egui::Context::default();
+                if discovery {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    tx.send(app.projects.clone()).unwrap();
+                    app.refresh.scan = Some(rx);
+                    app.poll_project_scan(&ctx);
+                } else {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    tx.send(SizeEvent {
+                        project: path,
+                        sizes: vec![(snapshot[0].path.clone(), 2048)],
+                    })
+                    .unwrap();
+                    app.refresh.measurement = Some(devsweep::refresh::Measurement {
+                        shown: true,
+                        done: 0,
+                        total: 1,
+                        rx,
+                    });
+                    app.poll_measurement(&ctx);
+                }
+                let panel = app.panel.as_mut().unwrap();
+                if confirmed {
+                    assert!(panel.locked());
+                    assert_eq!(panel.targets(), snapshot);
+                    assert_eq!(panel.plan, plan);
+                    assert!(!panel.edit(vec![]));
+                } else {
+                    assert!(old_tx.send(plan).is_err(), "old preview must be dropped");
+                    assert!(panel.plan.items.is_empty());
+                    assert!(panel.query.is_some());
+                    assert!(!panel.confirm());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn root_edits_apply_scope_before_background_discovery_is_consumed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("node_modules")).unwrap();
+        std::fs::write(root.join("package.json"), "{}").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = app_with_rows(0);
+        app.rules = rules::builtin_rules();
+        app.config.roots.clear();
+        app.add_root(root.clone(), &ctx);
+        assert_eq!(app.config.roots, vec![root.clone()]);
+        assert!(app.projects.entries().is_empty());
+        assert!(app.refresh.scan.is_some());
+        finish_project_scan(&mut app, &ctx);
+        assert!(app.projects.entry(&root).is_some());
+        app.remove_root(0, &ctx);
+        assert!(app.projects.entries().is_empty());
+        assert!(app.refresh.scan.is_some());
+        finish_project_scan(&mut app, &ctx);
+        assert!(app.projects.entries().is_empty());
     }
 
     #[test]
@@ -3113,12 +3262,12 @@ mod tests {
         assert!(response.enabled());
         sidebar_frame(&mut app, &ctx, input(response.rect.center(), true));
         sidebar_frame(&mut app, &ctx, input(response.rect.center(), false));
-        assert!(app.project_scan.is_some());
+        assert!(app.refresh.scan.is_some());
         finish_project_scan(&mut app, &ctx);
         assert!(app.projects.entry(&root.join("new")).is_some());
         assert!(app.last_scan > before);
         assert_eq!(
-            app.measurement.as_ref().unwrap().total,
+            app.refresh.measurement.as_ref().unwrap().total,
             1,
             "only the new project is measured"
         );
@@ -3151,11 +3300,24 @@ mod tests {
         assert_eq!(app.caches[0].size, Some(19));
         assert!(app.go_query.is_none());
 
+        // Finish the manual measurement before exercising the independent stale-focus path.
+        let event = app.refresh.measurement.as_ref().unwrap().rx.recv().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(event).unwrap();
+        drop(tx);
+        app.refresh.measurement.as_mut().unwrap().rx = rx;
+        app.refresh.present_progress();
+        app.poll_measurement(&ctx);
         // The existing stale-focus path still refreshes both projects and caches.
         std::fs::create_dir_all(root.join("later/node_modules")).unwrap();
         std::fs::write(root.join("later/package.json"), "{}").unwrap();
         app.last_scan = Instant::now() - REFRESH_AFTER;
         focus(&mut app);
+        assert!(
+            app.refresh.scan.is_some(),
+            "focus discovery runs in background"
+        );
+        finish_project_scan(&mut app, &ctx);
         assert!(app.projects.entry(&root.join("later")).is_some());
         assert!(!app.caches[0].cleaned);
         assert!(app.caches[0].size.is_none());
@@ -3209,11 +3371,11 @@ mod tests {
         finish_project_scan(&mut app, &ctx);
 
         // Replay the real worker's result as already complete before the next frame.
-        let event = app.measurement.as_ref().unwrap().rx.recv().unwrap();
+        let event = app.refresh.measurement.as_ref().unwrap().rx.recv().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(event).unwrap();
         drop(tx);
-        app.measurement.as_mut().unwrap().rx = rx;
+        app.refresh.measurement.as_mut().unwrap().rx = rx;
         app.poll_measurement(&ctx);
         let output = frame(&mut app, &ctx, raw_input(vec![]));
         assert!(
@@ -3223,14 +3385,14 @@ mod tests {
                 .any(|shape| has_text(&shape.shape, "Measuring sizes 0/1"))
         );
         app.poll_measurement(&ctx);
-        assert!(app.measurement.is_none());
+        assert!(app.refresh.measurement.is_none());
     }
 
     #[test]
     fn focus_does_not_start_a_second_scan_while_manual_refresh_is_running() {
         let mut app = app_with_rows(0);
         let (_tx, rx) = std::sync::mpsc::channel();
-        app.project_scan = Some(rx);
+        app.refresh.scan = Some(rx);
         app.was_focused = Some(false);
         app.last_scan = Instant::now() - REFRESH_AFTER;
         let before = app.last_scan;
@@ -3245,9 +3407,44 @@ mod tests {
             eframe::App::logic(&mut app, ui.ctx(), &mut eframe::Frame::_new_kittest());
         });
         output.textures_delta.clear();
-        assert!(app.project_scan.is_some());
+        assert!(app.refresh.scan.is_some());
         assert!(app.go_query.is_none());
         assert_eq!(app.last_scan, before);
+    }
+
+    #[test]
+    fn preview_allows_manual_refresh_and_confirmation_queues_until_cancel() {
+        let mut app = app_with_rows(1);
+        let entry = &app.projects.entries()[0];
+        let mut panel = Panel::new(entry.project.path.clone(), entry.targets.clone());
+        panel.plan.items.push(plan::PlanItem {
+            project_path: entry.project.path.clone(),
+            target_path: entry.targets[0].path.clone(),
+            bytes: 1024,
+            large: false,
+        });
+        app.panel = Some(panel);
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        sidebar_frame(&mut app, &ctx, raw_input(vec![]));
+        assert!(
+            ctx.read_response(egui::Id::unique("sidebar-refresh"))
+                .unwrap()
+                .enabled()
+        );
+        assert!(app.panel.as_mut().unwrap().confirm());
+        for _ in 0..3 {
+            app.refresh_projects(&ctx);
+            app.poll_project_scan(&ctx);
+        }
+        assert!(app.refresh.scan.is_none());
+        assert!(app.go_query.is_none());
+        app.panel.as_mut().unwrap().cancel_confirmation();
+        app.poll_project_scan(&ctx);
+        assert!(app.refresh.scan.is_some());
+        assert!(app.go_query.is_none());
+        finish_project_scan(&mut app, &ctx);
+        assert!(app.refresh.scan.is_none());
     }
 
     #[test]
@@ -3255,11 +3452,11 @@ mod tests {
         let mut app = app_with_rows(1);
         let ctx = egui::Context::default();
         let (tx, rx) = std::sync::mpsc::channel();
-        app.project_scan = Some(rx);
+        app.refresh.scan = Some(rx);
         drop(tx);
         let before = app.last_scan;
         app.poll_project_scan(&ctx);
-        assert!(app.project_scan.is_none());
+        assert!(app.refresh.scan.is_none());
         assert_eq!(app.projects.entries().len(), 1);
         assert_eq!(app.root_notice, Some(app.strings().refresh_failed));
         assert_eq!(app.last_scan, before);
@@ -3314,7 +3511,7 @@ mod tests {
                         s.refresh_no_roots
                     }
                     1 => {
-                        app.measurement = Some(Measurement {
+                        app.refresh.measurement = Some(Measurement {
                             shown: false,
                             done: 0,
                             total: 1,
@@ -3327,11 +3524,15 @@ mod tests {
                         s.refresh_measuring
                     }
                     3 => {
-                        app.panel = Some(Panel {
-                            project: PathBuf::new(),
-                            plan: empty_plan(),
-                            query: None,
+                        let mut panel = Panel::new(PathBuf::new(), vec![]);
+                        panel.plan.items.push(plan::PlanItem {
+                            project_path: PathBuf::new(),
+                            target_path: "target".into(),
+                            bytes: 1,
+                            large: false,
                         });
+                        assert!(panel.confirm());
+                        app.panel = Some(panel);
                         s.refresh_confirmation
                     }
                     4 => {
@@ -3344,10 +3545,11 @@ mod tests {
                     }
                     6 => {
                         app.execution = Some(Execution {
+                            project: None,
                             done: 0,
                             total: 1,
                             current: None,
-                            rx: delete_rx,
+                            rx: Some(delete_rx),
                             abort: Arc::new(AtomicBool::new(false)),
                             go_cache: false,
                             go_check: None,
@@ -3357,10 +3559,11 @@ mod tests {
                     }
                     7 => {
                         app.execution = Some(Execution {
+                            project: None,
                             done: 0,
                             total: 1,
                             current: None,
-                            rx: delete_rx,
+                            rx: Some(delete_rx),
                             abort: Arc::new(AtomicBool::new(false)),
                             go_cache: true,
                             go_check: None,
@@ -3370,7 +3573,7 @@ mod tests {
                     }
                     _ => {
                         let (_tx, rx) = std::sync::mpsc::channel();
-                        app.project_scan = Some(rx);
+                        app.refresh.scan = Some(rx);
                         s.refresh_scanning
                     }
                 };
@@ -3392,7 +3595,7 @@ mod tests {
                 sidebar_frame(&mut app, &ctx, input(response.rect.center(), false));
                 assert_eq!(app.last_scan, before);
                 assert_eq!(app.go_query.is_some(), state == 2);
-                assert_eq!(app.measurement.is_some(), state == 1);
+                assert_eq!(app.refresh.measurement.is_some(), state == 1);
             }
         }
     }
@@ -3416,9 +3619,9 @@ mod tests {
             let (_size_tx, size_rx) = std::sync::mpsc::channel();
             let (_go_tx, go_rx) = std::sync::mpsc::channel();
             match state {
-                1 => app.project_scan = Some(scan_rx),
+                1 => app.refresh.scan = Some(scan_rx),
                 2 => {
-                    app.measurement = Some(Measurement {
+                    app.refresh.measurement = Some(Measurement {
                         shown: false,
                         done: 0,
                         total: 1,
@@ -3456,8 +3659,8 @@ mod tests {
                 angles.push(icon.angle);
             }
             assert_eq!(angles[0] != angles[1], state != 0, "state {state}");
-            app.project_scan = None;
-            app.measurement = None;
+            app.refresh.scan = None;
+            app.refresh.measurement = None;
             app.go_query = None;
             let output = sidebar_frame(&mut app, &ctx, raw_input(vec![]));
             assert_eq!(
@@ -3866,6 +4069,396 @@ mod tests {
             app.panel.as_ref().map(|panel| panel.project.clone()),
             expected(&app, 0)
         );
+    }
+
+    #[test]
+    fn project_abort_keeps_ui_locked_until_disconnect_and_shows_partial_result() {
+        let mut app = app_with_rows(1);
+        let project = app.projects.entries()[0].project.path.clone();
+        let target = app.projects.entry(&project).unwrap().targets[0]
+            .path
+            .clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let abort = Arc::new(AtomicBool::new(false));
+        app.execution = Some(Execution {
+            project: Some(ProjectExecution::new(
+                rx,
+                vec![devsweep::plan::PlanItem {
+                    project_path: project.clone(),
+                    target_path: target.clone(),
+                    bytes: 1024,
+                    large: false,
+                }],
+                Arc::clone(&abort),
+            )),
+            rx: None,
+            abort,
+            done: 0,
+            total: 0,
+            current: None,
+            go_cache: false,
+            go_check: None,
+            global_cache: false,
+        });
+        let ctx = egui::Context::default();
+        app.stop_execution();
+        tx.send(DeleteEvent::ProjectDone {
+            project: project.clone(),
+            deleted: vec![target],
+        })
+        .unwrap();
+        app.poll_execution(&ctx);
+        assert!(app.execution.is_some(), "abort is only a request");
+        let roots = app.config.roots.clone();
+        app.add_root(PathBuf::from("/must-not-be-added"), &ctx);
+        app.remove_root(0, &ctx);
+        assert_eq!(app.config.roots, roots);
+        assert!(app.root_edits_locked());
+        assert!(app.projects.entry(&project).unwrap().targets.is_empty());
+        drop(tx);
+        app.poll_execution(&ctx);
+        assert!(app.execution.is_none());
+        assert!(!app.root_edits_locked());
+        let flash = app.flash.as_ref().unwrap();
+        assert!(flash.interrupted);
+        assert_eq!(flash.bytes, 1024);
+        assert!(
+            !flash.aborted,
+            "disconnect must not masquerade as a final report"
+        );
+    }
+
+    #[test]
+    fn project_execution_rechecks_the_fixed_confirmation_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("package.json"), "{}").unwrap();
+        std::fs::create_dir(root.join("node_modules")).unwrap();
+        std::fs::create_dir(root.join("dist")).unwrap();
+        let mut app = app_with_rows(0);
+        app.rules = rules::builtin_rules();
+        app.config.roots = vec![root.clone()];
+        app.config.delete_mode = DeleteMode::Direct;
+        app.projects.refresh(&app.config.roots, &app.rules);
+        for target in app.projects.targets_mut(&root).unwrap() {
+            target.size = Some(10);
+            target.checked = target.path.ends_with("node_modules");
+            target.default_checked = target.checked;
+        }
+        let ctx = egui::Context::default();
+        app.open_panel(&ctx, &root);
+        let panel = app.panel.as_mut().unwrap();
+        let plan = panel.query.take().unwrap().recv().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(plan).unwrap();
+        panel.preview(rx);
+        panel.poll();
+        assert!(panel.confirm());
+        app.pending_plan = panel.plan.clone();
+        for target in app.projects.targets_mut(&root).unwrap() {
+            target.checked = target.path.ends_with("dist");
+        }
+        app.start_execution(&ctx, Cleanup::Project(root.clone()));
+        let execution = app.execution.take().unwrap().project.unwrap();
+        loop {
+            if let DeleteEvent::Finished(report) = execution.rx.recv().unwrap() {
+                assert_eq!(report.freed_bytes, 10);
+                break;
+            }
+        }
+        assert!(!root.join("node_modules").exists());
+        assert!(root.join("dist").exists());
+        assert!(root.join("package.json").exists());
+    }
+
+    #[test]
+    fn confirmation_large_target_requires_acknowledgement() {
+        for ack in [false, true] {
+            let mut app = app_with_rows(0);
+            app.confirm_large_ack = ack;
+            app.pending = Some(Cleanup::Project("/project".into()));
+            let mut plan = empty_plan();
+            plan.items.push(plan::PlanItem {
+                project_path: "/project".into(),
+                target_path: "/project/build".into(),
+                bytes: plan::LARGE_TARGET_BYTES + 1,
+                large: true,
+            });
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            let s = Lang::En.strings();
+            let mut warmup = ctx.run_ui(raw_input(vec![]), |ui| {
+                app.confirm_dialog(
+                    ui.ctx(),
+                    theme::tokens(egui::Theme::Dark),
+                    s,
+                    &plan,
+                    true,
+                    Cleanup::Project("/project".into()),
+                );
+            });
+            warmup.textures_delta.clear();
+            let mut output = ctx.run_ui(raw_input(vec![]), |ui| {
+                app.confirm_dialog(
+                    ui.ctx(),
+                    theme::tokens(egui::Theme::Dark),
+                    s,
+                    &plan,
+                    true,
+                    Cleanup::Project("/project".into()),
+                );
+            });
+            output.textures_delta.clear();
+            let update = output.platform_output.accesskit_update.unwrap();
+            let (_, confirm) = update
+                .nodes
+                .iter()
+                .find(|(_, node)| node.label() == Some(s.confirm.to_uppercase().as_str()))
+                .unwrap();
+            assert_eq!(confirm.is_disabled(), !ack);
+        }
+    }
+
+    #[test]
+    fn manual_project_refresh_preserves_inflight_go_query_and_localized_refusal() {
+        for lang in [Lang::Zh, Lang::En] {
+            let mut app = app_with_rows(0);
+            app.lang = lang;
+            let (tx, rx) = std::sync::mpsc::channel();
+            app.go_query = Some(rx);
+            app.go_notice = Some(GoCacheError::Changed);
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            app.refresh_projects(&ctx);
+            assert!(app.refresh.scan.is_some());
+            let snapshot = GoCacheSnapshot {
+                entries: ["go.build", "go.module"].map(|id| go_cache::GoCacheEntry {
+                    id,
+                    path: None,
+                    size: Err(GoCacheError::Protected),
+                }),
+            };
+            tx.send(snapshot)
+                .expect("manual Project Refresh must retain the active Go receiver");
+            app.poll_go_caches(&ctx);
+            assert!(app.go_query.is_none());
+            assert_eq!(
+                app.go_snapshot.as_ref().unwrap().entries[0].size,
+                Err(GoCacheError::Protected)
+            );
+            assert_eq!(app.go_notice, Some(GoCacheError::Changed));
+            let s = lang.strings();
+            let mut output = ctx.run_ui(raw_input(vec![]), |ui| {
+                app.caches_content(ui, theme::tokens(egui::Theme::Dark), s);
+            });
+            output.textures_delta.clear();
+            assert!(
+                painted_text(&output)
+                    .iter()
+                    .any(|(text, _)| text == s.go_cache_error(GoCacheError::Changed))
+            );
+        }
+    }
+
+    #[test]
+    fn lifecycle_progress_and_failure_notices_render_in_both_languages() {
+        for lang in [Lang::Zh, Lang::En] {
+            let mut app = app_with_rows(1);
+            app.lang = lang;
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            let s = lang.strings();
+            let (scan_tx, scan_rx) = std::sync::mpsc::channel();
+            app.refresh.scan = Some(scan_rx);
+            let (size_tx, size_rx) = std::sync::mpsc::channel();
+            app.refresh.measurement = Some(devsweep::refresh::Measurement {
+                shown: false,
+                done: 0,
+                total: 1,
+                rx: size_rx,
+            });
+            let mut output = ctx.run_ui(raw_input(vec![]), |ui| {
+                eframe::App::ui(&mut app, ui, &mut eframe::Frame::_new_kittest());
+            });
+            output.textures_delta.clear();
+            let text = painted_text(&output);
+            assert!(text.iter().any(|(text, _)| text == s.refresh_scanning));
+            assert!(
+                text.iter()
+                    .any(|(text, _)| text == &format!("{} 0/1", s.measuring))
+            );
+            drop(scan_tx);
+            drop(size_tx);
+            app.poll_project_scan(&ctx);
+            app.poll_measurement(&ctx);
+            let output = sidebar_frame(&mut app, &ctx, raw_input(vec![]));
+            assert!(
+                painted_text(&output)
+                    .iter()
+                    .any(|(text, _)| text == s.refresh_failed)
+            );
+            assert!(app.refresh.scan.is_none());
+            assert!(app.refresh.measurement.is_none());
+
+            let entry = &app.projects.entries()[0];
+            let mut panel = Panel::new(entry.project.path.clone(), entry.targets.clone());
+            let (tx, rx) = std::sync::mpsc::channel();
+            panel.preview(rx);
+            drop(tx);
+            app.panel = Some(panel);
+            // The modal's first frame measures its layout before it is painted.
+            let mut initial = ctx.run_ui(raw_input(vec![]), |ui| {
+                app.clean_panel(ui.ctx(), theme::tokens(egui::Theme::Dark), s);
+            });
+            initial.textures_delta.clear();
+            let mut output = ctx.run_ui(raw_input(vec![]), |ui| {
+                app.clean_panel(ui.ctx(), theme::tokens(egui::Theme::Dark), s);
+            });
+            output.textures_delta.clear();
+            assert!(
+                painted_text(&output)
+                    .iter()
+                    .any(|(text, _)| text == s.clean_preview_failed)
+            );
+            assert!(!app.panel.as_mut().unwrap().confirm());
+            app.flash = Some(Flash {
+                bytes: 23,
+                aborted: false,
+                interrupted: true,
+                global_cache: false,
+                skipped: vec![],
+            });
+            let mut output = ctx.run_ui(raw_input(vec![]), |ui| {
+                app.flash_banner(ui, theme::tokens(egui::Theme::Dark), s);
+            });
+            output.textures_delta.clear();
+            assert!(
+                painted_text(&output)
+                    .iter()
+                    .any(|(text, _)| text.contains(s.clean_execution_interrupted))
+            );
+        }
+    }
+
+    #[test]
+    fn confirmed_clean_locks_root_controls_and_rejects_root_entry_intents() {
+        for lang in [Lang::En, Lang::Zh] {
+            let mut app = app_with_rows(1);
+            let path = app.projects.entries()[0].project.path.clone();
+            let mut panel = Panel::new(path.clone(), app.projects.entries()[0].targets.clone());
+            panel.plan.items.push(plan::PlanItem {
+                project_path: path.clone(),
+                target_path: path.join("node_modules"),
+                bytes: 1024,
+                large: false,
+            });
+            assert!(panel.confirm());
+            app.panel = Some(panel);
+            app.lang = lang;
+            let roots = app.config.roots.clone();
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            let s = lang.strings();
+            let mut output = ctx.run_ui(raw_input(vec![]), |ui| {
+                app.roots_editor(ui, theme::tokens(egui::Theme::Dark), s)
+            });
+            output.textures_delta.clear();
+            let update = output.platform_output.accesskit_update.unwrap();
+            let (_, add) = update
+                .nodes
+                .iter()
+                .find(|(_, node)| {
+                    node.label()
+                        .is_some_and(|label| label.contains(&s.add_directory.to_uppercase()))
+                })
+                .unwrap();
+            assert!(
+                add.is_disabled(),
+                "confirmed selection must lock Scan root controls"
+            );
+            app.add_root(PathBuf::from("/must-not-be-added"), &ctx);
+            app.remove_root(0, &ctx);
+            assert_eq!(app.config.roots, roots);
+            assert!(app.refresh.scan.is_none());
+            app.panel.as_mut().unwrap().cancel_confirmation();
+            app.remove_root(0, &ctx);
+            assert!(app.config.roots.is_empty());
+            assert!(app.refresh.scan.is_some());
+        }
+    }
+
+    #[test]
+    fn scan_root_controls_lock_during_confirmation() {
+        for locked in [false, true] {
+            let mut app = app_with_rows(0);
+            if locked {
+                app.pending = Some(Cleanup::Project("/project".into()));
+            }
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            let s = Lang::En.strings();
+            let mut output = ctx.run_ui(raw_input(vec![]), |ui| {
+                app.roots_editor(ui, theme::tokens(egui::Theme::Dark), s)
+            });
+            output.textures_delta.clear();
+            let update = output.platform_output.accesskit_update.unwrap();
+            let (_, add) = update
+                .nodes
+                .iter()
+                .find(|(_, node)| {
+                    node.label()
+                        .is_some_and(|label| label.contains(&s.add_directory.to_uppercase()))
+                })
+                .unwrap();
+            assert_eq!(add.is_disabled(), locked);
+        }
+    }
+
+    #[test]
+    fn confirmation_cancel_restores_editing_without_execution() {
+        let mut app = app_with_rows(1);
+        let path = app.projects.entries()[0].project.path.clone();
+        let targets = app.projects.entries()[0].targets.clone();
+        let mut panel = Panel::new(path.clone(), targets);
+        let mut plan = empty_plan();
+        plan.items.push(plan::PlanItem {
+            project_path: path.clone(),
+            target_path: path.join("build"),
+            bytes: 1024,
+            large: false,
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        panel.preview(rx);
+        tx.send(plan.clone()).unwrap();
+        panel.poll();
+        assert!(panel.confirm());
+        app.panel = Some(panel);
+        app.pending = Some(Cleanup::Project(path.clone()));
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            raw_input(vec![egui::Event::Key {
+                key: Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            }]),
+            |ui| {
+                let s = app.strings();
+                app.confirm_dialog(
+                    ui.ctx(),
+                    theme::tokens(egui::Theme::Dark),
+                    s,
+                    &plan,
+                    true,
+                    Cleanup::Project(path.clone()),
+                );
+            },
+        );
+        output.textures_delta.clear();
+        assert!(app.pending.is_none());
+        assert!(app.execution.is_none());
+        assert!(!app.panel.as_ref().unwrap().locked());
     }
 
     /// The row's size counts every target, risky ones included.
