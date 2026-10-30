@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>找出项目里悄悄吃掉几十 GB 的构建产物和依赖缓存，勾选不需要的部分，一次清掉。</b><br>
-  macOS 与 Windows 上的本地应用：Flutter、Android、iOS、Java、Node、Python、Rust、.NET 项目，加上它们背后的全局缓存。
+  macOS 与 Windows 上的本地应用：Flutter、Android、iOS、Java、Node、Python、Rust、.NET、Unity 项目，加上它们背后的全局缓存。
   没有云端，没有账号，数据不出本机。
 </p>
 
@@ -35,7 +35,7 @@
 
 ## 它做什么
 
-DevSweep 查找 Flutter、Android、iOS、Java、Node、Python、Rust 和 .NET 项目中的构建产物、依赖和缓存，以及共用的工具缓存。查看大小，选择要清理的内容，确认后执行。
+DevSweep 查找 Flutter、Android、iOS、Java、Node、Python、Rust、.NET 和 Unity 项目中的构建产物、依赖和缓存，以及共用的工具缓存。查看大小，选择要清理的内容，确认后执行。
 
 ## 功能
 

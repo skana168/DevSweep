@@ -7,7 +7,7 @@
 <p align="center">
   <b>Find the tens of gigabytes your build folders and package caches are quietly eating, tick what you
   don't need, and clear it in one go.</b><br>
-  A local desktop app for macOS and Windows: Flutter, Android, iOS, Java, Node, Python, Rust and .NET projects, plus the global
+  A local desktop app for macOS and Windows: Flutter, Android, iOS, Java, Node, Python, Rust, .NET and Unity projects, plus the global
   caches behind them. No cloud, no account, nothing leaves your machine.
 </p>
 
@@ -36,7 +36,7 @@
 
 ## What it does
 
-DevSweep finds build artifacts, dependencies, and caches in Flutter, Android, iOS, Java, Node, Python, Rust, and .NET projects, plus shared tool caches. Review their sizes, choose what to clean, and confirm.
+DevSweep finds build artifacts, dependencies, and caches in Flutter, Android, iOS, Java, Node, Python, Rust, .NET, and Unity projects, plus shared tool caches. Review their sizes, choose what to clean, and confirm.
 
 ## Features
 
