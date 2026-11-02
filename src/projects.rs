@@ -66,6 +66,49 @@ impl ProjectRefresh {
         self.reconcile(projects, rules);
     }
 
+    /// Merge a discovered addition without traversing or expanding Targets on the caller.
+    pub fn apply_addition(&mut self, mut found: Self) {
+        let mut projects = self
+            .entries
+            .iter()
+            .map(|entry| entry.project.clone())
+            .collect();
+        scan::merge_scan(
+            &mut projects,
+            found
+                .entries
+                .iter()
+                .map(|entry| entry.project.clone())
+                .collect(),
+        );
+        for entry in &self.entries {
+            if found.entry(&entry.project.path).is_none() {
+                found.entries.push(entry.clone());
+            }
+        }
+        let mut entries: HashMap<_, _> = found
+            .entries
+            .into_iter()
+            .map(|entry| (entry.project.path.clone(), entry))
+            .collect();
+        let merged = Self {
+            entries: projects
+                .into_iter()
+                .filter_map(|project| entries.remove(&project.path))
+                .collect(),
+        };
+        self.apply_refresh(merged);
+    }
+
+    /// Immediately discard Projects outside the current Scan roots without traversal.
+    pub fn retain_roots(&mut self, roots: &[PathBuf]) {
+        self.entries.retain(|entry| {
+            roots
+                .iter()
+                .any(|root| entry.project.path.starts_with(root))
+        });
+    }
+
     fn reconcile(&mut self, projects: Vec<Project>, rules: &[Rule]) {
         let mut targets: HashMap<_, _> = self
             .entries
