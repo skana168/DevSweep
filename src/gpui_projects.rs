@@ -79,6 +79,8 @@ pub(crate) struct ProjectDiscovery {
     measurement_epoch: u64,
     measurement_task: Option<Task<()>>,
     queued_refresh: bool,
+    activation: crate::refresh::ActivationRefresh,
+    clock: Box<dyn Fn() -> std::time::Duration>,
     scanning: bool,
     errors: Vec<String>,
     revision: u64,
@@ -136,6 +138,15 @@ impl ProjectDiscovery {
             measurement_epoch: 0,
             measurement_task: None,
             queued_refresh: false,
+            activation: crate::refresh::ActivationRefresh::new(
+                std::time::Duration::ZERO,
+                window.is_window_active(),
+            ),
+            clock: {
+                let executor = cx.background_executor().clone();
+                let origin = executor.now();
+                Box::new(move || executor.now() - origin)
+            },
             scanning: false,
             errors: Vec::new(),
             revision: 0,
@@ -157,7 +168,27 @@ impl ProjectDiscovery {
         self.language = language;
         cx.notify();
     }
+    pub(crate) fn activate(&mut self, active: bool) -> bool {
+        if self
+            .activation
+            .activate(active, (self.clock)(), self.scanning)
+        {
+            // Coalesce repeated activations while measurement/Clean defers discovery.
+            self.activation.scanned((self.clock)());
+            true
+        } else {
+            false
+        }
+    }
+    pub(crate) fn refresh_from_activation(&mut self, cx: &mut Context<Self>) {
+        // A manual Refresh may have been queued (or started) while Clean held
+        // the shell's activation request. That work already satisfies the return.
+        if !self.scanning && !self.queued_refresh {
+            self.refresh(cx);
+        }
+    }
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.activation.scanned((self.clock)());
         if self.scanning || self.measuring || self.clean_locked() {
             self.queued_refresh = true;
             return;
@@ -165,6 +196,7 @@ impl ProjectDiscovery {
         self.discover(cx);
     }
     fn discover(&mut self, cx: &mut Context<Self>) {
+        self.activation.scanned((self.clock)());
         self.queued_refresh = false;
         self.revision += 1;
         let revision = self.revision;

@@ -29,6 +29,9 @@ struct Row {
     entry: CacheEntry,
     measurement: Measurement,
     selected: bool,
+    draft: Option<bool>,
+    measuring: bool,
+    rechecking_cleaned: bool,
     focus: FocusHandle,
 }
 
@@ -93,6 +96,9 @@ impl GlobalCacheView {
                 entry,
                 measurement: Measurement::Pending,
                 selected: false,
+                draft: None,
+                measuring: false,
+                rechecking_cleaned: false,
                 focus: cx.focus_handle(),
             })
             .collect::<Vec<_>>();
@@ -110,12 +116,38 @@ impl GlobalCacheView {
             clean: CacheClean::default(),
             context_invalidated: false,
         };
-        for ix in 0..this.rows.len() {
-            if go_cache::is_go_cache(this.rows[ix].entry.rule.id) {
+        this.measure_pending(cx);
+        this
+    }
+    // Recheck Go and only remeasure fixed caches recreated since Clean. Existing
+    // measurements and explicit selection drafts retain their owners.
+    pub(crate) fn refresh_stale(&mut self, cx: &mut Context<Self>) {
+        for row in &mut self.rows {
+            if !row.measuring
+                && (go_cache::is_go_cache(row.entry.rule.id)
+                    || matches!(row.measurement, Measurement::Cleaned))
+            {
+                row.draft.get_or_insert(row.selected);
+                row.rechecking_cleaned = !go_cache::is_go_cache(row.entry.rule.id)
+                    && matches!(row.measurement, Measurement::Cleaned);
+                row.measurement = Measurement::Pending;
+            }
+        }
+        self.measure_pending(cx);
+        cx.notify();
+    }
+    fn measure_pending(&mut self, cx: &mut Context<Self>) {
+        self._tasks.retain(|task| !task.is_ready());
+        for ix in 0..self.rows.len() {
+            if self.rows[ix].measuring
+                || !matches!(self.rows[ix].measurement, Measurement::Pending)
+                || go_cache::is_go_cache(self.rows[ix].entry.rule.id)
+            {
                 continue;
             }
-            let path = this.rows[ix].entry.path.clone();
-            this._tasks.push(cx.spawn(async move |view, cx| {
+            self.rows[ix].measuring = true;
+            let path = self.rows[ix].entry.path.clone();
+            self._tasks.push(cx.spawn(async move |view, cx| {
                 let result = cx
                     .background_spawn(async move {
                         let path = path.ok_or(GoCacheError::Unreadable)?;
@@ -142,12 +174,18 @@ impl GlobalCacheView {
                 .ok();
             }));
         }
-        if this
-            .rows
-            .iter()
-            .any(|row| go_cache::is_go_cache(row.entry.rule.id))
-        {
-            this._tasks.push(cx.spawn(async move |view, cx| {
+        if self.rows.iter().any(|row| {
+            go_cache::is_go_cache(row.entry.rule.id)
+                && !row.measuring
+                && matches!(row.measurement, Measurement::Pending)
+        }) {
+            for row in &mut self.rows {
+                if go_cache::is_go_cache(row.entry.rule.id) {
+                    row.measuring = true;
+                }
+            }
+            let context = self.context.clone();
+            self._tasks.push(cx.spawn(async move |view, cx| {
                 let snapshot = cx
                     .background_spawn(
                         async move { context.map(|context| go_cache::discover(&context)) },
@@ -172,15 +210,25 @@ impl GlobalCacheView {
                 .ok();
             }));
         }
-        this
     }
     fn finish(&mut self, ix: usize, result: Result<u64, GoCacheError>) {
         let row = &mut self.rows[ix];
+        row.measuring = false;
+        if std::mem::take(&mut row.rechecking_cleaned)
+            && matches!(
+                result,
+                Err(GoCacheError::Missing | GoCacheError::NotDirectory)
+            )
+        {
+            row.measurement = Measurement::Cleaned;
+            row.selected = false;
+            return;
+        }
         row.measurement = match result {
             Ok(bytes) => Measurement::Ready(bytes),
             Err(error) => Measurement::Failed(error),
         };
-        row.selected = result.is_ok() && !row.entry.rule.dangerous;
+        row.selected = result.is_ok() && row.draft.unwrap_or(!row.entry.rule.dangerous);
     }
     /// The measured Go snapshot; execution always uses the existing recheck API.
     pub fn go_snapshot(&self) -> Option<&GoCacheSnapshot> {
@@ -209,6 +257,7 @@ impl GlobalCacheView {
     fn toggle(&mut self, ix: usize, selected: bool, cx: &mut Context<Self>) {
         if !self.clean_locked() && matches!(self.rows[ix].measurement, Measurement::Ready(_)) {
             self.rows[ix].selected = selected;
+            self.rows[ix].draft = Some(selected);
             cx.notify();
         }
     }

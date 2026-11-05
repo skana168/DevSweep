@@ -88,3 +88,33 @@
 - 已存在的联动不应误报为全部缺失：`SettingsApp::new` 的 RootsChanged/workspace observer 会在根或项目路径集合变化时调用 `invalidate_caches`；`ensure_caches` 重建视图时，`src/gpui_cache.rs::GlobalCacheView::from_entries` 会重新查询 Go 和测量固定缓存。但路径集合未变化的旧缓存视图不会因前台切回而更新。
 - **外部平台/原生证据缺口**另计：Windows 构建和全流程、真实 Go/Unity、系统 Trash 成功与恢复，以及上文未通过的原生 Direct/权限、隔离全局完整流程、长任务、OS 外观/IME/reduced motion/设计矩阵。可在本地增加隔离 fixture/GPUI 自动化，但不能据此声称这些平台/系统集成已验收。补完自动刷新后仍须真实窗口 activation 验收。
 - 08 保持 `ready-for-human` 且未完成验收项不勾选；未移除 egui、未开始 09。未 reset/stash/rewrite、push 或创建 PR；保留工作树，原有 `skills-lock.json` 修改及未跟踪 `.claude/` 未纳入提交。
+
+## 2026-11-05 — 激活与过期刷新本地缺口实施
+
+- 工作树 `t3/gpui-activation-stale-refresh`，起点为指定集成提交 `9fd66c27d8b8af3db1c074b6548625623b4a6026`，开始时干净。无 children、checkout 创建、PR/push；未改 egui、用户配置、默认入口或无关文件。CodeGraph MCP 明确返回本工作树没有可查询索引，随后使用源码检索；未建索引。
+- 读取 spec/08/本报告、AGENTS/GLOSSARY/三个 ADR、TDD 与 git-commit，以及 host 的 GPUI Kit / Design Guides、Coding Guides 和 testing 指引。核对锁定 Kit 0.7.0 的 `observe_window_activation`、`Window::is_window_active` / `activate_window`、`BackgroundExecutor::now` / `advance_clock` 和 `Task::is_ready` 源码。生产使用执行器单调时钟，测试用同一执行器虚拟时钟，无 30 秒 wall-clock sleep。
+- `ActivationRefresh` 公开业务接口负责切回、30 秒边界和扫描中忽略激活；手动刷新请求、实际发现（含根改变）更新时效。主壳保留 activation subscription，以单个 pending 标志合并清理确认/执行期间的激活刷新，项目或缓存锁释放后由已有 observer 释放；项目测量中的刷新继续沿用既有 queued_refresh。没有替换运行中的清理实体/计划，没有绕过确认或中止边界。
+- 自动刷新沿用项目 `refresh` / `apply_refresh`，保留选择、危险项草稿、筛选和已知 Project size。全局缓存原位重查 Go、后台检查/重新测量 Cleaned 固定缓存；未重建仍显示 Cleaned，已知固定缓存保持原体积，显式草稿与滚动/实体所有权保留，成功清理记录不选中的草稿。进行中的测量不会重复启动，完成 Task 在下次刷新时回收。现有 RootsChanged/路径集合变化的 `invalidate_caches -> ensure_caches -> GlobalCacheView::from_entries` 完整保留，没有新增重复的根变化处理。
+
+### 新增回归及红/绿证据
+
+- `tests/activation_refresh.rs` 两个公开业务测试：持续激活不触发、29/30 秒边界、手动扫描重置时效、扫描中忽略激活且不追加 follow-up。首个红为公开类型尚不存在，随后通过；日志 `/tmp/activation-{red,green}.log`。
+- 生产 GPUI `foreground_activation_refreshes_only_after_grace_period`：真正激活两个 headless 平台窗口，29 秒无新项目、30 秒发现；手动刷新后再次验证 1/30 秒边界；保留 Node 筛选、跨刷新选择、危险项显式勾选、普通项取消、24 B Project size。原始缺少 activation 接线时失败（列表未出现），接线后通过，日志 `/tmp/activation-ui-{red,green}.log`。
+- 生产 GPUI `activation_defers_cache_refresh_until_cancel_and_remeasures_recreated_cache`：独立子进程隔离 HOME/USERPROFILE/LOCALAPPDATA/PATH，真实固定 catalogue 路径及 shell Go 边界 fixture；Direct 只删除临时 Gradle，未重建刷新仍 Cleaned；重建为 256 B，Go 从 64 B 改为 512 B，已知 npm 仍显示旧 128 B。缓存确认期间切回不改变旧快照；取消后释放刷新，保留 npm/Go/Gradle 勾选草稿与当前缓存页，项目同路径从 Node 变为 Rust 被发现；紧接着未过期切回不重新查询已变为 1024 B 的 Go fixture。缺少 Cleaned 恢复分支时明确失败：实际 `Cache directory does not exist`、预期 `Cleaned · 0 B`，修复后通过；日志 `/tmp/activation-cleaned-{red,green}.log`。
+- headless 新建辅助窗口本身不会激活；测试显式调用 `activate_window` 并 drain 调度器。上述为真实生产 GPUI UI integration tests，不是私有 handler 调用，也不是原生 OS 接受证据。缓存/Go 子场景使用 Unix shell fixture；跨平台公开时效测试和项目激活测试未加 Unix 限制，但 Windows 未编译/运行。
+
+### 本轮检查
+
+所有 Cargo 命令使用 `CARGO_TARGET_DIR=/Users/yoyun/DevSweep/target`。大构建前磁盘约 55 GiB 可用，无磁盘耗尽失败。
+
+- `cargo test --locked --features gpui-tests -- --test-threads=1`：237 passed、0 failed、4 ignored（含 29 个 GPUI UI integration tests），日志 `/tmp/activation-final-tests.log`。末次固定缓存 missing 恢复仅作用固定条目后，另跑全体 GPUI 回归，见下方提交前结果。
+- `cargo clippy --locked --features gpui-tests --lib --bins -- -D warnings`：通过，日志 `/tmp/activation-final-clippy.log`。
+- `cargo clippy --locked --all-targets --features gpui-tests`：通过；既有测试 lint 仍存在，不称严格 all-targets 通过。日志 `/tmp/activation-final-all-targets-clippy.log`。新增测试的同型 `.into()` 已移除。
+- `cargo build --locked --features gpui --bins`：macOS arm64 通过，日志 `/tmp/activation-final-build.log`。既有 `block 0.1.6` future-incompat 警告仍在。
+- `cargo fmt --check`、`git diff --check`：通过。
+
+### 仍未通过
+
+本节补齐的是此前报告第 82 行所列本地实现/自动化缺口。**原生 macOS 窗口的失焦/重新激活、真实 Go 环境、Windows 编译与全流程、系统 Trash 成功/恢复以及原报告其余平台/设计矩阵接受条件仍未验证**。4 个 ignored 仍不算通过。未操控原生用户配置或真实缓存，08 保持 `ready-for-human`，不勾选平台验收项，不切换/移除 egui，不开始 09。
+
+提交前复核：`git merge integration/gpui-ui` 返回 `Already up to date.`，集成 tip 仍为指定 `9fd66c27d8b8af3db1c074b6548625623b4a6026`。最后补充释放 activation 队列时复用已排队/正在运行的手动项目 Refresh，避免清理取消时追加一次发现；最终生产代码另跑 `cargo test --locked --features gpui-tests gpui_ -- --test-threads=1`，29 passed / 0 failed，日志 `/tmp/activation-final-gpui.log`；生产严格 Clippy、bins 构建、fmt/diff 复核通过。完整 237/4/0 为上述全量运行记录，末次 GPUI 专项覆盖最终 GPUI 改动。按 git-commit skill 提交，最终 SHA 由包含本节的提交确定；无 push/PR。

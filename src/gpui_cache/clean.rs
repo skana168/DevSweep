@@ -568,6 +568,7 @@ impl GlobalCacheView {
                                         for row in &mut this.rows {
                                             if row.entry.rule.id == id {
                                                 row.selected = false;
+                                                row.draft = Some(false);
                                                 row.measurement = Measurement::Cleaned;
                                             }
                                         }

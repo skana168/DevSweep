@@ -34,3 +34,9 @@
 - macOS 原生实操：临时项目发现/测量、类型筛选、勾选、清理快捷键预览/取消、中英文及三种主题、缩窄与重启尺寸、方向键/Space、实际路径/失败详情复制粘贴；项目 Trash 调用实际 Failure，Freed bytes 0、文件完整；请求中止持续等待当前项目，最终显示已停止及 Failure，仍可重试/设置。修复版最小窗口截图保留完整项目行；原生大体积额外确认禁用/取消重置通过。全局页仅选择/审阅/取消，未执行用户缓存。已退出验收 app，config 字节与原备份一致，rules 恢复原先不存在状态。
 - 尚未通过：Windows 编译及全部原生流程（无 Windows target/VM/可用环境链接工具）；macOS Trash 成功/系统恢复、原生 Direct/权限恢复、隔离全局完整执行/中止/失败恢复、真实 Go、真实长任务/大计划、前台切回自动刷新/Go 缓存联动迁移覆盖，以及完整 Design checklist 跨平台状态矩阵。详见报告的逐项可执行接受标准。故双平台流程、完整交互迁移审计和设计验收框仍保持未勾选，不允许切换。
 - 提交前 `git merge integration/gpui-ui`：Already up to date，tip `dbbf56c9bc0e9080a05ffc322bb1a7df1c870e37`。使用 git-commit skill；无 children、push、PR 或新远程资源。
+
+### 2026-11-05 — 激活与 30 秒刷新本地缺口
+
+- 从指定集成基线 `9fd66c27d8b8af3db1c074b6548625623b4a6026` 补齐 GPUI 窗口 activation：30 秒切回扫描、手动刷新重置时效、扫描中不重复启动、清理期间合并排队并在取消/结束后释放，联动 Go 重查与重建的 Cleaned 固定缓存后台测量。保留项目选择/草稿/已知体积、缓存选择和当前视图；保留现有根/项目路径改变的失效与重建流程。
+- 新增 2 个公开业务时效回归和 2 个生产 GPUI UI integration tests；隔离目录真实 Direct 清理/重建与 Go shell fixture，不触碰用户缓存。完整串行套件 237 passed / 4 ignored / 0 failed，生产严格 Clippy、普通 all-targets Clippy、fmt/diff 与 macOS bins 构建通过；all-targets 既有测试 lint 保留。详细命令、红/绿、末次回归与集成同步见 [报告新增章节](../validation-08.md#2026-11-05--激活与过期刷新本地缺口实施)。
+- 仅本地功能/自动化缺口完成；原生 activation、真实 Go、Windows 与其它原生/设计接受缺口仍未通过，状态和验收框保持不变。无 children、checkout 创建、PR/push，egui/用户配置/默认入口不变。

@@ -111,6 +111,7 @@ struct SettingsApp {
     caches: Option<Entity<GlobalCacheView>>,
     cache_projects: Vec<PathBuf>,
     cache_invalidated: bool,
+    auto_refresh_pending: bool,
     cache_subscription: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
@@ -152,10 +153,18 @@ impl SettingsApp {
                 this.invalidate_caches(cx);
                 this.cache_projects = paths;
             }
+            this.run_auto_refresh(cx);
             if this.global_caches {
                 this.ensure_caches(window, cx);
             }
             cx.notify();
+        });
+        let activation = cx.observe_window_activation(window, |this, window, cx| {
+            let due = this.projects.update(cx, |projects, _| {
+                projects.activate(window.is_window_active())
+            });
+            this.auto_refresh_pending |= due;
+            this.run_auto_refresh(cx);
         });
         let this = Self {
             config,
@@ -166,8 +175,9 @@ impl SettingsApp {
             caches: None,
             cache_projects: vec![],
             cache_invalidated: false,
+            auto_refresh_pending: false,
             cache_subscription: None,
-            _subscriptions: vec![bounds, appearance, roots, workspace],
+            _subscriptions: vec![bounds, appearance, roots, workspace, activation],
         };
         this.apply_theme(window, cx);
         this
@@ -182,7 +192,24 @@ impl SettingsApp {
             // Retain the result until an explicit navigation/refresh; do not replace a
             // finishing worker's view merely because its protection context changed.
             self.cache_subscription =
-                Some(cx.observe(self.caches.as_ref().unwrap(), |_, _, cx| cx.notify()));
+                Some(cx.observe(self.caches.as_ref().unwrap(), |this, _, cx| {
+                    this.run_auto_refresh(cx);
+                    cx.notify();
+                }));
+        }
+    }
+    fn run_auto_refresh(&mut self, cx: &mut Context<Self>) {
+        if !self.auto_refresh_pending
+            || self.cache_locked(cx)
+            || self.projects.read(cx).clean_locked()
+        {
+            return;
+        }
+        self.auto_refresh_pending = false;
+        self.projects
+            .update(cx, |projects, cx| projects.refresh_from_activation(cx));
+        if let Some(cache) = &self.caches {
+            cache.update(cx, |cache, cx| cache.refresh_stale(cx));
         }
     }
     fn cache_locked(&self, cx: &App) -> bool {
@@ -454,8 +481,361 @@ impl Render for SettingsPanel {
 mod tests {
     use crate::config::{self, LanguageChoice, ThemeChoice};
     use crate::delete::DeleteMode;
-    use gpui_kit::test::TestWindowExt;
+    use gpui_kit::test::{TestAppContextExt, TestWindowExt};
     use gpui_kit::{AppContext, SharedString, TestAppContext, WindowOptions};
+
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    async fn activation_defers_cache_refresh_until_cancel_and_remeasures_recreated_cache(
+        cx: &mut TestAppContext,
+    ) {
+        use std::{os::unix::fs::PermissionsExt, time::Duration};
+        let Some(home) = std::env::var_os("DEVSWEEP_ACTIVATION_HOME") else {
+            let fixture = tempfile::tempdir().unwrap();
+            let fixture_home = fixture.path().canonicalize().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "gpui_settings::tests::activation_defers_cache_refresh_until_cancel_and_remeasures_recreated_cache", "--nocapture", "--test-threads=1"])
+                .env("DEVSWEEP_ACTIVATION_HOME", &fixture_home)
+                .env("HOME", &fixture_home).env("USERPROFILE", &fixture_home)
+                .env("LOCALAPPDATA", fixture_home.join("LocalAppData"))
+                .env("PATH", &fixture_home).output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
+        let home = std::path::PathBuf::from(home).canonicalize().unwrap();
+        let go = home.join("go");
+        std::fs::write(
+            &go,
+            r#"#!/bin/sh
+while IFS= read -r line; do printf '%s\n' "$line"; done < "$HOME/go-output"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&go, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let build = home.join("go-build");
+        let module = home.join("go-module");
+        std::fs::write(
+            home.join("go-output"),
+            format!("{}\n{}\n", build.display(), module.display()),
+        )
+        .unwrap();
+        for path in [&build, &module] {
+            std::fs::create_dir(path).unwrap();
+            std::fs::write(path.join("payload"), [0; 64]).unwrap();
+        }
+        let gradle = home.join(".gradle/caches");
+        let npm = crate::cache::entries()
+            .into_iter()
+            .find(|e| e.rule.id == "npm.cacache")
+            .unwrap()
+            .path
+            .unwrap();
+        for path in [&gradle, &npm] {
+            assert!(path.starts_with(&home));
+            std::fs::create_dir_all(path).unwrap();
+            std::fs::write(path.join("payload"), [0; 128]).unwrap();
+        }
+        let projects = home.join("projects");
+        std::fs::create_dir(&projects).unwrap();
+        let new = projects.join("known");
+        std::fs::create_dir(&new).unwrap();
+        std::fs::write(new.join("package.json"), "{}").unwrap();
+        cx.update(|cx| {
+            super::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    super::SettingsApp::new(
+                        config::Config {
+                            roots: vec![projects.clone()],
+                            language: LanguageChoice::En,
+                            ..Default::default()
+                        },
+                        Some(home.join("config.toml")),
+                        window,
+                        cx,
+                    )
+                })
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("nav-global-caches", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("cache-state-go.build").label(), Some("64 B"));
+            window.press("end", cx);
+            window.press("up", cx);
+            window.press("space", cx);
+            window.press("home", cx);
+            window.click("npm.cacache", cx);
+            window.click("cache-clean", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("cache-mode-direct", cx);
+            window.click("cache-execute", cx);
+        })
+        .unwrap();
+        cx.wait_for(handle, Duration::from_secs(3), |window, _| {
+            window.try_find("cache-clean-result").is_some_and(|r| {
+                r.label()
+                    .is_some_and(|s| s.contains("Cache clean finished"))
+            })
+        })
+        .await;
+        assert!(!gradle.exists());
+        // Refreshing a still-absent cache must keep the successful Clean state.
+        let first_return = cx.update(|cx| {
+            cx.open_window(WindowOptions::default(), |_, cx| {
+                cx.new(|_| gpui_kit::Empty)
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(*first_return, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.background_executor
+            .advance_clock(Duration::from_secs(30));
+        cx.update_window(handle, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("cache-state-gradle.caches").label(),
+                Some("Cleaned · 0 B")
+            );
+        })
+        .unwrap();
+        std::fs::create_dir_all(&gradle).unwrap();
+        std::fs::write(gradle.join("rebuilt"), [0; 256]).unwrap();
+        std::fs::write(build.join("payload"), [0; 512]).unwrap();
+        std::fs::write(npm.join("payload"), [0; 1024]).unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("npm.cacache", cx);
+            window.click("cache-clean", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let other = cx.update(|cx| {
+            cx.open_window(WindowOptions::default(), |_, cx| {
+                cx.new(|_| gpui_kit::Empty)
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(*other, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.background_executor
+            .advance_clock(Duration::from_secs(30));
+        std::fs::remove_file(new.join("package.json")).unwrap();
+        std::fs::write(new.join("Cargo.toml"), "[package]").unwrap();
+        std::fs::create_dir(new.join("target")).unwrap();
+        std::fs::write(new.join("target/payload"), [0; 32]).unwrap();
+        cx.update_window(handle, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("cache-state-go.build").label(), Some("64 B"));
+            assert_eq!(
+                window.find("cache-state-gradle.caches").label(),
+                Some("Cleaned · 0 B")
+            );
+            window.click("cache-cancel", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("cache-state-go.build").label(), Some("512 B"));
+            assert_eq!(window.find("go.build").checked(), Some(false));
+            assert_eq!(window.find("gradle.caches").checked(), Some(false));
+            assert_eq!(
+                window.find("cache-state-gradle.caches").label(),
+                Some("256 B")
+            );
+            assert_eq!(
+                window.find("cache-state-npm.cacache").label(),
+                Some("128 B")
+            );
+            assert_eq!(window.find("npm.cacache").checked(), Some(true));
+            assert!(window.find("cache-clean").visible());
+            window.click("nav-projects", cx);
+            window
+                .within("project-list")
+                .within(SharedString::from(new.to_string_lossy().into_owned()))
+                .click("project-check", cx);
+            window.render_frame(cx);
+            assert_eq!(window.find("target-rust.target").checked(), Some(false));
+        })
+        .unwrap();
+        cx.update_window(*other, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        std::fs::write(build.join("payload"), [0; 1024]).unwrap();
+        cx.update_window(handle, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("nav-global-caches", cx);
+            assert_eq!(window.find("cache-state-go.build").label(), Some("512 B"));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn foreground_activation_refreshes_only_after_grace_period(cx: &mut TestAppContext) {
+        use std::time::Duration;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        cx.update(|cx| {
+            super::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    super::SettingsApp::new(
+                        config::Config {
+                            roots: vec![root.clone()],
+                            language: LanguageChoice::En,
+                            ..Default::default()
+                        },
+                        Some(root.join("config.toml")),
+                        window,
+                        cx,
+                    )
+                })
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        let other = cx.update(|cx| {
+            cx.open_window(WindowOptions::default(), |_, cx| {
+                cx.new(|_| gpui_kit::Empty)
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(*other, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        let project = root.join("new-project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(project.join("package.json"), "{}").unwrap();
+        for (target, bytes) in [("node_modules", 16), ("dist", 8)] {
+            std::fs::create_dir(project.join(target)).unwrap();
+            std::fs::write(project.join(target).join("payload"), vec![0; bytes]).unwrap();
+        }
+        cx.background_executor
+            .advance_clock(Duration::from_secs(29));
+        cx.update_window(handle, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("discovery-empty").visible());
+        })
+        .unwrap();
+        cx.update_window(*other, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.background_executor.advance_clock(Duration::from_secs(1));
+        cx.update_window(handle, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window
+                .within("project-list")
+                .within(SharedString::from(project.to_string_lossy().into_owned()))
+                .click("project-check", cx);
+            window.render_frame(cx);
+            window.click("target-node.dist", cx);
+            window.click("target-node.node_modules", cx);
+            window.click("filter-Node", cx);
+        })
+        .unwrap();
+        cx.background_executor
+            .advance_clock(Duration::from_secs(29));
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("refresh-projects", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let later = root.join("later");
+        std::fs::create_dir(&later).unwrap();
+        std::fs::write(later.join("package.json"), "{}").unwrap();
+        cx.update_window(*other, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.background_executor.advance_clock(Duration::from_secs(1));
+        cx.update_window(handle, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window
+                    .within("project-list")
+                    .try_find(SharedString::from(later.to_string_lossy().into_owned()))
+                    .is_none()
+            );
+        })
+        .unwrap();
+        cx.update_window(*other, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.background_executor
+            .advance_clock(Duration::from_secs(29));
+        cx.update_window(handle, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window
+                    .within("project-list")
+                    .find(SharedString::from(later.to_string_lossy().into_owned()))
+                    .visible()
+            );
+            assert_eq!(window.find("target-node.dist").checked(), Some(true));
+            assert_eq!(
+                window.find("target-node.node_modules").checked(),
+                Some(false)
+            );
+            assert_eq!(
+                window
+                    .within("project-list")
+                    .within(SharedString::from(project.to_string_lossy().into_owned()))
+                    .find("project-size")
+                    .label(),
+                Some("Project size: 24 B")
+            );
+        })
+        .unwrap();
+    }
 
     #[gpui_kit::test]
     fn settings_choices_remain_accessible_at_minimum_window_and_large_text(
