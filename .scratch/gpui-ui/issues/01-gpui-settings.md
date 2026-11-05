@@ -30,3 +30,10 @@
 - `cargo build --bin devsweep-gpui --features gpui --locked`：macOS aarch64 成功。`cargo clippy --lib --bins --features gpui-tests --locked -- -D warnings` 成功；全目标严格 Clippy 被未改动的 `tests/plan.rs`（4 处）与 `tests/delete.rs`（6 处）既有 cloned_ref_to_slice_refs 阻挡。`cargo fmt --all -- --check` / `git diff --check` 通过。依赖 block 0.1.6 仍有 Rust future-incompat warning。
 - macOS 原生验证：实际运行 debug 二进制（临时 app wrapper），看到系统窗口控件、品牌 PNG 与 Kit 设置图标；Command+, 打开、Escape 关闭、Tab / Enter 重开；切换 English 与 Dark，屏幕检查中英文可读及语义浅 / 深主题，随后恢复原 System 语言和主题。路径字符串仅在配置兼容测试中验证保留，本票未实现项目路径列表，未声称其原生视觉验收。
 - 第一、二项仍未勾选：本机仅安装 aarch64-apple-darwin target，没有 Windows 构建 / 运行环境，未运行 Windows；Windows 字体 fallback、窗口 / 键盘 / 路径视觉也没有实际证据。CI 已增加 macOS / Windows 的 GPUI build 和 UI integration tests，但未运行的 CI 不算通过。双平台最终验收和 ticket resolution 留给父任务。
+
+### 2026-11-05 — 集成确认
+
+- `integration/gpui-ui` 已从 `cb8c12c` fast-forward 集成 `t3/gpui-settings-ui` 的 `d6405bd`；未修改实现。集成后 `cargo fmt --all -- --check`、`git diff --check` 和 `cargo test --lib --features gpui-tests --locked gpui_settings::tests -- --test-threads=1` 通过（2 passed）；完整套件证据沿用上条记录。
+- 02、06 的代码依赖已就绪，可基于集成的 GPUI 入口、Kit facade、共享 Config / i18n API 开始实现；这仅解除开发依赖，不表示 01 已验收。当前 SettingsApp 是私有窗口壳，后续票据可在此基础上扩展工作区。
+- Windows 构建 / 原生运行、字体 fallback、键盘与窗口行为，以及中英文路径 / 长路径的原生视觉验收，统一交由 [08](08-cross-platform-verification.md) 跟进；01 第一、二项保持未勾选，验收与 resolution 仍待上述证据，不标记 resolved。
+- 保留无关的 `skills-lock.json` 修改、未跟踪 `.claude/` 及实现 worktree；未创建 PR、push 或改写历史。
