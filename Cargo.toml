@@ -34,3 +34,8 @@ walkdir = "2"
 
 [dev-dependencies]
 tempfile = "3"
+
+[[bin]]
+name = "devsweep-gpui-cache"
+path = "src/bin/devsweep-gpui-cache.rs"
+required-features = ["gpui"]
