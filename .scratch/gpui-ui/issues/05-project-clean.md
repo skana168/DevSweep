@@ -16,3 +16,11 @@
 ## 实施约定
 
 遵循已确认的 GPUI UI 迁移规格与 ADR-0003。遇到 GPUI 用法或设计疑问，查阅已安装的 gpui-kit 与 gpui-kit-design-guides skills，并核实当前版本 API。沿用领域词汇表，保持现有安全语义。
+
+## Comments
+
+### 2026-11-05 — 集成就绪
+
+- 04 已以 `57a82399c8f33f1deb8c51e6915594efc5d74f39` fast-forward 集成至 `integration/gpui-ui`，合并后六个 GPUI 项目测试、fmt 与 diff 检查通过，实施依赖已满足，可开始本票。
+- 接入点为 `ProjectDiscovery::request_clean` 发出的 `CleanRequested` 意图；当前仅提示等待确认，未执行删除。实现时应从现有选择草稿重新生成计划，完成确认锁定、执行前重检及后台执行生命周期，不得把底栏汇总当成删除授权。
+- 本票功能及原生平台验收尚未执行，所有验收项保持未勾选；04 的原生布局和双平台流程仍待 08 验收。

@@ -37,3 +37,11 @@
 - [ ] macOS 原生窗口人工验证面板拖动、缩放、主题/中文字体、键盘焦点环和滚动可用性。
 - [ ] Windows 构建及原生窗口执行相同流程。
 - [ ] 双平台大目录下真实响应与完整选择流程验收（08）；首项产品布局验收保持未勾选，自动化几何与交互证据不替代原生验收。
+
+### 2026-11-05 — integration/gpui-ui 集成证据
+
+- 集成前 HEAD 为 `59fe4032f5c03a360df5349b2644e22e4c900988`，与目标提交的 merge-base 相同；`git merge --ff-only 57a82399c8f33f1deb8c51e6915594efc5d74f39` 成功，未生成合并提交或改写历史。
+- 合并后 `cargo fmt --all -- --check`、`git diff --check` 通过；`cargo test --lib --features gpui-tests --locked gpui_projects::tests -- --test-threads=1` 六个真实 GPUI 项目组件测试全部通过（0 failed / 0 ignored）。完整套件沿用上方实施证据，本次没有重复运行。既有 `block 0.1.6` future-incompat warning 仍存在。
+- 核对 `request_clean`：仅在汇总含安全 Target 时发出 `CleanRequested`，不调用删除或执行接口；选择草稿仍由 ProjectRefresh 持有。05 可在此意图入口接入新计划、确认锁定及执行前重检，不能将当前汇总当成执行授权。
+- 04 的实现依赖已集成，05 可开始实现；04 的首项布局验收及上述 macOS / Windows 原生流程继续保持未勾选、待 08 验收，不据自动化结果宣称平台通过。
+- 保留原有 `skills-lock.json` 修改及未跟踪 `.claude/`，仅提交票据集成记录；无 reset、stash、历史改写、PR 或 push，保留现有工作树供后续清理。
