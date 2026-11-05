@@ -1,20 +1,25 @@
 //! Project discovery presentation. All filesystem traversal runs on the background executor.
+mod clean;
+
 use crate::{
     config,
     config::LanguageChoice,
+    delete::DeleteMode,
     i18n::Lang,
     plan::{self, DeletePlan, PlanProject},
+    project_clean::{ProjectClean, ProjectExecution},
     projects::ProjectRefresh,
     rules,
     scan::{self, Project, Stack},
     size,
 };
 use gpui_kit::component::{
-    ActiveTheme, Disableable, IconName, Selectable, ThemeStyled,
+    ActiveTheme, Disableable, IconName, Selectable, ThemeStyled, WindowExt,
     button::Button,
     button::ButtonVariants,
     checkbox::Checkbox,
     input::{Input, InputState},
+    radio::Radio,
     resizable::{ResizableState, h_resizable, resizable_panel},
 };
 use gpui_kit::prelude::FluentBuilder;
@@ -34,7 +39,7 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-actions!(projects, [RefreshProjects]);
+actions!(projects, [RefreshProjects, CleanProjects]);
 
 /// Ticket 05's entry seam: requesting confirmation never executes a Delete plan.
 pub(crate) struct CleanRequested;
@@ -53,6 +58,14 @@ pub(crate) struct ProjectDiscovery {
     summary_epoch: u64,
     summary_task: Option<Task<()>>,
     clean_requested: bool,
+    clean: Option<ProjectClean>,
+    clean_refresh: crate::refresh::Refresh,
+    execution: Option<ProjectExecution>,
+    clean_mode: DeleteMode,
+    default_mode: DeleteMode,
+    clean_epoch: u64,
+    clean_task: Option<Task<()>>,
+    _clean_subscription: Subscription,
     filter: Option<Stack>,
     visible: Vec<usize>,
     selected: HashSet<PathBuf>,
@@ -82,6 +95,13 @@ impl ProjectDiscovery {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let subscription = cx.subscribe_in(
+            &cx.entity(),
+            window,
+            |this, _, _: &CleanRequested, window, cx| {
+                this.open_clean(window, cx);
+            },
+        );
         let mut this = Self {
             roots,
             language,
@@ -94,6 +114,14 @@ impl ProjectDiscovery {
             summary_epoch: 0,
             summary_task: None,
             clean_requested: false,
+            clean: None,
+            clean_refresh: crate::refresh::Refresh::default(),
+            execution: None,
+            clean_mode: DeleteMode::Trash,
+            default_mode: DeleteMode::Trash,
+            clean_epoch: 0,
+            clean_task: None,
+            _clean_subscription: subscription,
             filter: None,
             visible: Vec::new(),
             selected: HashSet::new(),
@@ -128,7 +156,7 @@ impl ProjectDiscovery {
         cx.notify();
     }
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
-        if self.scanning || self.measuring {
+        if self.scanning || self.measuring || self.clean_locked() {
             self.queued_refresh = true;
             return;
         }
@@ -231,7 +259,11 @@ impl ProjectDiscovery {
         cx.notify();
     }
     fn run_queued_refresh(&mut self, cx: &mut Context<Self>) {
-        if !self.scanning && !self.measuring && std::mem::take(&mut self.queued_refresh) {
+        if !self.scanning
+            && !self.measuring
+            && !self.clean_locked()
+            && std::mem::take(&mut self.queued_refresh)
+        {
             self.discover(cx);
         }
     }
@@ -331,6 +363,9 @@ impl ProjectDiscovery {
         }
     }
     fn toggle_project(&mut self, path: &PathBuf, cx: &mut Context<Self>) {
+        if self.clean_locked() {
+            return;
+        }
         if !self.selected.remove(path) {
             self.selected.insert(path.clone());
         }
@@ -438,8 +473,12 @@ impl ProjectDiscovery {
                                 project.name,
                                 strings.stack(project.stack)
                             )))
+                            .disabled(self.clean_locked())
                             .checked(selected)
                             .on_change(cx.listener(move |this, checked, window, cx| {
+                                if this.clean_locked() {
+                                    return;
+                                }
                                 if *checked {
                                     this.selected.insert(path.clone());
                                 } else {
@@ -497,7 +536,6 @@ impl ProjectDiscovery {
         self.summary_epoch += 1;
         let epoch = self.summary_epoch;
         self.summary = None;
-        self.clean_requested = false;
         let entries: Vec<_> = self
             .model
             .entries()
@@ -539,7 +577,10 @@ impl ProjectDiscovery {
             });
         }));
     }
-    fn request_clean(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn request_clean(&mut self, cx: &mut Context<Self>) {
+        if self.clean_locked() || self.scanning || self.measuring || self.adding {
+            return;
+        }
         if self
             .summary
             .as_ref()
@@ -547,8 +588,7 @@ impl ProjectDiscovery {
         {
             return;
         }
-        // Only emit intent. Ticket 05 must build a fresh plan, present its
-        // confirmation and recheck before execution; this summary is no authority.
+        // The intent subscriber captures a fresh draft; the summary grants no deletion authority.
         self.clean_requested = true;
         cx.emit(CleanRequested);
         cx.notify();
@@ -635,10 +675,23 @@ impl ProjectDiscovery {
                     .child(
                         Button::new("clean-projects")
                             .label(if en { "Clean…" } else { "清理…" })
+                            .tooltip_with_action(
+                                if en {
+                                    "Clean selected projects…"
+                                } else {
+                                    "清理所选项目…"
+                                },
+                                &CleanProjects,
+                                Some("DevSweep"),
+                            )
                             .disabled(
-                                self.summary
-                                    .as_ref()
-                                    .is_none_or(|(plan, _)| plan.items.is_empty()),
+                                self.clean_locked()
+                                    || self.scanning
+                                    || self.measuring
+                                    || self
+                                        .summary
+                                        .as_ref()
+                                        .is_none_or(|(plan, _)| plan.items.is_empty()),
                             )
                             .on_click(cx.listener(|this, _, _, cx| this.request_clean(cx))),
                     ),
@@ -684,8 +737,9 @@ impl ProjectDiscovery {
                                 .w_full().min_w_0()
                                 .tooltip(path.to_string_lossy().into_owned())
                                 .accessibility_label(format!("{name} · {bytes}"))
-                                .child(div().min_w_0().truncate().child(name)).checked(target.checked)
+                                .child(div().min_w_0().truncate().child(name)).checked(target.checked).disabled(self.clean_locked())
                                 .on_change(cx.listener(move |this, checked, _, cx| {
+                                    if this.clean_locked() { return; }
                                     if let Some(target) = this.model.targets_mut(&project).and_then(|targets| targets.iter_mut().find(|target| target.path == path)) {
                                         target.checked = *checked;
                                     }
@@ -704,7 +758,7 @@ impl ProjectDiscovery {
                     })))
     }
     fn add_root(&mut self, cx: &mut Context<Self>) {
-        if self.adding {
+        if self.adding || self.clean_locked() {
             return;
         }
         let value = self.input.read(cx).value();
@@ -742,6 +796,9 @@ impl ProjectDiscovery {
         cx.notify();
     }
     fn remove_root(&mut self, root: &PathBuf, cx: &mut Context<Self>) {
+        if self.clean_locked() {
+            return;
+        }
         self.roots.retain(|known| known != root);
         // Removed Projects disappear immediately, including while another request is running.
         self.projects = Arc::new(
@@ -792,6 +849,10 @@ impl Render for ProjectDiscovery {
             .size_full()
             .min_w_0()
             .gap_3()
+            .on_action(cx.listener(|this, _: &CleanProjects, _, cx| {
+                this.request_clean(cx);
+                cx.stop_propagation();
+            }))
             .on_action(cx.listener(|this, _: &RefreshProjects, _, cx| {
                 this.refresh(cx);
                 cx.stop_propagation();
@@ -839,7 +900,7 @@ impl Render for ProjectDiscovery {
                                 Button::new("add-scan-root")
                                     .label(strings.add_directory)
                                     .loading(self.adding)
-                                    .disabled(self.adding)
+                                    .disabled(self.adding || self.clean_locked())
                                     .on_click(cx.listener(|this, _, _, cx| this.add_root(cx))),
                             ),
                     )
@@ -894,6 +955,7 @@ impl Render for ProjectDiscovery {
                                             root.to_string_lossy().into_owned(),
                                         ))
                                         .label(strings.remove)
+                                        .disabled(self.clean_locked())
                                         .on_click(
                                             cx.listener(move |this, _, _, cx| {
                                                 this.remove_root(&root, cx)
@@ -1106,6 +1168,7 @@ impl Render for ProjectDiscovery {
                 ),
             )
             .child(self.render_selection(cx))
+            .children(self.execution.as_ref().map(|_| self.render_execution(cx)))
             .child({
                 let count = self.selected.len();
                 let summary = match Lang::from_choice(self.language) {
@@ -1132,6 +1195,401 @@ mod tests {
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{AppContext, TestAppContext, WindowOptions};
 
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    async fn direct_clean_reports_success_and_failure_details_can_be_copied(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui_kit::test::TestAppContextExt;
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for name in ["alpha", "beta"] {
+            std::fs::create_dir_all(root.join(name).join("node_modules")).unwrap();
+            std::fs::write(root.join(name).join("package.json"), "{}").unwrap();
+            std::fs::write(root.join(name).join("node_modules/payload"), [0; 1024]).unwrap();
+        }
+        let locked = root.join("beta/node_modules");
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    ProjectDiscovery::new(vec![root.clone()], LanguageChoice::En, window, cx)
+                })
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            for name in ["alpha", "beta"] {
+                window
+                    .within("project-list")
+                    .within(gpui_kit::SharedString::from(
+                        root.join(name).to_string_lossy().into_owned(),
+                    ))
+                    .click("project-check", cx);
+            }
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.click("clean-projects", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("clean-mode-direct", cx);
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+            window.click("execute-clean", cx);
+        })
+        .unwrap();
+        cx.wait_for(
+            handle.into(),
+            std::time::Duration::from_secs(2),
+            |window, _| window.try_find("show-clean-failures").is_some(),
+        )
+        .await;
+        // Restore the fixture's permissions even if later UI assertions fail.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let result = window.find("clean-result");
+            assert!(
+                result
+                    .label()
+                    .unwrap()
+                    .contains("Freed bytes (estimate): 1024 B")
+            );
+            assert!(result.label().unwrap().contains("Skip: 0 · Failure: 1"));
+            assert!(!root.join("alpha/node_modules").exists());
+            assert!(locked.join("payload").exists());
+            for _ in 0..50 {
+                window.press("tab", cx);
+                if window.find("show-clean-failures").focused() == Some(true) {
+                    break;
+                }
+            }
+            assert_eq!(window.find("show-clean-failures").focused(), Some(true));
+            window.press("space", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let details = window
+                .find("clean-failure-details")
+                .label()
+                .unwrap()
+                .to_owned();
+            assert!(details.contains("beta/node_modules"));
+            window.click("copy-clean-failures", cx);
+            assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), details);
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("show-clean-failures").focused(), Some(true));
+            window.click("refresh-projects", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("chosen-size").label(),
+                Some("Chosen size: 1024 B")
+            );
+            window.click("clean-projects", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("clean-mode-trash").checked(), Some(true));
+            window.click("cancel-clean", cx);
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn abort_request_keeps_draft_locked_until_worker_disconnect_and_runs_queued_refresh(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::{delete::DeleteEvent, project_clean::ProjectExecution};
+        use gpui_kit::test::TestAppContextExt;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("alpha/node_modules")).unwrap();
+        std::fs::write(root.join("alpha/package.json"), "{}").unwrap();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (handle, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    ProjectDiscovery::new(vec![root.clone()], LanguageChoice::En, window, cx)
+                })
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let abort = Arc::new(AtomicBool::new(false));
+        tx.send(DeleteEvent::Started {
+            project: root.join("alpha"),
+            total: 2,
+        })
+        .unwrap();
+        // The existing public business event channel is the worker boundary, not a test-only UI state.
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.track_execution(ProjectExecution::new(rx, vec![], abort.clone()), cx)
+            })
+        });
+        cx.run_until_parked();
+        std::fs::create_dir_all(root.join("beta/node_modules")).unwrap();
+        std::fs::write(root.join("beta/package.json"), "{}").unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("abort-clean", cx);
+            assert!(abort.load(Ordering::Relaxed));
+            assert!(
+                window
+                    .find("clean-result")
+                    .label()
+                    .unwrap()
+                    .contains("Abort requested")
+            );
+            window.click("clean-projects", cx);
+            assert!(window.try_find("execute-clean").is_none());
+            window.click("refresh-projects", cx);
+            window
+                .within("project-list")
+                .within(gpui_kit::SharedString::from(
+                    root.join("alpha").to_string_lossy().into_owned(),
+                ))
+                .click("project-check", cx);
+            assert_eq!(
+                window.find("project-selection").label(),
+                Some("0 projects selected")
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window
+                    .try_find(gpui_kit::SharedString::from(
+                        root.join("beta").to_string_lossy().into_owned()
+                    ))
+                    .is_none()
+            );
+            assert!(
+                window
+                    .find("clean-result")
+                    .label()
+                    .unwrap()
+                    .contains("Abort requested")
+            );
+        })
+        .unwrap();
+        drop(tx);
+        cx.wait_for(
+            handle.into(),
+            std::time::Duration::from_secs(2),
+            |window, _| {
+                window
+                    .try_find(gpui_kit::SharedString::from(
+                        root.join("beta").to_string_lossy().into_owned(),
+                    ))
+                    .is_some()
+            },
+        )
+        .await;
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window
+                    .find("clean-result")
+                    .label()
+                    .unwrap()
+                    .contains("did not finish")
+            );
+            window
+                .within("project-list")
+                .within(gpui_kit::SharedString::from(
+                    root.join("beta").to_string_lossy().into_owned(),
+                ))
+                .click("project-check", cx);
+            assert_eq!(
+                window.find("project-selection").label(),
+                Some("1 project selected")
+            );
+        })
+        .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(DeleteEvent::Finished(crate::delete::DeleteReport {
+            freed_bytes: 0,
+            failures: vec![],
+            projects_done: 0,
+            projects_total: 1,
+            aborted: true,
+        }))
+        .unwrap();
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.track_execution(
+                    ProjectExecution::new(rx, vec![], Arc::new(AtomicBool::new(true))),
+                    cx,
+                )
+            })
+        });
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window
+                    .find("clean-result")
+                    .label()
+                    .unwrap()
+                    .starts_with("Stopped")
+            );
+            assert!(
+                window
+                    .find("clean-result")
+                    .label()
+                    .unwrap()
+                    .contains("0/1 projects")
+            );
+            assert!(window.try_find("abort-clean").is_none());
+            window.click("clean-projects", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("execute-clean").visible());
+            window.press("escape", cx);
+        })
+        .unwrap();
+    }
+    #[gpui_kit::test]
+    async fn clean_confirmation_cancel_restores_focus_and_execute_rechecks(
+        cx: &mut TestAppContext,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let project = root.join("alpha");
+        std::fs::create_dir_all(project.join("node_modules")).unwrap();
+        std::fs::write(project.join("package.json"), "{}").unwrap();
+        std::fs::write(project.join("node_modules/payload"), [0; 1024]).unwrap();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    ProjectDiscovery::new(vec![root.clone()], LanguageChoice::En, window, cx)
+                })
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window
+                .within("project-list")
+                .within(gpui_kit::SharedString::from(
+                    project.to_string_lossy().into_owned(),
+                ))
+                .click("project-check", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.click("clean-projects", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("clean-mode-trash").checked(), Some(true));
+            assert!(project.join("node_modules").exists());
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("execute-clean").is_none());
+            assert_eq!(window.find("project-list-region").focused(), Some(true));
+            for _ in 0..40 {
+                window.press("tab", cx);
+                if window.find("clean-projects").focused() == Some(true) {
+                    break;
+                }
+            }
+            assert_eq!(window.find("clean-projects").focused(), Some(true));
+            window.press("space", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("clean-mode-direct", cx);
+            assert!(
+                window
+                    .find("clean-consequence")
+                    .label()
+                    .unwrap()
+                    .contains("cannot be recovered")
+            );
+            // Removed after review: execution must recheck and report Skip, never Failure.
+            std::fs::remove_dir_all(project.join("node_modules")).unwrap();
+            window.click("execute-clean", cx);
+            window.click("clean-projects", cx);
+            assert!(window.try_find("execute-clean").is_none());
+        })
+        .unwrap();
+        use gpui_kit::test::TestAppContextExt;
+        cx.wait_for(
+            handle.into(),
+            std::time::Duration::from_secs(2),
+            |window, _| {
+                window
+                    .try_find("clean-result")
+                    .and_then(|node| node.label().map(str::to_owned))
+                    .is_some_and(|label| label.contains("Clean finished"))
+            },
+        )
+        .await;
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let result = window.find("clean-result");
+            assert!(result.label().unwrap().contains("Skip: 1 · Failure: 0"));
+            assert!(
+                result
+                    .label()
+                    .unwrap()
+                    .contains("Freed bytes (estimate): 0 B")
+            );
+        })
+        .unwrap();
+    }
     #[gpui_kit::test]
     fn target_panel_retains_dangerous_draft_across_projects(cx: &mut TestAppContext) {
         let temp = tempfile::tempdir().unwrap();
@@ -1257,6 +1715,12 @@ mod tests {
                 window.find("clean-request-status").label(),
                 Some("Selection ready for plan confirmation. Nothing has been deleted.")
             );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("escape", cx);
             window.click("refresh-projects", cx);
         })
         .unwrap();

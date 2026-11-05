@@ -3,7 +3,7 @@ use crate::{
     config::{self, Config, LanguageChoice, ThemeChoice},
     delete::DeleteMode,
     gpui_cache::GlobalCacheView,
-    gpui_projects::{ProjectDiscovery, RefreshProjects, RootsChanged},
+    gpui_projects::{CleanProjects, ProjectDiscovery, RefreshProjects, RootsChanged},
     i18n::Lang,
 };
 use gpui_kit::component::{
@@ -37,6 +37,7 @@ impl AssetSource for BrandAssets {
 fn init(cx: &mut App) {
     gpui_kit::init(cx);
     cx.bind_keys([
+        KeyBinding::new("secondary-shift-backspace", CleanProjects, Some("DevSweep")),
         KeyBinding::new("secondary-r", RefreshProjects, Some("DevSweep")),
         KeyBinding::new("secondary-,", OpenSettings, Some("DevSweep")),
         KeyBinding::new("secondary-q", Quit, None),
@@ -132,6 +133,9 @@ impl SettingsApp {
             cx.observe_window_appearance(window, |this, window, cx| this.apply_theme(window, cx));
         let projects =
             cx.new(|cx| ProjectDiscovery::new(config.roots.clone(), config.language, window, cx));
+        projects.update(cx, |projects, _| {
+            projects.set_delete_mode(config.delete_mode)
+        });
         let roots = cx.subscribe(&projects, |this, _, event: &RootsChanged, cx| {
             this.config.roots = event.0.clone();
             this.caches = None;
@@ -212,6 +216,12 @@ impl Render for SettingsApp {
             .track_focus(&self.focus)
             .key_context("DevSweep")
             .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(|this, _: &CleanProjects, _, cx| {
+                if !this.global_caches {
+                    this.projects
+                        .update(cx, |projects, cx| projects.request_clean(cx));
+                }
+            }))
             .on_action(cx.listener(|this, _: &RefreshProjects, _, cx| {
                 if !this.global_caches {
                     this.projects
@@ -381,6 +391,9 @@ impl Render for SettingsPanel {
                             } else {
                                 DeleteMode::Direct
                             };
+                            owner.projects.update(cx, |projects, _| {
+                                projects.set_delete_mode(owner.config.delete_mode)
+                            });
                             config::save_to(owner.path.clone(), &owner.config);
                             cx.notify();
                         });
@@ -403,6 +416,95 @@ mod tests {
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{AppContext, SharedString, TestAppContext, WindowOptions};
 
+    #[gpui_kit::test]
+    fn clean_shortcut_reviews_saved_mode_and_never_executes(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let project = root.join("web");
+        std::fs::create_dir_all(project.join("node_modules")).unwrap();
+        std::fs::write(project.join("package.json"), "{}").unwrap();
+        std::fs::write(project.join("node_modules/payload"), [0; 512]).unwrap();
+        let path = Some(root.join("config.toml"));
+        config::save_to(
+            path.clone(),
+            &config::Config {
+                roots: vec![root.clone()],
+                language: LanguageChoice::En,
+                delete_mode: DeleteMode::Direct,
+                ..Default::default()
+            },
+        );
+        let config = config::load_from(path.clone());
+        cx.update(|cx| {
+            super::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(super::window_options(&config, cx), cx, |window, cx| {
+                cx.new(|cx| super::SettingsApp::new(config, path.clone(), window, cx))
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window
+                .within("project-list")
+                .within(SharedString::from(project.to_string_lossy().into_owned()))
+                .click("project-check", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.press("secondary-shift-backspace", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("clean-mode-direct").checked(), Some(true));
+            assert!(
+                window
+                    .find("clean-consequence")
+                    .label()
+                    .unwrap()
+                    .contains("cannot be recovered")
+            );
+            window.press("secondary-shift-backspace", cx);
+            window.press("enter", cx);
+            assert!(project.join("node_modules/payload").exists());
+            window.click("cancel-clean", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("execute-clean").is_none());
+            window.press("secondary-,", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.within("delete-mode").click(0usize, cx);
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.press("secondary-shift-backspace", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("clean-mode-trash").checked(), Some(true));
+            window.press("escape", cx);
+        })
+        .unwrap();
+        assert!(project.join("node_modules/payload").exists());
+        assert_eq!(config::load_from(path).delete_mode, DeleteMode::Trash);
+    }
     #[gpui_kit::test]
     fn main_navigation_retains_cache_selection_and_updates_settings(cx: &mut TestAppContext) {
         let temp = tempfile::tempdir().unwrap();

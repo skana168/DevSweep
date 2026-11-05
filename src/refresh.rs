@@ -104,6 +104,11 @@ impl Refresh {
             || execution.is_some_and(|execution| execution.running());
     }
 
+    /// Whether a confirmed Clean or active Execute currently defers discovery.
+    pub fn is_clean_locked(&self) -> bool {
+        self.clean_locked
+    }
+
     /// Start measurements, including independent cache requests supplied by the adapter.
     pub fn measure(&mut self, requests: Vec<SizeRequest>, executor: &mut impl RefreshExecutor) {
         if requests.is_empty() {
