@@ -127,3 +127,30 @@
 - 同环境运行 `cargo test --locked --features gpui-tests --test activation_refresh --test refresh_lifecycle -- --test-threads=1` 退出 0，公开激活时效测试 2/2、刷新生命周期测试 14/14 通过。日志 `/tmp/gpui-activation-integration-refresh.log`。本轮未重复完整套件；237 passed / 4 ignored、生产严格 Clippy 和 macOS bins 构建为上节源分支证据，既有 block future-incompat 警告仍在。
 - 本地 activation 实现/自动化缺口已补齐；仍需真实 macOS 失焦/切回与 Go/缓存联动验收。Windows 编译和同等原生完整流程、系统 Trash 成功/恢复、真实 Go/Unity、原生 Direct/权限恢复、隔离全局执行/中止/失败恢复、真实长任务/大计划及完整主题/语言/缩放/焦点/剪贴板/OS 外观/IME/reduced motion 设计矩阵仍未通过；4 个 ignored 不计成功。沿用本报告逐项接受条件。
 - 08 保持 `ready-for-human`，未完成框不勾选，保留 egui 与默认入口，不开始 09。无 children、stash/reset/rewrite、push/PR；原有 `skills-lock.json` 和 `.claude/` 保持未提交。使用 git-commit skill 仅提交集成证据。
+
+## 2026-11-05 — P2 固定缓存失败恢复与确认计划虚拟化
+
+- 工作分支 `t3/gpui-cache-retry-virtualized-plan`，干净起点为指定 `86d8a9c7501bbabb853861ea831369e335b97a10`；`git merge-base --is-ancestor 86d8a9c7501bbabb853861ea831369e335b97a10 HEAD` 退出 0。实施前及提交前 `git merge integration/gpui-ui` 均返回 `Already up to date.`，本地集成 tip 仍为该 SHA。没有 children、checkout 创建、PR/push；未修改用户配置、egui 或默认入口，无无关变更。
+- 已读 AGENTS、GLOSSARY、三个 ADR、spec、08/本报告、TDD（批准 seams：公开业务/配置与真实生产 GPUI 交互）、git-commit，以及 `/Users/yoyun/DevSweep/.agents/skills` 下 Kit 的 Coding/Design/Testing 指南。CodeGraph explore 明确报告当前工作树无可用索引，未建索引，随后使用源码检索。
+- 固定缓存 `Failed` 现在随刷新重新进入后台测量，包括 Missing/Unreadable/路径类型恢复；保留已存在的显式 draft，初次失败且无 draft 的固定条目恢复后沿用其安全默认选择。Ready 固定条目不重算，Go 的既有草稿逻辑与 Cleaned 语义不变。清理锁定时拒绝刷新，进行中的测量不重复启动；仍由主壳 pending activation 和已有路径集合失效/实体重建边界处理排队及过期结果，没有引入第二套 generation owner。
+- 项目确认计划改用锁定 Kit re-export 的 GPUI `uniform_list`，合并 Target/Skip 索引范围，仅在框架请求的可见范围构建行，无全计划元素集合或每帧全数据克隆。核对 `gpui-kit-0.7.0` re-export 和 `gpui-pre-0.3.7/src/elements/uniform_list.rs` 的签名、每帧 `measure_item`、宽度约束、visible range、`track_scroll` 和 `scroll_to_item` 源码。等高 `h_12` 行由当前 rem 每帧测量，文字在当前宽度截断，无应用层换行高度缓存；完整路径可通过 Kit Copy 图标按钮的 tooltip 和剪贴板读取。行内继续显示 bytes/Large Target 或本地化 Skip reason。
+- Target ID 来自路径；Skip ID 来自路径、原因及同类出现序号（不使用全列表位置），处理多条 Rule 产生相同 Skip 的情况。Skip keys 只在后台计划完成后构造一次。保留一个滚动 owner/handle，每次新审阅重置；只读计划可获焦点、Home/End 跳转，滚轮走 GPUI 原生虚拟列表。Copy 有本地化 accessible name，点击不窃走按钮焦点；Escape 沿用 Kit Dialog 关闭/恢复，Enter 不授权清理。
+
+### TDD 与生产 UI regression 证据
+
+- 扩展 `gpui_settings::tests::activation_defers_cache_refresh_until_cancel_and_remeasures_recreated_cache`：独立子进程隔离 HOME/USERPROFILE/LOCALAPPDATA/PATH，真实 catalogue 的 Gradle distributions 起初 Missing、bun cache 用临时目录 000 权限得到 Unreadable；修复文件系统后真实双窗口切回触发 30 秒刷新，分别显示 **24 B / 48 B** 并恢复安全默认选择。既有场景继续验证 Cleaned、Go、Ready npm 的旧 **128 B** 测量与显式选择、清理锁定期间排队、取消后释放，以及未到期切回不查。红日志 `/tmp/devsweep-p2-cache-red.log` 在旧刷新实现下实际仍为 `Cache directory does not exist`，预期 `24 B`；绿日志 `/tmp/devsweep-p2-cache-green.log` 退出 0，包含两种失败恢复断言。Unix 权限 fixture 不是 Windows 权限验收。
+- 新增 `gpui_projects::tests::large_confirmation_bounds_target_and_skip_rendering_and_preserves_selection`：通过生产项目行的 Space/Down 选中 **120** 个临时 Node 项目；测量后移除其中 **60** 个 node_modules，真实 Clean 按钮产生 **60 Target + 60 Skip**。旧 eager 实现在 `distant Targets must not be built` 断言失败，日志 `/tmp/devsweep-p2-plan-red.log`；虚拟化后通过，日志 `/tmp/devsweep-p2-plan-green.log`。
+- 同一 UI regression 的扩展版（`/tmp/devsweep-p2-plan-regression.log`，及最终套件）：逐个查询真实行 ID，断言当前构建行 **1..16（不含 16）**、远端 Target/Skip 不存在；首行 **16 B** 内容与完整路径 Copy，End 到末尾 **Skip: Missing**，只读 Enter 不执行；缩至 **880×560** 并将字体设为 **20 px** 后仍少于 16 行，Home 首行可见且高度 **60 px**，真实滚轮使首行离开已构建范围；Escape 恢复项目列表焦点、**120 projects selected** 保留；重新审阅从首项开始，显式 Direct/Execute 只删除 tempfile 中 60 个剩余 Target，报告 **960 B、Skip: 60、Failure: 0**。没有以私有 renderer/helper 调用或模拟列表替代生产交互。
+
+### 最终检查
+
+Cargo 均复用 `CARGO_TARGET_DIR=/Users/yoyun/DevSweep/target`。磁盘从约 54 GiB 到约 53 GiB 可用，未出现磁盘耗尽。
+
+- `cargo test --locked --features gpui-tests -- --test-threads=1`：**238 passed / 0 failed / 4 ignored**，含 **30 个 GPUI UI integration tests**；日志 `/tmp/devsweep-p2-final-tests.log`。
+- `cargo test --locked --features gpui-tests gpui_ -- --test-threads=1`：**30 passed / 0 failed**；日志 `/tmp/devsweep-p2-final-gpui.log`。
+- `cargo clippy --locked --features gpui-tests --lib --bins -- -D warnings`：退出 0；日志 `/tmp/devsweep-p2-final-clippy.log`。
+- `cargo clippy --locked --all-targets --features gpui-tests`：退出 0，既有测试 lint 仍在，不称严格 all-targets 通过；日志 `/tmp/devsweep-p2-all-targets-clippy.log`。
+- `cargo build --locked --features gpui --bins`：macOS arm64 退出 0；日志 `/tmp/devsweep-p2-final-build.log`。既有 `block 0.1.6` future-incompat 警告仍在。
+- `cargo fmt --check`、`git diff --check`：通过。提交遵循 git-commit skill，最终 SHA 为包含本节的提交。
+
+上述仅解决两项本地 P2 实现及自动化覆盖问题。**Windows 编译/原生流程、macOS 原生大计划滚动/响应性及权限恢复、真实 Go/Unity、系统 Trash 成功/恢复，以及既有平台/设计接受条件均继续未通过**；没有新原生操作或像素证据，4 个 ignored 不计成功。08 保持 `ready-for-human`，未勾选的平台/设计验收框保持不变，保留 egui，不开始 09。

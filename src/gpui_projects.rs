@@ -66,6 +66,9 @@ pub(crate) struct ProjectDiscovery {
     default_mode: DeleteMode,
     clean_epoch: u64,
     clean_task: Option<Task<()>>,
+    clean_plan_scroll: UniformListScrollHandle,
+    clean_plan_focus: FocusHandle,
+    clean_plan_skip_ids: Vec<SharedString>,
     _clean_subscription: Subscription,
     filter: Option<Stack>,
     visible: Vec<usize>,
@@ -125,6 +128,9 @@ impl ProjectDiscovery {
             default_mode: DeleteMode::Trash,
             clean_epoch: 0,
             clean_task: None,
+            clean_plan_scroll: UniformListScrollHandle::new(),
+            clean_plan_focus: cx.focus_handle().tab_stop(true),
+            clean_plan_skip_ids: Vec::new(),
             _clean_subscription: subscription,
             filter: None,
             visible: Vec::new(),
@@ -1230,6 +1236,212 @@ mod tests {
     use crate::config::LanguageChoice;
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{AppContext, TestAppContext, WindowOptions};
+
+    #[gpui_kit::test]
+    async fn large_confirmation_bounds_target_and_skip_rendering_and_preserves_selection(
+        cx: &mut TestAppContext,
+    ) {
+        let rendered_rows = |window: &gpui_kit::Window, root: &std::path::Path| {
+            (0..120)
+                .filter(|ix| {
+                    let path = root.join(format!("project-{ix:03}/node_modules"));
+                    let id = if *ix < 60 {
+                        path.display().to_string()
+                    } else {
+                        format!("skip:Missing:{}:0", path.display())
+                    };
+                    window.try_find(gpui_kit::SharedString::from(id)).is_some()
+                })
+                .count()
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for ix in 0..120 {
+            let project = root.join(format!("project-{ix:03}"));
+            std::fs::create_dir_all(project.join("node_modules")).unwrap();
+            std::fs::write(project.join("package.json"), "{}").unwrap();
+            std::fs::write(project.join("node_modules/payload"), [0; 16]).unwrap();
+        }
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    ProjectDiscovery::new(vec![root.clone()], LanguageChoice::En, window, cx)
+                })
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(
+                gpui_kit::SharedString::from(root.join("project-000").display().to_string()),
+                cx,
+            );
+            for ix in 0..120 {
+                window.press("space", cx);
+                if ix != 119 {
+                    window.press("down", cx);
+                }
+            }
+            assert_eq!(
+                window.find("project-selection").label(),
+                Some("120 projects selected")
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        // Disappearance between measurement and review must remain visible as Skip.
+        for ix in 60..120 {
+            std::fs::remove_dir_all(root.join(format!("project-{ix:03}/node_modules"))).unwrap();
+        }
+        cx.update_window(handle, |_, window, cx| {
+            window.click("clean-projects", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window
+                    .try_find(gpui_kit::SharedString::from(
+                        root.join("project-059/node_modules").display().to_string()
+                    ))
+                    .is_none(),
+                "distant Targets must not be built"
+            );
+            assert!(
+                window
+                    .try_find(gpui_kit::SharedString::from(format!(
+                        "skip:Missing:{}:0",
+                        root.join("project-119/node_modules").display()
+                    )))
+                    .is_none(),
+                "distant Skips must not be built"
+            );
+            let rendered = rendered_rows(window, &root);
+            assert!(
+                (1..16).contains(&rendered),
+                "rendered {rendered} of 120 plan rows"
+            );
+            let first = root.join("project-000/node_modules").display().to_string();
+            assert_eq!(
+                window
+                    .find(gpui_kit::SharedString::from(first.clone()))
+                    .label(),
+                Some(format!("{first} · 16 B").as_str())
+            );
+            window
+                .within(gpui_kit::SharedString::from(first.clone()))
+                .click("copy-plan-path", cx);
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().as_deref(),
+                Some(first.as_str())
+            );
+            window.click("clean-plan", cx);
+            window.press("end", cx);
+            let last = format!(
+                "skip:Missing:{}:0",
+                root.join("project-119/node_modules").display()
+            );
+            assert!(
+                window
+                    .find(gpui_kit::SharedString::from(last.clone()))
+                    .visible()
+            );
+            assert!(
+                window
+                    .find(gpui_kit::SharedString::from(last))
+                    .label()
+                    .unwrap()
+                    .ends_with("Skip: Missing")
+            );
+            assert!(rendered_rows(window, &root) < 16);
+            // Scrolling a read-only plan cannot authorize Execute.
+            window.press("enter", cx);
+            assert!(root.join("project-000/node_modules/payload").exists());
+        })
+        .unwrap();
+        cx.simulate_window_resize(
+            handle,
+            gpui_kit::size(gpui_kit::px(880.), gpui_kit::px(560.)),
+        );
+        cx.update_window(handle, |_, window, cx| {
+            gpui_kit::component::Theme::update(cx, |theme| theme.font_size = gpui_kit::px(20.));
+            window.render_frame(cx);
+            assert!(rendered_rows(window, &root) < 16);
+            window.press("home", cx);
+            let first = gpui_kit::SharedString::from(
+                root.join("project-000/node_modules").display().to_string(),
+            );
+            assert!(window.find(first.clone()).visible());
+            assert_eq!(window.find(first).bounds().size.height, gpui_kit::px(60.));
+            window.scroll(
+                "clean-plan",
+                gpui_kit::ScrollDelta::Pixels(gpui_kit::point(
+                    gpui_kit::px(0.),
+                    gpui_kit::px(-600.),
+                )),
+                cx,
+            );
+            assert!(
+                window
+                    .try_find(gpui_kit::SharedString::from(
+                        root.join("project-000/node_modules").display().to_string()
+                    ))
+                    .is_none()
+            );
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("execute-clean").is_none());
+            assert_eq!(window.find("project-list-region").focused(), Some(true));
+            assert_eq!(
+                window.find("project-selection").label(),
+                Some("120 projects selected")
+            );
+            window.click("clean-projects", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window
+                    .find(gpui_kit::SharedString::from(
+                        root.join("project-000/node_modules").display().to_string()
+                    ))
+                    .visible(),
+                "a new review starts at the first Target"
+            );
+            window.click("clean-mode-direct", cx);
+            window.click("execute-clean", cx);
+        })
+        .unwrap();
+        use gpui_kit::test::TestAppContextExt;
+        cx.wait_for(handle, std::time::Duration::from_secs(5), |window, _| {
+            window
+                .try_find("clean-result")
+                .is_some_and(|r| r.label().is_some_and(|s| s.contains("Clean finished")))
+        })
+        .await;
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let result = window.find("clean-result").label().unwrap().to_string();
+            assert!(result.contains("Freed bytes (estimate): 960 B"), "{result}");
+            assert!(result.contains("Skip: 60 · Failure: 0"), "{result}");
+        })
+        .unwrap();
+        for ix in 0..60 {
+            assert!(!root.join(format!("project-{ix:03}/node_modules")).exists());
+        }
+    }
 
     #[gpui_kit::test]
     async fn large_project_plan_requires_fresh_acknowledgement_before_execute(

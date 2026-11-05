@@ -540,6 +540,15 @@ while IFS= read -r line; do printf '%s\n' "$line"; done < "$HOME/go-output"
             std::fs::create_dir_all(path).unwrap();
             std::fs::write(path.join("payload"), [0; 128]).unwrap();
         }
+        let recovered_missing = home.join(".gradle/wrapper/dists");
+        let recovered_unreadable = home.join(".bun/install/cache");
+        std::fs::create_dir_all(&recovered_unreadable).unwrap();
+        std::fs::write(recovered_unreadable.join("payload"), [0; 48]).unwrap();
+        std::fs::set_permissions(
+            &recovered_unreadable,
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
         let projects = home.join("projects");
         std::fs::create_dir(&projects).unwrap();
         let new = projects.join("known");
@@ -575,6 +584,14 @@ while IFS= read -r line; do printf '%s\n' "$line"; done < "$HOME/go-output"
         cx.run_until_parked();
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
+            assert_eq!(
+                window.find("cache-state-gradle.dists").label(),
+                Some("Cache directory does not exist")
+            );
+            assert_eq!(
+                window.find("cache-state-bun.cache").label(),
+                Some("Cannot read the cache path or measure its size")
+            );
             assert_eq!(window.find("cache-state-go.build").label(), Some("64 B"));
             window.press("end", cx);
             window.press("up", cx);
@@ -599,6 +616,14 @@ while IFS= read -r line; do printf '%s\n' "$line"; done < "$HOME/go-output"
         })
         .await;
         assert!(!gradle.exists());
+        std::fs::create_dir_all(&recovered_missing).unwrap();
+        std::fs::write(recovered_missing.join("payload"), [0; 24]).unwrap();
+        std::fs::set_permissions(
+            &recovered_unreadable,
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+
         // Refreshing a still-absent cache must keep the successful Clean state.
         let first_return = cx.update(|cx| {
             cx.open_window(WindowOptions::default(), |_, cx| {
@@ -617,6 +642,13 @@ while IFS= read -r line; do printf '%s\n' "$line"; done < "$HOME/go-output"
         cx.run_until_parked();
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
+            assert_eq!(
+                window.find("cache-state-gradle.dists").label(),
+                Some("24 B")
+            );
+            assert_eq!(window.find("cache-state-bun.cache").label(), Some("48 B"));
+            assert_eq!(window.find("gradle.dists").checked(), Some(true));
+            assert_eq!(window.find("bun.cache").checked(), Some(true));
             assert_eq!(
                 window.find("cache-state-gradle.caches").label(),
                 Some("Cleaned · 0 B")

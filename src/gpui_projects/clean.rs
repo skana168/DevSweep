@@ -1,5 +1,6 @@
 //! Presentation adapter for the shared Project Clean lifecycle.
 use super::*;
+use gpui_kit::component::Sizable;
 use std::sync::atomic::Ordering;
 
 impl ProjectDiscovery {
@@ -20,6 +21,8 @@ impl ProjectDiscovery {
         let epoch = self.clean_epoch;
         self.clean_mode = self.default_mode;
         self.clean_large_ack = false;
+        self.clean_plan_scroll = UniformListScrollHandle::new();
+        self.clean_plan_skip_ids.clear();
         self.execution = None;
         let mut clean = ProjectClean::batch(
             self.model
@@ -44,6 +47,21 @@ impl ProjectDiscovery {
                 }
                 if let Some(clean) = &mut this.clean {
                     clean.poll();
+                    // Paths can repeat when multiple Rules produce the same Skip. Key
+                    // each domain-equivalent occurrence once, outside the render callback.
+                    let mut occurrences = HashMap::<String, usize>::new();
+                    this.clean_plan_skip_ids = clean
+                        .plan
+                        .skipped
+                        .iter()
+                        .map(|skip| {
+                            let key = format!("skip:{:?}:{}", skip.reason, skip.path.display());
+                            let occurrence = occurrences.entry(key.clone()).or_default();
+                            let id = SharedString::from(format!("{key}:{occurrence}"));
+                            *occurrence += 1;
+                            id
+                        })
+                        .collect();
                     clean.confirm(); // Lock the reviewed snapshot; only Execute below authorizes deletion.
                 }
                 this.clean_refresh
@@ -178,37 +196,44 @@ impl ProjectDiscovery {
                     .child(
                         div()
                             .id("clean-plan")
-                            .max_h(window.bounds().size.height * 0.3)
-                            .overflow_y_scroll()
-                            .children(clean.plan.items.iter().map(|item| {
-                                div()
-                                    .id(SharedString::from(
-                                        item.target_path.to_string_lossy().into_owned(),
-                                    ))
-                                    .text_sm()
-                                    .child(format!(
-                                        "{} · {}{}",
-                                        item.target_path.display(),
-                                        format_bytes(item.bytes),
-                                        if item.large {
-                                            if en {
-                                                " · Large Target"
-                                            } else {
-                                                " · 大体积清理项"
-                                            }
-                                        } else {
-                                            ""
-                                        }
-                                    ))
+                            .test_support()
+                            .track_focus(&self.clean_plan_focus)
+                            .when(self.clean_plan_focus.contains_focused(window, cx), |list| {
+                                list.focus_ring_style(window, cx)
+                            })
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.clean_plan_focus.focus(window, cx);
                             }))
-                            .children(clean.plan.skipped.iter().map(|skip| {
-                                div().text_sm().child(format!(
-                                    "{}: {} — {}",
-                                    if en { "Skip" } else { "跳过" },
-                                    skip.path.display(),
-                                    strings.skip_reason(skip.reason)
-                                ))
-                            })),
+                            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                                let count = this.clean.as_ref().map_or(0, |clean| {
+                                    clean.plan.items.len() + clean.plan.skipped.len()
+                                });
+                                let index = match event.keystroke.key.as_str() {
+                                    "home" => 0,
+                                    "end" => count.saturating_sub(1),
+                                    _ => return,
+                                };
+                                this.clean_plan_scroll
+                                    .scroll_to_item(index, ScrollStrategy::Nearest);
+                                cx.stop_propagation();
+                                cx.notify();
+                            }))
+                            .h((window.rem_size() * 12.).min(window.bounds().size.height * 0.3))
+                            .w_full()
+                            .min_w_0()
+                            .child(
+                                // Fixed rem-height rows are measured afresh by GPUI each frame;
+                                // width changes truncate text, never invalidate a wrapped-height cache.
+                                uniform_list(
+                                    "clean-plan-list",
+                                    clean.plan.items.len() + clean.plan.skipped.len(),
+                                    cx.processor(|this, range: Range<usize>, _, _| {
+                                        range.map(|ix| this.render_plan_row(ix)).collect::<Vec<_>>()
+                                    }),
+                                )
+                                .track_scroll(&self.clean_plan_scroll)
+                                .size_full(),
+                            ),
                     );
                 if !ready {
                     body = body.child(if en {
@@ -282,6 +307,75 @@ impl ProjectDiscovery {
                 .child(consequence),
         )
         .into_any_element()
+    }
+    fn render_plan_row(&self, ix: usize) -> AnyElement {
+        let clean = self.clean.as_ref().expect("active confirmation");
+        let strings = Lang::from_choice(self.language).strings();
+        let en = Lang::from_choice(self.language) == Lang::En;
+        let (id, path, detail) = if let Some(item) = clean.plan.items.get(ix) {
+            (
+                item.target_path.display().to_string(),
+                item.target_path.display().to_string(),
+                format!(
+                    "{}{}",
+                    format_bytes(item.bytes),
+                    if item.large {
+                        if en {
+                            " · Large Target"
+                        } else {
+                            " · 大体积清理项"
+                        }
+                    } else {
+                        ""
+                    }
+                ),
+            )
+        } else {
+            let skip = &clean.plan.skipped[ix - clean.plan.items.len()];
+            (
+                self.clean_plan_skip_ids[ix - clean.plan.items.len()].to_string(),
+                skip.path.display().to_string(),
+                format!(
+                    "{}: {}",
+                    if en { "Skip" } else { "跳过" },
+                    strings.skip_reason(skip.reason)
+                ),
+            )
+        };
+        let label = format!("{path} · {detail}");
+        div()
+            .id(SharedString::from(id))
+            .test_support()
+            .aria_label(label)
+            .h_12()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_sm()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().truncate().child(path.clone()))
+                    .child(div().truncate().child(detail)),
+            )
+            .child(
+                Button::new("copy-plan-path")
+                    .ghost()
+                    .small()
+                    .icon(IconName::Copy)
+                    .accessibility_label(if en { "Copy path" } else { "复制路径" })
+                    .tooltip(path.clone())
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(path.clone()));
+                        cx.stop_propagation();
+                    }),
+            )
+            .into_any_element()
     }
     fn render_confirmation_actions(&self, cx: &mut Context<Self>) -> AnyElement {
         let en = Lang::from_choice(self.language) == Lang::En;

@@ -46,3 +46,12 @@
 
 - `integration/gpui-ui` 从 `9fd66c2` fast-forward 到 `78778b9f98a7e64b81c26faa09d15fb9d9ba5749`；fmt/diff、29 个 GPUI 测试、2 个 activation_refresh 和 14 个 refresh_lifecycle 测试通过。详见 [集成复核](../validation-08.md)。
 - 本地自动刷新缺口已修复；Windows 与 macOS 原生 activation、系统/设计接受条件仍未通过。保持 ready-for-human、未勾选验收框，保留 egui，不开始 09。
+
+### 2026-11-05 — 两项 P2 review 修复
+
+- 固定缓存失败条目随刷新重试，Missing 目录创建和 Unreadable 权限修复后恢复真实测量；保留显式草稿、Ready 成功体积、Go/Cleaned 语义，沿用清理锁/排队、进行中测量及实体失效边界。
+- 项目确认计划 Target/Skip 都改为锁定 GPUI 的 `uniform_list` 可见范围渲染；稳定 domain ID（含重复 Skip）、每次审阅重置滚动、rem 等高测量/宽度截断、完整路径 Copy、Home/End/滚轮与 Dialog 焦点恢复。无全计划元素构建或每帧全数据克隆。
+- 按 TDD 在生产主壳/项目控件 seams 回归：隔离 catalogue Missing→24 B、权限修复→48 B；120 项计划含 60 Target/60 Skip，实际构建少于 16 行，远端 Skip/内容/Copy/缩放/滚轮/Enter 不执行/取消保留 120 项与焦点/重新审阅重置/Direct 仅删除临时夹具（960 B、Skip 60、Failure 0）。红/绿与命令日志见 [P2 验证报告](../validation-08.md#2026-11-05--p2-固定缓存失败恢复与确认计划虚拟化)。
+- 最终全量串行 238 passed / 4 ignored / 0 failed，GPUI 专项 30/0；生产严格 Clippy、普通 all-targets Clippy、macOS bins 构建、fmt/diff 通过。all-targets 既有测试 lint 与 block future-incompat 警告保留，不称严格 all-targets 通过。
+- 指定基线 `86d8a9c7501bbabb853861ea831369e335b97a10` ancestry 已确认；提交前合并本地 `integration/gpui-ui` 返回 Already up to date（tip 同基线）。分支 `t3/gpui-cache-retry-virtualized-plan`，无 children、checkout 创建、PR/push；用户配置/无关文件/egui/默认入口不变。最终 SHA 为包含本条记录的提交。
+- 两项本地缺口已解决，**Windows 与 macOS 原生、系统集成及既有设计矩阵验收缺口仍未通过**，状态继续 ready-for-human，不勾选验收框，不开始 09。

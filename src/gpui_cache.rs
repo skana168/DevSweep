@@ -119,15 +119,25 @@ impl GlobalCacheView {
         this.measure_pending(cx);
         this
     }
-    // Recheck Go and only remeasure fixed caches recreated since Clean. Existing
+    // Recheck Go, failed fixed caches, and fixed caches recreated since Clean. Existing
     // measurements and explicit selection drafts retain their owners.
     pub(crate) fn refresh_stale(&mut self, cx: &mut Context<Self>) {
+        if self.clean_locked() {
+            return;
+        }
         for row in &mut self.rows {
             if !row.measuring
                 && (go_cache::is_go_cache(row.entry.rule.id)
-                    || matches!(row.measurement, Measurement::Cleaned))
+                    || matches!(
+                        row.measurement,
+                        Measurement::Cleaned | Measurement::Failed(_)
+                    ))
             {
-                row.draft.get_or_insert(row.selected);
+                if go_cache::is_go_cache(row.entry.rule.id)
+                    || !matches!(row.measurement, Measurement::Failed(_))
+                {
+                    row.draft.get_or_insert(row.selected);
+                }
                 row.rechecking_cleaned = !go_cache::is_go_cache(row.entry.rule.id)
                     && matches!(row.measurement, Measurement::Cleaned);
                 row.measurement = Measurement::Pending;
