@@ -1,9 +1,9 @@
-use devsweep::cache::CacheGroup;
-use devsweep::config::LanguageChoice;
-use devsweep::delete::FailureReason;
-use devsweep::go_cache::GoCacheError;
-use devsweep::plan::SkipReason;
-use devsweep::scan::Stack;
+use crate::cache::CacheGroup;
+use crate::config::LanguageChoice;
+use crate::delete::FailureReason;
+use crate::go_cache::GoCacheError;
+use crate::plan::SkipReason;
+use crate::scan::Stack;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lang {
@@ -166,8 +166,8 @@ pub struct Strings {
 }
 
 impl Strings {
-    pub fn unity_block(&self, reason: devsweep::unity::BlockReason) -> &'static str {
-        use devsweep::unity::BlockReason;
+    pub fn unity_block(&self, reason: crate::unity::BlockReason) -> &'static str {
+        use crate::unity::BlockReason;
         match reason {
             BlockReason::Version => self.unity_version_block,
             BlockReason::Busy => self.unity_busy,
@@ -176,8 +176,8 @@ impl Strings {
         }
     }
 
-    pub fn unity_note(&self, version: &devsweep::scan::UnityVersion) -> String {
-        use devsweep::scan::UnityVersion;
+    pub fn unity_note(&self, version: &crate::scan::UnityVersion) -> String {
+        use crate::scan::UnityVersion;
         let qualification = match version {
             UnityVersion::Supported(version) => format!("{version}: {}", self.unity_supported),
             UnityVersion::Unsupported(version) => format!("{version}: {}", self.unity_unsupported),
@@ -510,7 +510,7 @@ static EN: Strings = Strings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use devsweep::scan::UnityVersion;
+    use crate::scan::UnityVersion;
 
     #[test]
     fn unity_messages_explain_guards_and_version_qualification_in_both_languages() {
@@ -519,10 +519,10 @@ mod tests {
         assert!(zh.unity_notice.contains("废纸篓"));
         assert!(en.unity_notice.contains("Trash"));
         for reason in [
-            devsweep::unity::BlockReason::Busy,
-            devsweep::unity::BlockReason::Unknown,
-            devsweep::unity::BlockReason::Version,
-            devsweep::unity::BlockReason::Path,
+            crate::unity::BlockReason::Busy,
+            crate::unity::BlockReason::Unknown,
+            crate::unity::BlockReason::Version,
+            crate::unity::BlockReason::Path,
         ] {
             assert_ne!(zh.unity_block(reason), en.unity_block(reason));
         }

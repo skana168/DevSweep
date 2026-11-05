@@ -58,7 +58,8 @@ pub fn load() -> Config {
     load_from(config_path())
 }
 
-fn load_from(path: Option<PathBuf>) -> Config {
+/// Load the shared configuration from an explicit location (or use defaults).
+pub fn load_from(path: Option<PathBuf>) -> Config {
     path.and_then(|path| fs::read_to_string(path).ok())
         .and_then(|text| toml::from_str(&text).ok())
         .unwrap_or_default()
@@ -69,7 +70,8 @@ pub fn save(config: &Config) {
     save_to(config_path(), config);
 }
 
-fn save_to(path: Option<PathBuf>, config: &Config) {
+/// Persist the shared configuration to an explicit location, best effort.
+pub fn save_to(path: Option<PathBuf>, config: &Config) {
     let Some(path) = path else {
         return;
     };
