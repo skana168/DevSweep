@@ -3,6 +3,7 @@ use crate::{
     config,
     config::LanguageChoice,
     i18n::Lang,
+    plan::{self, DeletePlan, PlanProject},
     projects::ProjectRefresh,
     rules,
     scan::{self, Project, Stack},
@@ -14,6 +15,7 @@ use gpui_kit::component::{
     button::ButtonVariants,
     checkbox::Checkbox,
     input::{Input, InputState},
+    resizable::{ResizableState, h_resizable, resizable_panel},
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -24,7 +26,18 @@ use std::{
     sync::Arc,
 };
 
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 * 1024 {
+        format!("{bytes} B")
+    } else {
+        size::format_size(bytes)
+    }
+}
+
 actions!(projects, [RefreshProjects]);
+
+/// Ticket 05's entry seam: requesting confirmation never executes a Delete plan.
+pub(crate) struct CleanRequested;
 
 pub(crate) struct RootsChanged(pub(crate) Vec<PathBuf>);
 
@@ -34,6 +47,12 @@ pub(crate) struct ProjectDiscovery {
     input: Entity<InputState>,
     projects: Arc<Vec<Project>>,
     model: ProjectRefresh,
+    split: Entity<ResizableState>,
+    rules: Vec<rules::Rule>,
+    summary: Option<(DeletePlan, bool)>,
+    summary_epoch: u64,
+    summary_task: Option<Task<()>>,
+    clean_requested: bool,
     filter: Option<Stack>,
     visible: Vec<usize>,
     selected: HashSet<PathBuf>,
@@ -55,6 +74,7 @@ pub(crate) struct ProjectDiscovery {
     duplicate: bool,
 }
 impl EventEmitter<RootsChanged> for ProjectDiscovery {}
+impl EventEmitter<CleanRequested> for ProjectDiscovery {}
 impl ProjectDiscovery {
     pub(crate) fn new(
         roots: Vec<PathBuf>,
@@ -68,6 +88,12 @@ impl ProjectDiscovery {
             input: cx.new(|cx| InputState::new(window, cx)),
             projects: Arc::default(),
             model: ProjectRefresh::default(),
+            split: cx.new(|_| ResizableState::default()),
+            rules: Vec::new(),
+            summary: None,
+            summary_epoch: 0,
+            summary_task: None,
+            clean_requested: false,
             filter: None,
             visible: Vec::new(),
             selected: HashSet::new(),
@@ -120,6 +146,7 @@ impl ProjectDiscovery {
             self.projects = Arc::default();
             self.model = ProjectRefresh::default();
             self.selected.clear();
+            self.update_summary(cx);
             self.rebuild_visible();
             cx.notify();
             return;
@@ -128,10 +155,25 @@ impl ProjectDiscovery {
             let report = scan::scan_with_errors(&roots);
             let loaded = rules::load(config::rules_path().as_deref());
             let found = ProjectRefresh::from_discovered(report.projects().to_vec(), &loaded.rules);
-            (report, found, loaded.error)
+            let mut found = found;
+            // Rule overrides must not opt a Dangerous Target into the GPUI draft.
+            // apply_refresh below retains subsequent explicit user choices.
+            let paths: Vec<_> = found
+                .entries()
+                .iter()
+                .map(|entry| entry.project.path.clone())
+                .collect();
+            for path in paths {
+                for target in found.targets_mut(&path).into_iter().flatten() {
+                    if target.dangerous {
+                        target.checked = false;
+                    }
+                }
+            }
+            (report, found, loaded.error, loaded.rules)
         });
         self.task = Some(cx.spawn(async move |this, cx| {
-            let (report, found, rule_error) = work.await;
+            let (report, found, rule_error, rules) = work.await;
             let _ = this.update(cx, |this, cx| {
                 if this.revision != revision {
                     return;
@@ -161,7 +203,9 @@ impl ProjectDiscovery {
                         .get(path)
                         .is_some_and(|stack| new_stacks.get(path) == Some(stack))
                 });
+                this.rules = rules;
                 this.model.apply_refresh(found);
+                this.update_summary(cx);
                 this.projects = Arc::new(
                     this.model
                         .entries()
@@ -238,6 +282,7 @@ impl ProjectDiscovery {
                                 return;
                             }
                             this.model.apply_measurement(&event);
+                            this.update_summary(cx);
                             this.measured += 1;
                             cx.notify();
                         })
@@ -289,6 +334,7 @@ impl ProjectDiscovery {
         if !self.selected.remove(path) {
             self.selected.insert(path.clone());
         }
+        self.update_summary(cx);
         cx.notify();
     }
     fn navigate(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -399,6 +445,7 @@ impl ProjectDiscovery {
                                 } else {
                                     this.selected.remove(&path);
                                 }
+                                this.update_summary(cx);
                                 this.active = Some(path.clone());
                                 this.focus.focus(window, cx);
                                 cx.stop_propagation();
@@ -445,6 +492,216 @@ impl ProjectDiscovery {
                             }),
                     ),
             )
+    }
+    fn update_summary(&mut self, cx: &mut Context<Self>) {
+        self.summary_epoch += 1;
+        let epoch = self.summary_epoch;
+        self.summary = None;
+        self.clean_requested = false;
+        let entries: Vec<_> = self
+            .model
+            .entries()
+            .iter()
+            .filter(|entry| self.selected.contains(&entry.project.path))
+            .cloned()
+            .collect();
+        let roots = self.roots.clone();
+        let rules = self.rules.clone();
+        let work = cx.background_spawn(async move {
+            let projects: Vec<_> = entries
+                .iter()
+                .map(|entry| PlanProject {
+                    path: &entry.project.path,
+                    stack: entry.project.stack,
+                    targets: &entry.targets,
+                })
+                .collect();
+            let plan = plan::plan(&projects, &roots, &rules);
+            let unknown_paths: HashSet<_> = entries
+                .iter()
+                .flat_map(|entry| &entry.targets)
+                .filter(|target| target.size.is_none())
+                .map(|target| &target.path)
+                .collect();
+            let unknown = plan
+                .items
+                .iter()
+                .any(|item| unknown_paths.contains(&item.target_path));
+            (plan, unknown)
+        });
+        self.summary_task = Some(cx.spawn(async move |this, cx| {
+            let summary = work.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.summary_epoch == epoch {
+                    this.summary = Some(summary);
+                    cx.notify();
+                }
+            });
+        }));
+    }
+    fn request_clean(&mut self, cx: &mut Context<Self>) {
+        if self
+            .summary
+            .as_ref()
+            .is_none_or(|(plan, _)| plan.items.is_empty())
+        {
+            return;
+        }
+        // Only emit intent. Ticket 05 must build a fresh plan, present its
+        // confirmation and recheck before execution; this summary is no authority.
+        self.clean_requested = true;
+        cx.emit(CleanRequested);
+        cx.notify();
+    }
+    fn render_selection(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let en = Lang::from_choice(self.language) == Lang::En;
+        let (value, scope) = self.summary.as_ref().map_or_else(
+            || {
+                (
+                    if en {
+                        "Checking…".into()
+                    } else {
+                        "检查中…".into()
+                    },
+                    String::new(),
+                )
+            },
+            |(plan, unknown)| {
+                let projects = plan
+                    .items
+                    .iter()
+                    .map(|item| &item.project_path)
+                    .collect::<HashSet<_>>()
+                    .len();
+                (
+                    if *unknown {
+                        if en {
+                            "Unknown".into()
+                        } else {
+                            "未知".into()
+                        }
+                    } else {
+                        format_bytes(plan.total_bytes)
+                    },
+                    if en {
+                        format!(
+                            "{projects} projects · {} Targets · {} skipped",
+                            plan.items.len(),
+                            plan.skipped.len()
+                        )
+                    } else {
+                        format!(
+                            "{projects} 个项目 · {} 个清理项 · {} 个跳过",
+                            plan.items.len(),
+                            plan.skipped.len()
+                        )
+                    },
+                )
+            },
+        );
+        let label = if en {
+            format!("Chosen size: {value}")
+        } else {
+            format!("已选体积：{value}")
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .flex_shrink_0()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .p_3()
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        div()
+                            .id("selection-scope")
+                            .test_support()
+                            .aria_label(scope.clone())
+                            .child(scope),
+                    )
+                    .child(
+                        div()
+                            .id("chosen-size")
+                            .test_support()
+                            .aria_label(label.clone())
+                            .child(label),
+                    )
+                    .child(
+                        Button::new("clean-projects")
+                            .label(if en { "Clean…" } else { "清理…" })
+                            .disabled(
+                                self.summary
+                                    .as_ref()
+                                    .is_none_or(|(plan, _)| plan.items.is_empty()),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.request_clean(cx))),
+                    ),
+            )
+            .children(self.clean_requested.then(|| {
+                let status = if en {
+                    "Selection ready for plan confirmation. Nothing has been deleted."
+                } else {
+                    "选择已准备好，等待清理计划确认。尚未删除任何内容。"
+                };
+                div()
+                    .id("clean-request-status")
+                    .role(Role::Status)
+                    .test_support()
+                    .aria_label(status)
+                    .text_sm()
+                    .child(status)
+            }))
+    }
+    fn render_targets(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let en = Lang::from_choice(self.language) == Lang::En;
+        let entry = self.active.as_ref().and_then(|path| self.model.entry(path));
+        div().id("target-panel").test_support().flex().flex_col().size_full().min_w_0()
+            .border_l_1().border_color(cx.theme().border)
+            .child(div().p_3().min_w_0().truncate().child(entry.map_or_else(
+                || if en { "Select a project".to_owned() } else { "选择项目".to_owned() },
+                |entry| entry.project.name.clone())))
+            .child(div().id("target-scroll").flex_1().min_h_0().overflow_y_scroll()
+                .children(entry.and_then(|entry| match entry.project.stack {
+                    Stack::Unity => Some(Lang::from_choice(self.language).strings().unity_notice),
+                    Stack::Dotnet => Some(Lang::from_choice(self.language).strings().dotnet_clean_note),
+                    _ => None,
+                }).map(|notice| div().p_3().text_sm().text_color(cx.theme().danger).child(notice)))
+                .children(entry.into_iter().flat_map(|entry| entry.targets.iter().map(move |target| (entry, target)))
+                    .map(|(entry, target)| {
+                        let project = entry.project.path.clone();
+                        let path = target.path.clone();
+                        let rel = path.strip_prefix(&project).unwrap_or(&path).display().to_string();
+                        let name = target.label.clone().unwrap_or(rel);
+                        let bytes = target.size.map(format_bytes).unwrap_or_else(|| if en { "Unknown".into() } else { "未知".into() });
+                        div().id(SharedString::from(path.to_string_lossy().into_owned())).p_3().flex().flex_col().gap_2().min_w_0()
+                            .child(Checkbox::new(SharedString::from(format!("target-{}", target.rule_id)))
+                                .w_full().min_w_0()
+                                .tooltip(path.to_string_lossy().into_owned())
+                                .accessibility_label(format!("{name} · {bytes}"))
+                                .child(div().min_w_0().truncate().child(name)).checked(target.checked)
+                                .on_change(cx.listener(move |this, checked, _, cx| {
+                                    if let Some(target) = this.model.targets_mut(&project).and_then(|targets| targets.iter_mut().find(|target| target.path == path)) {
+                                        target.checked = *checked;
+                                    }
+                                    if *checked { this.selected.insert(project.clone()); }
+                                    this.update_summary(cx);
+                                    cx.notify();
+                                })))
+                            .child(div().text_sm().child(bytes))
+                            .child(div().text_sm().text_color(if target.dangerous { cx.theme().danger } else { cx.theme().muted_foreground })
+                                .child(match (en, target.dangerous) {
+                                    (true, true) => "Dangerous · May discard needed output or require downloading / rebuilding. Select only if no longer needed.",
+                                    (false, true) => "危险项 · 可能丢失仍需的产物，或需要重新下载、构建。请确认不再需要后主动勾选。",
+                                    (true, false) => "Generated dependencies or build output; subsequent builds may recreate or download it.",
+                                    (false, false) => "依赖或构建产物；后续构建可能重新生成或下载。",
+                                }))
+                    })))
     }
     fn add_root(&mut self, cx: &mut Context<Self>) {
         if self.adding {
@@ -495,6 +752,7 @@ impl ProjectDiscovery {
                 .collect(),
         );
         self.model.retain_roots(&self.roots);
+        self.update_summary(cx);
         self.selected
             .retain(|path| self.model.entry(path).is_some());
         self.rebuild_visible();
@@ -510,7 +768,7 @@ impl ProjectDiscovery {
     }
 }
 impl Render for ProjectDiscovery {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let strings = Lang::from_choice(self.language).strings();
         let covered = scan::covering_roots(&self.roots);
         let projects = self.projects.clone();
@@ -540,197 +798,235 @@ impl Render for ProjectDiscovery {
             }))
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(strings.projects)
-                    .child(
-                        Button::new("refresh-projects")
-                            .label(strings.refresh_projects)
-                            .tooltip_with_action(
-                                strings.refresh_projects,
-                                &RefreshProjects,
-                                Some("DevSweep"),
-                            )
-                            .disabled(self.scanning || self.roots.is_empty())
-                            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
-                    ),
-            )
-            .child(strings.roots)
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(
-                        div().flex_1().min_w_0().child(
-                            Input::new(&self.input)
-                                .id("scan-root-path")
-                                .aria_label(strings.roots),
-                        ),
-                    )
-                    .child(
-                        Button::new("add-scan-root")
-                            .label(strings.add_directory)
-                            .loading(self.adding)
-                            .disabled(self.adding)
-                            .on_click(cx.listener(|this, _, _, cx| this.add_root(cx))),
-                    ),
-            )
-            .children(self.duplicate.then(|| {
-                div()
-                    .id("duplicate-root")
-                    .test_support()
-                    .child(strings.root_duplicate)
-            }))
-            .child(
-                div()
-                    .id("scan-roots")
+                    .id("project-controls")
                     .flex()
                     .flex_col()
-                    .gap_2()
-                    .max_h_40()
+                    .gap_3()
+                    .max_h(relative(0.5))
                     .flex_shrink_0()
                     .overflow_y_scroll()
-                    .children(self.roots.iter().zip(covered).map(|(root, covering)| {
-                        let root = root.clone();
+                    .child(
                         div()
                             .flex()
                             .items_center()
+                            .gap_3()
+                            .child(strings.projects)
+                            .child(
+                                Button::new("refresh-projects")
+                                    .label(strings.refresh_projects)
+                                    .tooltip_with_action(
+                                        strings.refresh_projects,
+                                        &RefreshProjects,
+                                        Some("DevSweep"),
+                                    )
+                                    .disabled(self.scanning || self.roots.is_empty())
+                                    .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+                            ),
+                    )
+                    .child(strings.roots)
+                    .child(
+                        div()
+                            .flex()
                             .gap_2()
                             .child(
-                                div()
-                                    .id(SharedString::from(format!("root-path:{}", root.display())))
-                                    .flex_1()
-                                    .min_w_0()
-                                    .overflow_x_scroll()
-                                    .whitespace_nowrap()
-                                    .child(root.to_string_lossy().into_owned()),
-                            )
-                            .children(covering.map(|_| {
-                                div()
-                                    .id(SharedString::from(format!(
-                                        "covered-root:{}",
-                                        root.display()
-                                    )))
-                                    .test_support()
-                                    .w_40()
-                                    .flex_shrink_0()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(strings.root_covered)
-                            }))
-                            .child(
-                                Button::new(SharedString::from(
-                                    root.to_string_lossy().into_owned(),
-                                ))
-                                .label(strings.remove)
-                                .on_click(
-                                    cx.listener(move |this, _, _, cx| this.remove_root(&root, cx)),
+                                div().flex_1().min_w_0().child(
+                                    Input::new(&self.input)
+                                        .id("scan-root-path")
+                                        .aria_label(strings.roots),
                                 ),
                             )
-                    })),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .flex_shrink_0()
+                            .child(
+                                Button::new("add-scan-root")
+                                    .label(strings.add_directory)
+                                    .loading(self.adding)
+                                    .disabled(self.adding)
+                                    .on_click(cx.listener(|this, _, _, cx| this.add_root(cx))),
+                            ),
+                    )
+                    .children(self.duplicate.then(|| {
+                        div()
+                            .id("duplicate-root")
+                            .test_support()
+                            .child(strings.root_duplicate)
+                    }))
                     .child(
-                        Button::new("filter-all")
-                            .label(match Lang::from_choice(self.language) {
-                                Lang::En => "All types",
-                                Lang::Zh => "全部类型",
-                            })
-                            .selected(self.filter.is_none())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.filter = None;
-                                this.rebuild_visible();
-                                this.scroll.scroll_to_item(0, ScrollStrategy::Top);
-                                cx.notify();
+                        div()
+                            .id("scan-roots")
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .max_h_40()
+                            .flex_shrink_0()
+                            .overflow_y_scroll()
+                            .children(self.roots.iter().zip(covered).map(|(root, covering)| {
+                                let root = root.clone();
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "root-path:{}",
+                                                root.display()
+                                            )))
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_x_scroll()
+                                            .whitespace_nowrap()
+                                            .child(root.to_string_lossy().into_owned()),
+                                    )
+                                    .children(covering.map(|_| {
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "covered-root:{}",
+                                                root.display()
+                                            )))
+                                            .test_support()
+                                            .w_40()
+                                            .flex_shrink_0()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(strings.root_covered)
+                                    }))
+                                    .child(
+                                        Button::new(SharedString::from(
+                                            root.to_string_lossy().into_owned(),
+                                        ))
+                                        .label(strings.remove)
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.remove_root(&root, cx)
+                                            }),
+                                        ),
+                                    )
                             })),
                     )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_1()
+                            .flex_shrink_0()
+                            .child(
+                                Button::new("filter-all")
+                                    .label(match Lang::from_choice(self.language) {
+                                        Lang::En => "All types",
+                                        Lang::Zh => "全部类型",
+                                    })
+                                    .selected(self.filter.is_none())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.filter = None;
+                                        this.rebuild_visible();
+                                        this.scroll.scroll_to_item(0, ScrollStrategy::Top);
+                                        cx.notify();
+                                    })),
+                            )
+                            .children(
+                                [
+                                    Stack::Unity,
+                                    Stack::Flutter,
+                                    Stack::Ios,
+                                    Stack::Android,
+                                    Stack::Java,
+                                    Stack::Node,
+                                    Stack::Python,
+                                    Stack::Rust,
+                                    Stack::Dotnet,
+                                ]
+                                .into_iter()
+                                .map(|stack| {
+                                    Button::new(SharedString::from(format!("filter-{stack:?}")))
+                                        .label(strings.stack(stack))
+                                        .selected(self.filter == Some(stack))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.filter = Some(stack);
+                                            this.rebuild_visible();
+                                            this.scroll.scroll_to_item(0, ScrollStrategy::Top);
+                                            cx.notify();
+                                        }))
+                                }),
+                            ),
+                    )
+                    .child({
+                        let label = match Lang::from_choice(self.language) {
+                            Lang::En => {
+                                format!(
+                                    "{} of {} projects",
+                                    self.visible.len(),
+                                    self.projects.len()
+                                )
+                            }
+                            Lang::Zh => {
+                                format!("{} / {} 个项目", self.visible.len(), self.projects.len())
+                            }
+                        };
+                        div()
+                            .id("project-results")
+                            .test_support()
+                            .aria_label(label.clone())
+                            .child(label)
+                    })
                     .children(
-                        [
-                            Stack::Unity,
-                            Stack::Flutter,
-                            Stack::Ios,
-                            Stack::Android,
-                            Stack::Java,
-                            Stack::Node,
-                            Stack::Python,
-                            Stack::Rust,
-                            Stack::Dotnet,
-                        ]
-                        .into_iter()
-                        .map(|stack| {
-                            Button::new(SharedString::from(format!("filter-{stack:?}")))
-                                .label(strings.stack(stack))
-                                .selected(self.filter == Some(stack))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.filter = Some(stack);
-                                    this.rebuild_visible();
-                                    this.scroll.scroll_to_item(0, ScrollStrategy::Top);
-                                    cx.notify();
-                                }))
-                        }),
-                    ),
-            )
-            .child({
-                let label = match Lang::from_choice(self.language) {
-                    Lang::En => {
-                        format!("{} of {} projects", self.visible.len(), self.projects.len())
-                    }
-                    Lang::Zh => format!("{} / {} 个项目", self.visible.len(), self.projects.len()),
-                };
-                div()
-                    .id("project-results")
-                    .test_support()
-                    .aria_label(label.clone())
-                    .child(label)
-            })
-            .children(
-                (self.visible.is_empty() && !self.projects.is_empty()).then(|| {
-                    div().child(match Lang::from_choice(self.language) {
+                        (self.visible.is_empty() && !self.projects.is_empty()).then(|| {
+                            div().child(match Lang::from_choice(self.language) {
                         Lang::En => {
                             "No projects of this type. Choose All types to see every project."
                         }
                         Lang::Zh => "没有此类型的项目。选择全部类型查看所有项目。",
                     })
-                }),
-            )
-            .child(
-                div()
-                    .id("discovery-status")
-                    .role(Role::Status)
-                    .test_support()
-                    .aria_label(status.clone())
-                    .flex()
-                    .flex_wrap()
-                    .gap_3()
-                    .child(status)
-                    .child({
-                        let label = match (Lang::from_choice(self.language), self.measuring) {
-                            (Lang::En, true) => {
-                                format!("Measuring {}/{}", self.measured, self.measurement_total)
-                            }
-                            (Lang::En, false) => {
-                                format!("Measured {}/{}", self.measured, self.measurement_total)
-                            }
-                            (Lang::Zh, true) => {
-                                format!("体积计算中 {}/{}", self.measured, self.measurement_total)
-                            }
-                            (Lang::Zh, false) => {
-                                format!("测量完成 {}/{}", self.measured, self.measurement_total)
-                            }
-                        };
+                        }),
+                    )
+                    .child(
                         div()
-                            .id("project-measurement")
+                            .id("discovery-status")
+                            .role(Role::Status)
                             .test_support()
-                            .aria_label(label.clone())
-                            .text_color(cx.theme().muted_foreground)
-                            .child(label)
-                    }),
+                            .aria_label(status.clone())
+                            .flex()
+                            .flex_wrap()
+                            .gap_3()
+                            .child(status)
+                            .child({
+                                let label = match (Lang::from_choice(self.language), self.measuring)
+                                {
+                                    (Lang::En, true) => {
+                                        format!(
+                                            "Measuring {}/{}",
+                                            self.measured, self.measurement_total
+                                        )
+                                    }
+                                    (Lang::En, false) => {
+                                        format!(
+                                            "Measured {}/{}",
+                                            self.measured, self.measurement_total
+                                        )
+                                    }
+                                    (Lang::Zh, true) => {
+                                        format!(
+                                            "体积计算中 {}/{}",
+                                            self.measured, self.measurement_total
+                                        )
+                                    }
+                                    (Lang::Zh, false) => {
+                                        format!(
+                                            "测量完成 {}/{}",
+                                            self.measured, self.measurement_total
+                                        )
+                                    }
+                                };
+                                div()
+                                    .id("project-measurement")
+                                    .test_support()
+                                    .aria_label(label.clone())
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(label)
+                            }),
+                    )
+                    .children(
+                        (projects.is_empty() && !self.scanning && self.errors.is_empty())
+                            .then(|| div().id("discovery-empty").test_support().child(empty)),
+                    ),
             )
             .children((!self.errors.is_empty()).then(|| {
                 div()
@@ -757,37 +1053,59 @@ impl Render for ProjectDiscovery {
                             })),
                     )
             }))
-            .children(
-                (projects.is_empty() && !self.scanning && self.errors.is_empty())
-                    .then(|| div().id("discovery-empty").test_support().child(empty)),
-            )
             .child(
-                div()
-                    .id("project-list-region")
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .min_w_0()
-                    .track_focus(&self.focus)
-                    .on_key_down(cx.listener(Self::navigate))
-                    .child(
-                        uniform_list(
-                            "project-list",
-                            self.visible.len(),
-                            cx.processor(|this, range: Range<usize>, window, cx| {
-                                range
-                                    .map(|ix| this.render_project(this.visible[ix], window, cx))
-                                    .collect::<Vec<_>>()
-                            }),
+                div().flex_1().min_h_0().min_w_0().child(
+                    h_resizable("project-split")
+                        .with_state(&self.split)
+                        .child(
+                            resizable_panel()
+                                .size_range(window.rem_size() * 14.0..Pixels::MAX)
+                                .child(
+                                    div()
+                                        .id("project-list-region")
+                                        .test_support()
+                                        .size_full()
+                                        .flex()
+                                        .flex_col()
+                                        .flex_1()
+                                        .min_h_0()
+                                        .min_w_0()
+                                        .track_focus(&self.focus)
+                                        .on_key_down(cx.listener(Self::navigate))
+                                        .child(
+                                            uniform_list(
+                                                "project-list",
+                                                self.visible.len(),
+                                                cx.processor(
+                                                    |this, range: Range<usize>, window, cx| {
+                                                        range
+                                                            .map(|ix| {
+                                                                this.render_project(
+                                                                    this.visible[ix],
+                                                                    window,
+                                                                    cx,
+                                                                )
+                                                            })
+                                                            .collect::<Vec<_>>()
+                                                    },
+                                                ),
+                                            )
+                                            .track_scroll(&self.scroll)
+                                            .w_full()
+                                            .flex_1()
+                                            .min_h_0(),
+                                        ),
+                                ),
                         )
-                        .track_scroll(&self.scroll)
-                        .w_full()
-                        .flex_1()
-                        .min_h_0(),
-                    ),
+                        .child(
+                            resizable_panel()
+                                .size(window.rem_size() * 21.0)
+                                .size_range(window.rem_size() * 16.0..Pixels::MAX)
+                                .child(self.render_targets(cx)),
+                        ),
+                ),
             )
+            .child(self.render_selection(cx))
             .child({
                 let count = self.selected.len();
                 let summary = match Lang::from_choice(self.language) {
@@ -814,6 +1132,162 @@ mod tests {
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{AppContext, TestAppContext, WindowOptions};
 
+    #[gpui_kit::test]
+    fn target_panel_retains_dangerous_draft_across_projects(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for name in ["alpha", "beta"] {
+            let project = root.join(name);
+            std::fs::create_dir_all(project.join("node_modules")).unwrap();
+            std::fs::create_dir(project.join("dist")).unwrap();
+            std::fs::write(project.join("package.json"), "{}").unwrap();
+            std::fs::write(project.join("node_modules/payload"), [0; 1024]).unwrap();
+            std::fs::write(project.join("dist/payload"), [0; 2048]).unwrap();
+        }
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    ProjectDiscovery::new(vec![root.clone()], LanguageChoice::En, window, cx)
+                })
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.within("project-list").click(
+                gpui_kit::SharedString::from(root.join("alpha").to_string_lossy().into_owned()),
+                cx,
+            );
+            assert_eq!(window.find("target-node.dist").checked(), Some(false));
+            window.click("target-node.dist", cx);
+            for _ in 0..20 {
+                window.press("tab", cx);
+                if window.find("target-node.dist").focused() == Some(true) {
+                    break;
+                }
+            }
+            assert_eq!(window.find("target-node.dist").focused(), Some(true));
+            window.press("space", cx);
+            assert_eq!(window.find("target-node.dist").checked(), Some(false));
+            window.press("space", cx);
+            assert_eq!(window.find("target-node.dist").checked(), Some(true));
+            let panel = window.find("target-panel").bounds();
+            let from = gpui_kit::point(panel.left(), panel.center().y);
+            let to = gpui_kit::point(panel.left() - gpui_kit::px(70.), panel.center().y);
+            window.drag(from, to, cx);
+            let resized = window.find("target-panel").bounds().size.width;
+            assert!(resized > panel.size.width + gpui_kit::px(40.));
+
+            window.within("project-list").click(
+                gpui_kit::SharedString::from(root.join("beta").to_string_lossy().into_owned()),
+                cx,
+            );
+            assert_eq!(window.find("target-node.dist").checked(), Some(false));
+            window.within("project-list").click(
+                gpui_kit::SharedString::from(root.join("alpha").to_string_lossy().into_owned()),
+                cx,
+            );
+            assert_eq!(window.find("target-node.dist").checked(), Some(true));
+            assert_eq!(window.find("target-panel").bounds().size.width, resized);
+        })
+        .unwrap();
+    }
+    #[gpui_kit::test]
+    fn chosen_size_tracks_safe_cross_project_selection_and_clean_request(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for name in ["alpha", "beta"] {
+            let project = root.join(name);
+            std::fs::create_dir_all(project.join("node_modules")).unwrap();
+            std::fs::create_dir(project.join("dist")).unwrap();
+            std::fs::write(project.join("package.json"), "{}").unwrap();
+            std::fs::write(project.join("node_modules/payload"), [0; 1024]).unwrap();
+            std::fs::write(project.join("dist/payload"), [0; 2048]).unwrap();
+        }
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    ProjectDiscovery::new(vec![root.clone()], LanguageChoice::En, window, cx)
+                })
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("clean-projects", cx);
+            assert!(window.try_find("clean-request-status").is_none());
+            window
+                .within("project-list")
+                .within(gpui_kit::SharedString::from(
+                    root.join("alpha").to_string_lossy().into_owned(),
+                ))
+                .click("project-check", cx);
+            window.click("target-node.dist", cx);
+            window
+                .within("project-list")
+                .within(gpui_kit::SharedString::from(
+                    root.join("beta").to_string_lossy().into_owned(),
+                ))
+                .click("project-check", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("chosen-size").label(),
+                Some("Chosen size: 4096 B")
+            );
+            assert_eq!(
+                window.find("selection-scope").label(),
+                Some("2 projects · 3 Targets · 0 skipped")
+            );
+            window.click("clean-projects", cx);
+            assert_eq!(
+                window.find("clean-request-status").label(),
+                Some("Selection ready for plan confirmation. Nothing has been deleted.")
+            );
+            window.click("refresh-projects", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("chosen-size").label(),
+                Some("Chosen size: 4096 B")
+            );
+            // A vanished Target must be excluded by the existing safety planner.
+            std::fs::remove_dir_all(root.join("alpha/dist")).unwrap();
+            window.click("refresh-projects", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("chosen-size").label(),
+                Some("Chosen size: 2048 B")
+            );
+            assert_eq!(
+                window.find("selection-scope").label(),
+                Some("2 projects · 2 Targets · 1 skipped")
+            );
+        })
+        .unwrap();
+        assert!(root.join("alpha/node_modules/payload").exists());
+        assert!(root.join("beta/dist/payload").exists());
+    }
     #[gpui_kit::test]
     fn project_size_is_measured_in_background_and_refresh_keeps_known_size(
         cx: &mut TestAppContext,
@@ -1059,6 +1533,12 @@ mod tests {
                 cx,
             );
             window.press("space", cx);
+            assert_eq!(
+                window.find("chosen-size").label(),
+                Some("Chosen size: Checking…")
+            );
+            window.click("clean-projects", cx);
+            assert!(window.try_find("clean-request-status").is_none());
             // A queued Refresh must not reset the draft or pretend to complete.
             window.click("refresh-projects", cx);
             assert_eq!(
