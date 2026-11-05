@@ -33,3 +33,10 @@
 - 最终 `cargo test --all-targets --features gpui-tests --locked --no-fail-fast -- --test-threads=1`：220 passed、4 ignored、0 failed，含 15 个 GPUI 真实组件测试以及既有 egui、扫描、Refresh/测量、规则、计划、清理和安全回归。日志 `/tmp/t03-final-full.log`。四个 ignored 是既有系统 Trash / 本地 Go 条件，不声称通过。
 - 最终 `cargo clippy --lib --bins --features gpui-tests --locked -- -D warnings`、`cargo fmt --all -- --check`、`git diff --check` 通过。`cargo build --bin devsweep-gpui --features gpui --locked` 在 macOS aarch64 成功。日志 `/tmp/t03-final-clippy.log`、`/tmp/t03-final-build.log`。依赖 block 0.1.6 的既有 future-incompat warning 仍存在。
 - 第三、四项保持未勾选：自动化已证明导航/保持/虚拟化与上述几何约束，但没有实际操作 macOS 原生窗口验证焦点环、长路径字体、系统缩放和大目录下响应，也没有 Windows 构建/原生运行证据。无头交互与 macOS 构建不等于双平台原生验收；继续由 08 收集，不标记 resolved。测量也仍沿用原 API 的 best-effort 估算限制。
+
+### 2026-11-05 — integration/gpui-ui 集成证据
+
+- 父 checkout `/Users/yoyun/DevSweep` 起点 `f2366c2b0267d001c75a66de5653442e65263e19`，merge-base 等于起点；目标 `6669ffb5044460cee565eb201d4373aa92a79b2d` 是直接后继。最初误用的未提交普通合并已通过 `git merge --abort` 中止，随后 `git merge --ff-only` 成功；未创建合并提交、stash、reset 或改写历史。
+- 集成后 `cargo fmt --all -- --check`、`git diff --check` 通过；`cargo test --lib --features gpui-tests --locked gpui_projects::tests -- --test-threads=1` 为 4 passed / 0 failed / 0 ignored。首次误选 `--bin devsweep-gpui` 运行了 0 tests，不计作验证；改用 lib 后执行上述四个真实交互测试。完整套件沿用上方实施证据，本轮未重复。既有 `block 0.1.6` future-incompat warning 仍存在。
+- 04 可继续基于已集成的 `ProjectRefresh::entry` / `targets_mut`、Target 草稿与体积，以及 `apply_refresh` 的保持语义实现清理面板和跨项目汇总；`ProjectDiscovery` 已持有稳定路径的 active/selected/model，但这些字段仍私有，04 应在该实体内接入或增加明确接口，不能假定已有对外面板 API。Project size 不作为 Chosen size 使用。
+- 保持本票状态及第三、四项未勾选：没有新增 macOS 原生窗口人工验收或 Windows 构建/运行证据，不宣称完整解决。保留原有 dirty `skills-lock.json`、untracked `.claude/` 和工作树供父任务清理；没有 PR 或 push。
