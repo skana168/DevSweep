@@ -10,7 +10,7 @@ cargo run --bin devsweep-gpui-cache --features gpui --locked
 
 ## 主窗口集成
 
-02 的壳拥有导航，在全局缓存页首次激活时创建并保留独立实体：
+02 的 SettingsApp 主壳已接入全局缓存导航，在全局缓存页首次激活时创建并保留独立实体：
 
 ```rust
 let caches = cx.new(|cx| {
@@ -30,4 +30,4 @@ let caches = cx.new(|cx| {
 
 ## 验证边界
 
-UI integration tests 使用生产实体、真实 Kit 控件、临时文件系统及正常鼠标/键盘事件；不会直接调用选择 handler。现有公开业务测试验证双平台固定路径、分组和 Go 保护。自动化的无头窗口不等于原生平台视觉验收；Windows 构建/运行、macOS 原生目测及完整主壳导航仍由集成与票据 08 补证。
+UI integration tests 使用生产实体、真实 Kit 控件、临时文件系统及正常鼠标/键盘事件；不会直接调用选择 handler。现有公开业务测试验证双平台固定路径、分组和 Go 保护。自动化的无头窗口不等于原生平台视觉验收；Windows 构建/运行、macOS 原生目测及主壳导航与选择保持已有无头集成测试；原生平台验收仍由票据 08 补证。

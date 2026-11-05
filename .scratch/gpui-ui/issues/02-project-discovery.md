@@ -31,3 +31,12 @@
 - `cargo build --bin devsweep-gpui --features gpui --locked`：macOS aarch64 构建成功。
 - `cargo clippy --lib --bins --features gpui-tests --locked -- -D warnings`、`cargo fmt --all -- --check`、`git diff --check` 通过。依赖 `block 0.1.6` 仍有既有 future-incompat warning；4 个 ignored 测试涉及系统 Trash / 本地 Go 等既有手动条件，不声称通过。
 - 第三项保持未勾选：后台线程、空状态和失败恢复已由自动化验证，但本票未实际操作 macOS 原生窗口验证大目录扫描期间的响应、长路径 / 字体 / 缩放和系统权限失败，也未在 Windows 构建或运行。真实 macOS / Windows 流程验收继续由 08 收集，未运行的 CI 不算验收；不标记 resolved。无清理 / 中止 / 测量验收声明。
+
+### 2026-11-05 — integration/gpui-ui 顺序集成证据
+
+- 在共享 checkout 将 02 的 `c26aff449e672c0b688659f7bba79742ecd86882` 以 `--ff-only` 快进合入，再将 06 的 `5f53efcbb59a2167e86d47979ae9cd2ef15bb213` 普通合并；合并提交 `deafc6b33602c667ba118c2cdae5a09a15a7d015`，无冲突。未 reset / stash / 改写历史，未 push / PR / 创建子代理，保留各工作树；未修改并发实现者的工作树或分支。用户原有 `skills-lock.json` 和 `.claude/` 保持未提交。
+- 主壳首次进入缓存页时创建 GlobalCacheView，导航切换保留同一实体及选择草稿；扫描根变化或发现的项目路径集合变化时丢弃旧实体，下次使用当前 Config / project_paths 重建，避免沿用旧 Go 保护上下文。语言变更同步项目和缓存实体；主题继续使用 Kit 全局 Theme。缓存仍只提供选择草稿，无清理执行入口。
+- 新增真实主壳 UI integration test `main_navigation_retains_cache_selection_and_updates_settings`：固定缓存条目与临时目录实际后台测量，鼠标取消选择 → 项目页 → 缓存页保持取消；设置切换中文 / 深色、Escape 返回后分组语言、主题与选择仍正确。更新原导航测试以验证实际缓存进度控件，不再断言占位标题。
+- 本次执行：`cargo test --lib --features gpui-tests --locked gpui_ -- --test-threads=1` 11 passed；`cargo test --test scan --features gpui-tests --locked` 24 passed；`cargo clippy --lib --bins --features gpui-tests --locked -- -D warnings`、`cargo fmt --all -- --check`、`git diff --check` 均通过。临时日志 `/tmp/devsweep-integration-{gpui,scan,clippy}.log`。全量测试沿用各实现评论证据，本次没有重跑全量或原生窗口构建/操作；依赖 block 0.1.6 的既有 future-incompat warning 仍存在。
+- 未验收：Windows 构建/运行，macOS 原生大目录扫描响应及视觉检查，双平台字体/缩放/长路径/焦点与系统权限场景、完整清理链路。无头测试不等于原生验收，顶层未勾选项维持原状，不标记 resolved；最终平台接受仍由 08 收集。
+- 03 实现就绪：已集成 ProjectDiscovery 对后台任务/过期 revision/刷新结果的所有权、独立项目视图与虚拟列表、RootsChanged 配置事件、scan_with_errors 兼容报告及 project_paths 读取接口。03 可在该模块接入项目测量、筛选、身份稳定和选择保持；02 的原生平台未验收项不阻止继续实现，但不表示其验收已完成，最终仍以 08 为门槛。

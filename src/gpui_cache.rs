@@ -70,7 +70,7 @@ impl GlobalCacheView {
             });
         Self::from_entries(entries, context, config.language, window, cx)
     }
-    fn from_entries(
+    pub(crate) fn from_entries(
         entries: Vec<CacheEntry>,
         context: Option<GoCacheContext>,
         language: LanguageChoice,

@@ -53,6 +53,12 @@ impl ProjectDiscovery {
         this.refresh(cx);
         this
     }
+    pub(crate) fn project_paths(&self) -> Vec<PathBuf> {
+        self.projects
+            .iter()
+            .map(|project| project.path.clone())
+            .collect()
+    }
     pub(crate) fn set_language(&mut self, language: LanguageChoice, cx: &mut Context<Self>) {
         self.language = language;
         cx.notify();

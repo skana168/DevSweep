@@ -2,6 +2,7 @@
 use crate::{
     config::{self, Config, LanguageChoice, ThemeChoice},
     delete::DeleteMode,
+    gpui_cache::GlobalCacheView,
     gpui_projects::{ProjectDiscovery, RefreshProjects, RootsChanged},
     i18n::Lang,
 };
@@ -106,6 +107,8 @@ struct SettingsApp {
     focus: FocusHandle,
     projects: Entity<ProjectDiscovery>,
     global_caches: bool,
+    caches: Option<Entity<GlobalCacheView>>,
+    cache_projects: Vec<PathBuf>,
     _subscriptions: Vec<Subscription>,
 }
 impl SettingsApp {
@@ -131,7 +134,19 @@ impl SettingsApp {
             cx.new(|cx| ProjectDiscovery::new(config.roots.clone(), config.language, window, cx));
         let roots = cx.subscribe(&projects, |this, _, event: &RootsChanged, cx| {
             this.config.roots = event.0.clone();
+            this.caches = None;
             config::save_to(this.path.clone(), &this.config);
+            cx.notify();
+        });
+        let workspace = cx.observe_in(&projects, window, |this, _, window, cx| {
+            let paths = this.projects.read(cx).project_paths();
+            if paths != this.cache_projects {
+                this.caches = None;
+                this.cache_projects = paths;
+            }
+            if this.global_caches {
+                this.ensure_caches(window, cx);
+            }
             cx.notify();
         });
         let this = Self {
@@ -140,10 +155,20 @@ impl SettingsApp {
             focus,
             projects,
             global_caches: false,
-            _subscriptions: vec![bounds, appearance, roots],
+            caches: None,
+            cache_projects: vec![],
+            _subscriptions: vec![bounds, appearance, roots, workspace],
         };
         this.apply_theme(window, cx);
         this
+    }
+    fn ensure_caches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.caches.is_none() {
+            self.cache_projects = self.projects.read(cx).project_paths();
+            self.caches = Some(cx.new(|cx| {
+                GlobalCacheView::new(&self.config, self.cache_projects.clone(), window, cx)
+            }));
+        }
     }
     fn apply_theme(&self, window: &mut Window, cx: &mut App) {
         let dark = match self.config.theme {
@@ -244,7 +269,8 @@ impl Render for SettingsApp {
                                 Button::new("nav-global-caches")
                                     .label(strings.global_caches)
                                     .selected(self.global_caches)
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.ensure_caches(window, cx);
                                         this.global_caches = true;
                                         cx.notify();
                                     })),
@@ -256,7 +282,11 @@ impl Render for SettingsApp {
                             .min_w_0()
                             .min_h_0()
                             .child(if self.global_caches {
-                                render_global_cache_content(strings).into_any_element()
+                                self.caches
+                                    .as_ref()
+                                    .expect("cache navigation initializes view")
+                                    .clone()
+                                    .into_any_element()
                             } else {
                                 self.projects.clone().into_any_element()
                             }),
@@ -265,13 +295,6 @@ impl Render for SettingsApp {
     }
 }
 
-// Ticket 06 replaces this content seam with its independently owned cache view.
-fn render_global_cache_content(strings: &crate::i18n::Strings) -> impl IntoElement {
-    div()
-        .id("global-cache-content")
-        .test_support()
-        .child(strings.global_caches)
-}
 struct SettingsPanel {
     owner: Entity<SettingsApp>,
 }
@@ -307,6 +330,11 @@ impl Render for SettingsPanel {
                             owner.projects.update(cx, |projects, cx| {
                                 projects.set_language(owner.config.language, cx)
                             });
+                            if let Some(caches) = &owner.caches {
+                                caches.update(cx, |caches, cx| {
+                                    caches.set_language(owner.config.language, cx)
+                                });
+                            }
                             config::save_to(owner.path.clone(), &owner.config);
                             cx.notify();
                         });
@@ -374,6 +402,82 @@ mod tests {
     use crate::delete::DeleteMode;
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{AppContext, SharedString, TestAppContext, WindowOptions};
+
+    #[gpui_kit::test]
+    fn main_navigation_retains_cache_selection_and_updates_settings(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("payload"), [0; 4096]).unwrap();
+        cx.update(|cx| {
+            super::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    let mut app = super::SettingsApp::new(
+                        config::Config {
+                            language: LanguageChoice::En,
+                            ..Default::default()
+                        },
+                        Some(temp.path().join("config.toml")),
+                        window,
+                        cx,
+                    );
+                    // Real catalogue entry and filesystem measurement, without depending on host caches.
+                    app.caches = Some(cx.new(|cx| {
+                        crate::gpui_cache::GlobalCacheView::from_entries(
+                            vec![crate::cache::CacheEntry {
+                                rule: crate::cache::builtin_caches()
+                                    .iter()
+                                    .find(|rule| rule.id == "gradle.caches")
+                                    .unwrap(),
+                                path: Some(temp.path().to_path_buf()),
+                            }],
+                            None,
+                            LanguageChoice::En,
+                            window,
+                            cx,
+                        )
+                    }));
+                    app
+                })
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("nav-global-caches", cx);
+            assert_eq!(window.find("gradle.caches").checked(), Some(true));
+            window.click("gradle.caches", cx);
+            assert_eq!(window.find("gradle.caches").checked(), Some(false));
+            window.click("nav-projects", cx);
+            assert!(window.find("discovery-empty").visible());
+            window.click("nav-global-caches", cx);
+            assert_eq!(window.find("gradle.caches").checked(), Some(false));
+            window.click("settings", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.within("language").click(1usize, cx);
+            window.within("theme").click(2usize, cx);
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("cache-group-dependency").label(), Some("依赖"));
+            assert_eq!(window.find("gradle.caches").checked(), Some(false));
+            assert!(gpui_kit::component::Theme::global(cx).mode.is_dark());
+            window.click("nav-projects", cx);
+            window.click("nav-global-caches", cx);
+            assert_eq!(window.find("gradle.caches").checked(), Some(false));
+        })
+        .unwrap();
+    }
 
     #[gpui_kit::test]
     fn covered_root_survives_parent_removal_and_restart(cx: &mut TestAppContext) {
@@ -595,7 +699,7 @@ mod tests {
                     .visible()
             );
             window.click("nav-global-caches", cx);
-            assert!(window.find("global-cache-content").visible());
+            assert!(window.find("cache-progress").visible());
             window.click("nav-projects", cx);
             window.press("secondary-r", cx);
         })
