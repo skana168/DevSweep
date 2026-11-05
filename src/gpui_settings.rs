@@ -124,7 +124,9 @@ impl SettingsApp {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         let bounds = cx.observe_window_bounds(window, |this, window, _| {
-            let size = window.bounds().size;
+            // WindowOptions restores content dimensions; native bounds include the title bar.
+            // Persisting the outer frame makes macOS grow by a title-bar height each launch.
+            let size = window.viewport_size();
             this.config.window = Some(config::Window {
                 width: size.width.into(),
                 height: size.height.into(),
@@ -454,6 +456,271 @@ mod tests {
     use crate::delete::DeleteMode;
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{AppContext, SharedString, TestAppContext, WindowOptions};
+
+    #[gpui_kit::test]
+    fn settings_choices_remain_accessible_at_minimum_window_and_large_text(
+        cx: &mut TestAppContext,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config::Config {
+            language: LanguageChoice::En,
+            window: Some(config::Window {
+                width: 880.,
+                height: 560.,
+            }),
+            ..Default::default()
+        };
+        cx.update(|cx| {
+            super::init(cx);
+            cx.set_reduce_motion(true);
+            gpui_kit::component::Theme::update(cx, |theme| theme.font_size = gpui_kit::px(20.));
+        });
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(super::window_options(&config, cx), cx, |window, cx| {
+                cx.new(|cx| {
+                    super::SettingsApp::new(
+                        config,
+                        Some(temp.path().join("config.toml")),
+                        window,
+                        cx,
+                    )
+                })
+            })
+            .unwrap()
+        });
+        cx.simulate_window_scale_factor_change(handle, 1.5);
+        for language in [1usize, 2usize] {
+            cx.update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                let projects = window.find("nav-projects").bounds();
+                let caches = window.find("nav-global-caches").bounds();
+                assert_eq!(projects.left(), caches.left());
+                assert_eq!(projects.right(), caches.right());
+                for _ in 0..12 {
+                    if window.find("settings").focused() == Some(true) {
+                        break;
+                    }
+                    window.press("tab", cx);
+                }
+                assert_eq!(window.find("settings").focused(), Some(true));
+                window.press("space", cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.update_window(handle, |_, window, cx| {
+                window.within("language").click(language, cx);
+                for group in ["language", "theme", "delete-mode"] {
+                    for choice in 0..if group == "delete-mode" { 2 } else { 3 } {
+                        let control = window.within(group).find(choice);
+                        assert!(control.visible(), "{group}/{choice} must remain visible");
+                        assert!(control.bounds().right() <= window.viewport_size().width);
+                        assert!(control.bounds().bottom() <= window.viewport_size().height);
+                    }
+                }
+                window.within("theme").click(2usize, cx);
+                window.within("theme").click(1usize, cx);
+                window.within("theme").click(0usize, cx);
+                window.press("escape", cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                assert!(window.try_find("dialog").is_none());
+                assert_eq!(window.find("settings").focused(), Some(true));
+                window.press("space", cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.update_window(handle, |_, window, cx| {
+                assert_eq!(
+                    window.within("language").find(language).checked(),
+                    Some(true)
+                );
+                window.press("escape", cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+        }
+    }
+
+    #[gpui_kit::test]
+    async fn confirmation_preserves_filtered_selection_and_failure_keeps_list_usable_at_minimum_size(
+        cx: &mut TestAppContext,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for (name, marker, target) in [
+            ("alpha", "package.json", "node_modules"),
+            ("beta", "Cargo.toml", "target"),
+        ] {
+            let project = root.join(name);
+            std::fs::create_dir_all(project.join(target)).unwrap();
+            std::fs::write(project.join(marker), "{}").unwrap();
+            std::fs::write(project.join(target).join("payload"), [0; 512]).unwrap();
+        }
+        let config = config::Config {
+            roots: vec![root.clone()],
+            language: LanguageChoice::En,
+            window: Some(config::Window {
+                width: 880.,
+                height: 560.,
+            }),
+            ..Default::default()
+        };
+        cx.update(|cx| {
+            super::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(super::window_options(&config, cx), cx, |window, cx| {
+                cx.new(|cx| {
+                    super::SettingsApp::new(config, Some(root.join("config.toml")), window, cx)
+                })
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window
+                .within("project-list")
+                .within(SharedString::from(
+                    root.join("alpha").to_string_lossy().into_owned(),
+                ))
+                .click("project-check", cx);
+            window.click("filter-Rust", cx);
+            window
+                .within("project-list")
+                .within(SharedString::from(
+                    root.join("beta").to_string_lossy().into_owned(),
+                ))
+                .click("project-check", cx);
+            window.within("project-list").click(
+                SharedString::from(root.join("beta").to_string_lossy().into_owned()),
+                cx,
+            );
+            window.click("target-rust.target", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("project-selection").label(),
+                Some("2 projects selected")
+            );
+            let clean = window.find("clean-projects");
+            assert!(clean.visible());
+            assert!(clean.bounds().right() <= window.viewport_size().width);
+            assert!(clean.bounds().bottom() <= window.viewport_size().height);
+            window.click("clean-projects", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        // A new Project must not change the reviewed plan or its filtered selection.
+        std::fs::create_dir(root.join("gamma")).unwrap();
+        std::fs::write(root.join("gamma/Cargo.toml"), "{}").unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("execute-clean").visible());
+            window.click("nav-global-caches", cx);
+            assert!(window.try_find("cache-selection").is_none());
+            window.press("secondary-r", cx);
+            window.press("secondary-,", cx);
+            assert!(window.try_find("language").is_none());
+            assert!(window.find("execute-clean").visible());
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("execute-clean").is_none());
+            assert_eq!(window.find("project-list-region").focused(), Some(true));
+            assert_eq!(
+                window.find("project-results").label(),
+                Some("1 of 2 projects")
+            );
+            window.press("secondary-r", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("project-results").label(),
+                Some("2 of 3 projects")
+            );
+            assert_eq!(
+                window.find("project-selection").label(),
+                Some("2 projects selected")
+            );
+            window.click("filter-all", cx);
+            assert_eq!(
+                window.find("project-results").label(),
+                Some("3 of 3 projects")
+            );
+        })
+        .unwrap();
+        assert!(root.join("alpha/node_modules/payload").exists());
+        assert!(root.join("beta/target/payload").exists());
+        // POSIX permissions provide the deterministic execution Failure fixture on Unix.
+        #[cfg(unix)]
+        {
+            cx.update_window(handle, |_, window, cx| window.click("clean-projects", cx))
+                .unwrap();
+            cx.run_until_parked();
+            use std::os::unix::fs::PermissionsExt;
+            let locked = root.join("beta/target");
+            cx.update_window(handle, |_, window, cx| {
+                window.click("clean-mode-direct", cx);
+                std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+                window.click("execute-clean", cx);
+            })
+            .unwrap();
+            use gpui_kit::test::TestAppContextExt;
+            cx.wait_for(handle, std::time::Duration::from_secs(2), |window, _| {
+                window.try_find("show-clean-failures").is_some()
+            })
+            .await;
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+            cx.update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                assert!(
+                    window
+                        .find("clean-result")
+                        .label()
+                        .unwrap()
+                        .contains("Failure: 1")
+                );
+                assert!(
+                    window.find("project-list-region").bounds().size.height
+                        >= window.rem_size() * 6.,
+                    "the result and controls must leave room to navigate Project rows"
+                );
+                window.within("project-list").click(
+                    SharedString::from(root.join("alpha").to_string_lossy().into_owned()),
+                    cx,
+                );
+                window.press("down", cx);
+                assert!(
+                    window
+                        .within("project-list")
+                        .find(SharedString::from(
+                            root.join("beta").to_string_lossy().into_owned()
+                        ))
+                        .visible()
+                );
+                window.press("space", cx);
+                assert_eq!(
+                    window.find("project-selection").label(),
+                    Some("1 project selected")
+                );
+            })
+            .unwrap();
+        }
+    }
 
     #[gpui_kit::test]
     fn clean_shortcut_reviews_saved_mode_and_never_executes(cx: &mut TestAppContext) {
@@ -1015,7 +1282,7 @@ mod tests {
         });
         cx.update_window(reopened, |_, window, cx| {
             assert_eq!(
-                window.bounds().size,
+                window.viewport_size(),
                 gpui_kit::size(gpui_kit::px(1150.), gpui_kit::px(760.))
             );
             window.render_frame(cx);

@@ -1091,6 +1091,61 @@ mod tests {
             std::fs::read_to_string(&npm).unwrap(),
             "replaced by a file after confirmation"
         );
+
+        // Audit parity with egui: a large fixed cache needs a fresh acknowledgement.
+        // This runs inside the existing isolated catalogue subprocess, never the host cache.
+        let large = home.join(".gradle/caches");
+        std::fs::create_dir_all(&large).unwrap();
+        let payload = large.join("sparse");
+        std::fs::File::create(&payload)
+            .unwrap()
+            .set_len(crate::plan::LARGE_TARGET_BYTES + 1)
+            .unwrap();
+        let entries = cache::entries()
+            .into_iter()
+            .filter(|e| e.rule.id == "gradle.caches")
+            .collect();
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    GlobalCacheView::from_entries(entries, None, LanguageChoice::Zh, window, cx)
+                })
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        for attempt in 0..2 {
+            cx.update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                window.click("cache-clean", cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                assert_eq!(window.find("cache-large-ack").checked(), Some(false));
+                window.click("cache-execute", cx);
+                assert!(payload.exists());
+                assert_eq!(window.find("cache-large-ack").checked(), Some(false));
+                window.click("cache-large-ack", cx);
+                assert_eq!(window.find("cache-large-ack").checked(), Some(true));
+                if attempt == 0 {
+                    window.press("escape", cx);
+                } else {
+                    window.click("cache-mode-direct", cx);
+                    window.click("cache-execute", cx);
+                }
+            })
+            .unwrap();
+            cx.run_until_parked();
+        }
+        cx.wait_for(handle, std::time::Duration::from_secs(3), |window, _| {
+            window
+                .try_find("cache-clean-result")
+                .is_some_and(|r| r.label().is_some_and(|s| s.contains("缓存清理完成")))
+        })
+        .await;
+        assert!(!payload.exists());
     }
 
     #[gpui_kit::test]

@@ -27,6 +27,7 @@ struct Reviewed {
 pub(super) struct CacheClean {
     confirming: bool,
     checking: bool,
+    large_ack: bool,
     epoch: u64,
     mode: DeleteMode,
     reviewed: Vec<Reviewed>,
@@ -332,6 +333,21 @@ impl GlobalCacheView {
                         ))
                     })),
             )
+            .children(
+                self.clean
+                    .reviewed
+                    .iter()
+                    .any(|reviewed| reviewed.plan.items.iter().any(|item| item.large))
+                    .then(|| {
+                        Checkbox::new("cache-large-ack")
+                            .label(Lang::from_choice(self.language).strings().large_ack)
+                            .checked(self.clean.large_ack)
+                            .on_change(cx.listener(|this, checked, _, cx| {
+                                this.clean.large_ack = *checked;
+                                cx.notify();
+                            }))
+                    }),
+            )
             .child(
                 div()
                     .flex()
@@ -391,16 +407,26 @@ impl GlobalCacheView {
                 Button::new("cache-execute")
                     .danger()
                     .label(if en { "Clean" } else { "清理" })
-                    .disabled(self.clean.checking || self.clean.reviewed.is_empty())
+                    .disabled(!self.clean_ready())
                     .on_click(cx.listener(|this, _, window, cx| this.execute_clean(window, cx))),
             )
             .into_any_element()
+    }
+    fn clean_ready(&self) -> bool {
+        !self.clean.checking
+            && !self.clean.reviewed.is_empty()
+            && (self.clean.large_ack
+                || !self
+                    .clean
+                    .reviewed
+                    .iter()
+                    .any(|reviewed| reviewed.plan.items.iter().any(|item| item.large)))
     }
     fn execute_clean(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.clean.confirming
             || self.clean.checking
             || self.clean.running
-            || self.clean.reviewed.is_empty()
+            || !self.clean_ready()
         {
             return;
         }

@@ -13,6 +13,10 @@ use devsweep::go_cache::{
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 
+// Shell startup on a busy native test host can exceed one second. Keep the
+// deadline tests below short, but give ordinary fixture queries scheduling room.
+const FIXTURE_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+
 struct Fixture {
     _temp: tempfile::TempDir,
     root: PathBuf,
@@ -75,7 +79,7 @@ impl Fixture {
         }
         .execute_with_command(
             command,
-            Duration::from_secs(1),
+            FIXTURE_QUERY_TIMEOUT,
             DeleteMode::Direct,
             &AtomicBool::new(aborted),
             tx,
@@ -92,7 +96,7 @@ impl Fixture {
 fn discovers_and_measures_both_independent_custom_caches() {
     let fixture = Fixture::new();
     let snapshot =
-        discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
+        discover_with_command(fixture.command(), &fixture.context, FIXTURE_QUERY_TIMEOUT);
     let build = snapshot.entry("go.build").unwrap();
     let module = snapshot.entry("go.module").unwrap();
     assert_eq!(build.path.as_ref(), Some(&fixture.root.join("build 缓存")));
@@ -105,7 +109,7 @@ fn discovers_and_measures_both_independent_custom_caches() {
 fn confirmed_build_clean_rechecks_and_reports_the_removed_cache() {
     let fixture = Fixture::new();
     let confirmed =
-        discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
+        discover_with_command(fixture.command(), &fixture.context, FIXTURE_QUERY_TIMEOUT);
     let (tx, events) = mpsc::channel();
     let (checked_tx, checked) = mpsc::channel();
     let report = GoCacheClean {
@@ -115,7 +119,7 @@ fn confirmed_build_clean_rechecks_and_reports_the_removed_cache() {
     }
     .execute_with_command(
         fixture.command(),
-        Duration::from_secs(1),
+        FIXTURE_QUERY_TIMEOUT,
         DeleteMode::Direct,
         &AtomicBool::new(false),
         tx,
@@ -147,7 +151,7 @@ fn confirmed_module_clean_removes_readonly_dependencies_without_touching_link_ta
     fs::write(outside.join("keep.go"), b"keep").unwrap();
     std::os::unix::fs::symlink(&outside, fixture.root.join("modules/000-link")).unwrap();
     let confirmed =
-        discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
+        discover_with_command(fixture.command(), &fixture.context, FIXTURE_QUERY_TIMEOUT);
     let (tx, events) = mpsc::channel();
     let (checked_tx, checked) = mpsc::channel();
 
@@ -158,7 +162,7 @@ fn confirmed_module_clean_removes_readonly_dependencies_without_touching_link_ta
     }
     .execute_with_command(
         fixture.command(),
-        Duration::from_secs(1),
+        FIXTURE_QUERY_TIMEOUT,
         DeleteMode::Direct,
         &AtomicBool::new(false),
         tx,
@@ -187,7 +191,7 @@ fn confirmed_clean_rejects_a_new_path_without_deleting_either_cache() {
     ] {
         let fixture = Fixture::new();
         let confirmed =
-            discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
+            discover_with_command(fixture.command(), &fixture.context, FIXTURE_QUERY_TIMEOUT);
         let replacement = fixture.root.join("replacement");
         fs::create_dir(&replacement).unwrap();
         fs::write(replacement.join("keep"), b"new").unwrap();
@@ -214,7 +218,7 @@ fn confirmed_clean_never_falls_back_when_the_final_query_fails() {
     ] {
         let fixture = Fixture::new();
         let confirmed =
-            discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
+            discover_with_command(fixture.command(), &fixture.context, FIXTURE_QUERY_TIMEOUT);
         let (report, error) = fixture.clean(
             id,
             &confirmed,
@@ -238,7 +242,7 @@ fn cancelled_clean_finishes_without_deleting_the_confirmed_cache() {
     ] {
         let fixture = Fixture::new();
         let confirmed =
-            discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
+            discover_with_command(fixture.command(), &fixture.context, FIXTURE_QUERY_TIMEOUT);
         let (report, error) = fixture.clean(id, &confirmed, fixture.command(), true);
 
         assert_eq!(error, None);
@@ -261,7 +265,7 @@ fn a_partly_failed_module_clean_reports_zero_and_preserves_external_permissions(
     fs::set_permissions(&modules, fs::Permissions::from_mode(0o551)).unwrap();
     fs::set_permissions(&outside, fs::Permissions::from_mode(0o500)).unwrap();
     let confirmed =
-        discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
+        discover_with_command(fixture.command(), &fixture.context, FIXTURE_QUERY_TIMEOUT);
     fs::set_permissions(&fixture.root, fs::Permissions::from_mode(0o555)).unwrap();
 
     let (report, error) = fixture.clean("go.module", &confirmed, fixture.command(), false);
@@ -285,7 +289,7 @@ fn confirmed_module_clean_rejects_a_link_replacement_without_touching_its_target
     let modules = fixture.root.join("modules");
     let moved = fixture.root.join("moved-modules");
     let confirmed =
-        discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
+        discover_with_command(fixture.command(), &fixture.context, FIXTURE_QUERY_TIMEOUT);
     fs::rename(&modules, &moved).unwrap();
     std::os::unix::fs::symlink(&moved, &modules).unwrap();
 
@@ -305,7 +309,7 @@ fn a_partly_failed_build_clean_does_not_claim_the_whole_cache_size() {
     fs::create_dir(&blocked).unwrap();
     fs::write(blocked.join("keep"), b"blocked").unwrap();
     let confirmed =
-        discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
+        discover_with_command(fixture.command(), &fixture.context, FIXTURE_QUERY_TIMEOUT);
     fs::set_permissions(&blocked, fs::Permissions::from_mode(0o500)).unwrap();
     let (report, error) = fixture.clean("go.build", &confirmed, fixture.command(), false);
     fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
@@ -340,7 +344,7 @@ fn rejects_home_directory_even_when_go_reports_it_as_a_cache() {
     let fixture = Fixture::new();
     let mut command = fixture.command();
     command.env("FIXTURE_BUILD", &fixture.context.home);
-    let snapshot = discover_with_command(command, &fixture.context, Duration::from_secs(1));
+    let snapshot = discover_with_command(command, &fixture.context, FIXTURE_QUERY_TIMEOUT);
     assert!(snapshot.entry("go.build").unwrap().size.is_err());
     assert_eq!(snapshot.entry("go.module").unwrap().size, Ok(6));
 }
@@ -362,7 +366,7 @@ fn rejects_scan_root_ancestors_and_project_or_cache_overlap_in_either_direction(
                 .push(build.join("not-created-yet")),
         }
         let snapshot =
-            discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
+            discover_with_command(fixture.command(), &fixture.context, FIXTURE_QUERY_TIMEOUT);
         assert!(
             snapshot.entry("go.build").unwrap().size.is_err(),
             "case {case}"
@@ -374,7 +378,7 @@ fn rejects_scan_root_ancestors_and_project_or_cache_overlap_in_either_direction(
     fs::create_dir(&nested).unwrap();
     let mut command = fixture.command();
     command.env("FIXTURE_MODULE", nested);
-    let snapshot = discover_with_command(command, &fixture.context, Duration::from_secs(1));
+    let snapshot = discover_with_command(command, &fixture.context, FIXTURE_QUERY_TIMEOUT);
     assert!(snapshot.entries.iter().all(|entry| entry.size.is_err()));
 }
 
@@ -388,7 +392,7 @@ fn rejects_cache_root_links_and_links_in_their_ancestors() {
     for path in [alias, ancestor.join("build 缓存")] {
         let mut command = fixture.command();
         command.env("FIXTURE_BUILD", path);
-        let snapshot = discover_with_command(command, &fixture.context, Duration::from_secs(1));
+        let snapshot = discover_with_command(command, &fixture.context, FIXTURE_QUERY_TIMEOUT);
         assert!(snapshot.entry("go.build").unwrap().size.is_err());
         assert_eq!(snapshot.entry("go.module").unwrap().size, Ok(6));
     }
@@ -401,7 +405,7 @@ fn query_errors_and_missing_or_disabled_caches_have_distinct_states() {
     let snapshot = discover_with_command(
         Command::new(fixture.root.join("no-go")),
         &fixture.context,
-        Duration::from_secs(1),
+        FIXTURE_QUERY_TIMEOUT,
     );
     assert!(
         snapshot
@@ -411,7 +415,7 @@ fn query_errors_and_missing_or_disabled_caches_have_distinct_states() {
     );
     fs::write(&fixture.go, "#!/bin/sh\nexit 3\n").unwrap();
     let snapshot =
-        discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
+        discover_with_command(fixture.command(), &fixture.context, FIXTURE_QUERY_TIMEOUT);
     assert!(
         snapshot
             .entries
@@ -420,7 +424,7 @@ fn query_errors_and_missing_or_disabled_caches_have_distinct_states() {
     );
     fs::write(&fixture.go, "#!/bin/sh\nprintf 'unexpected output\\n'\n").unwrap();
     let snapshot =
-        discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
+        discover_with_command(fixture.command(), &fixture.context, FIXTURE_QUERY_TIMEOUT);
     assert!(
         snapshot
             .entries
@@ -436,7 +440,7 @@ fn query_errors_and_missing_or_disabled_caches_have_distinct_states() {
     command
         .env("FIXTURE_BUILD", "off")
         .env("FIXTURE_MODULE", fixture.root.join("missing"));
-    let snapshot = discover_with_command(command, &fixture.context, Duration::from_secs(1));
+    let snapshot = discover_with_command(command, &fixture.context, FIXTURE_QUERY_TIMEOUT);
     assert_eq!(
         snapshot.entry("go.build").unwrap().size,
         Err(GoCacheError::Disabled)
@@ -455,7 +459,7 @@ fn measurement_does_not_follow_internal_links() {
     fs::write(outside.join("large"), vec![0; 100_000]).unwrap();
     std::os::unix::fs::symlink(&outside, fixture.root.join("build 缓存/external")).unwrap();
     let snapshot =
-        discover_with_command(fixture.command(), &fixture.context, Duration::from_secs(1));
+        discover_with_command(fixture.command(), &fixture.context, FIXTURE_QUERY_TIMEOUT);
     assert_eq!(snapshot.entry("go.build").unwrap().size, Ok(5));
     assert_eq!(fs::metadata(outside.join("large")).unwrap().len(), 100_000);
 }

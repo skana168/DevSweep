@@ -58,6 +58,7 @@ pub(crate) struct ProjectDiscovery {
     summary_epoch: u64,
     summary_task: Option<Task<()>>,
     clean_requested: bool,
+    clean_large_ack: bool,
     clean: Option<ProjectClean>,
     clean_refresh: crate::refresh::Refresh,
     execution: Option<ProjectExecution>,
@@ -114,6 +115,7 @@ impl ProjectDiscovery {
             summary_epoch: 0,
             summary_task: None,
             clean_requested: false,
+            clean_large_ack: false,
             clean: None,
             clean_refresh: crate::refresh::Refresh::default(),
             execution: None,
@@ -864,7 +866,7 @@ impl Render for ProjectDiscovery {
                     .flex_col()
                     .gap_3()
                     .max_h(relative(0.5))
-                    .flex_shrink_0()
+                    .min_h_0()
                     .overflow_y_scroll()
                     .child(
                         div()
@@ -1116,7 +1118,9 @@ impl Render for ProjectDiscovery {
                     )
             }))
             .child(
-                div().flex_1().min_h_0().min_w_0().child(
+                // Keep a navigable row visible when controls and execution feedback grow.
+                // The controls scroll and shrink before the primary workspace does.
+                div().flex_1().min_h_24().min_w_0().child(
                     h_resizable("project-split")
                         .with_state(&self.split)
                         .child(
@@ -1194,6 +1198,75 @@ mod tests {
     use crate::config::LanguageChoice;
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{AppContext, TestAppContext, WindowOptions};
+
+    #[gpui_kit::test]
+    async fn large_project_plan_requires_fresh_acknowledgement_before_execute(
+        cx: &mut TestAppContext,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::write(root.join("package.json"), "{}").unwrap();
+        std::fs::create_dir(root.join("node_modules")).unwrap();
+        let payload = root.join("node_modules/sparse");
+        std::fs::File::create(&payload)
+            .unwrap()
+            .set_len(crate::plan::LARGE_TARGET_BYTES + 1)
+            .unwrap();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    ProjectDiscovery::new(vec![root.clone()], LanguageChoice::En, window, cx)
+                })
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window
+                .within("project-list")
+                .within(gpui_kit::SharedString::from(
+                    root.to_string_lossy().into_owned(),
+                ))
+                .click("project-check", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        for attempt in 0..2 {
+            cx.update_window(handle, |_, window, cx| window.click("clean-projects", cx))
+                .unwrap();
+            cx.run_until_parked();
+            cx.update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                assert_eq!(window.find("clean-large-ack").checked(), Some(false));
+                window.click("execute-clean", cx);
+                assert!(payload.exists());
+                assert_eq!(window.find("clean-large-ack").checked(), Some(false));
+                window.click("clean-large-ack", cx);
+                assert_eq!(window.find("clean-large-ack").checked(), Some(true));
+                if attempt == 0 {
+                    window.press("escape", cx);
+                } else {
+                    window.click("clean-mode-direct", cx);
+                    window.click("execute-clean", cx);
+                }
+            })
+            .unwrap();
+            cx.run_until_parked();
+        }
+        use gpui_kit::test::TestAppContextExt;
+        cx.wait_for(handle, std::time::Duration::from_secs(2), |window, _| {
+            window
+                .try_find("clean-result")
+                .is_some_and(|r| r.label().is_some_and(|s| s.contains("Clean finished")))
+        })
+        .await;
+        assert!(!payload.exists());
+    }
 
     #[cfg(unix)]
     #[gpui_kit::test]

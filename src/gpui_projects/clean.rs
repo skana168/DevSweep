@@ -19,6 +19,7 @@ impl ProjectDiscovery {
         self.clean_epoch += 1;
         let epoch = self.clean_epoch;
         self.clean_mode = self.default_mode;
+        self.clean_large_ack = false;
         self.execution = None;
         let mut clean = ProjectClean::batch(
             self.model
@@ -82,6 +83,12 @@ impl ProjectDiscovery {
         self.run_queued_refresh(cx);
         cx.notify();
     }
+    fn clean_ready(&self) -> bool {
+        self.clean.as_ref().is_some_and(|clean| {
+            clean.locked()
+                && (self.clean_large_ack || !clean.plan.items.iter().any(|item| item.large))
+        })
+    }
     fn execute_clean(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self
             .execution
@@ -90,7 +97,7 @@ impl ProjectDiscovery {
         {
             return;
         }
-        if !self.clean.as_ref().is_some_and(ProjectClean::locked) {
+        if !self.clean_ready() {
             return;
         }
         let clean = self.clean.take().expect("reviewed draft");
@@ -212,6 +219,21 @@ impl ProjectDiscovery {
                 }
             }
         }
+        if self
+            .clean
+            .as_ref()
+            .is_some_and(|clean| clean.plan.items.iter().any(|item| item.large))
+        {
+            body = body.child(
+                Checkbox::new("clean-large-ack")
+                    .label(strings.large_ack)
+                    .checked(self.clean_large_ack)
+                    .on_change(cx.listener(|this, checked, _, cx| {
+                        this.clean_large_ack = *checked;
+                        cx.notify();
+                    })),
+            );
+        }
         let consequence = match (en, self.clean_mode) {
             (true, DeleteMode::Trash) => "Targets will move to Trash and can be recovered.",
             (false, DeleteMode::Trash) => "清理项将移入废纸篓或回收站，可恢复。",
@@ -263,7 +285,7 @@ impl ProjectDiscovery {
     }
     fn render_confirmation_actions(&self, cx: &mut Context<Self>) -> AnyElement {
         let en = Lang::from_choice(self.language) == Lang::En;
-        let ready = self.clean.as_ref().is_some_and(ProjectClean::locked);
+        let ready = self.clean_ready();
         div()
             .flex()
             .justify_end()
