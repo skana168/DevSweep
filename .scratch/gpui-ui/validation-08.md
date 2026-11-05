@@ -154,3 +154,28 @@ Cargo 均复用 `CARGO_TARGET_DIR=/Users/yoyun/DevSweep/target`。磁盘从约 5
 - `cargo fmt --check`、`git diff --check`：通过。提交遵循 git-commit skill，最终 SHA 为包含本节的提交。
 
 上述仅解决两项本地 P2 实现及自动化覆盖问题。**Windows 编译/原生流程、macOS 原生大计划滚动/响应性及权限恢复、真实 Go/Unity、系统 Trash 成功/恢复，以及既有平台/设计接受条件均继续未通过**；没有新原生操作或像素证据，4 个 ignored 不计成功。08 保持 `ready-for-human`，未勾选的平台/设计验收框保持不变，保留 egui，不开始 09。
+
+
+## 2026-11-05 — P2 最终集成复核与清理清单
+
+- 集成基线 `86d8a9c7501bbabb853861ea831369e335b97a10` 是 `ace29721c33a5193cf02fcd6cb5e4cc1572fd696` 的祖先；`integration/gpui-ui` 通过 `git merge --ff-only ace29721c33a5193cf02fcd6cb5e4cc1572fd696` 无冲突集成，无额外实现修改。本节所在后续文档提交为最终集成 HEAD。
+- Code-review findings 状态：**fixed**。P2 固定缓存 Failed 不恢复已由刷新重新后台测量修复；P2 确认计划 eager 渲染已由 Target/Skip 共用虚拟列表修复。两项对应生产 GPUI 回归在集成 checkout 复跑均通过；此状态仅指这两项实现问题，不代表平台接受验证通过。
+- `cargo fmt --check`、`git diff --check` 退出 0。复用共享 target，`cargo test --locked --features gpui-tests activation_defers_cache_refresh_until_cancel_and_remeasures_recreated_cache -- --test-threads=1` 和 `cargo test --locked --features gpui-tests large_confirmation_bounds_target_and_skip_rendering_and_preserves_selection -- --test-threads=1` 各 1 passed / 0 failed；日志 `/tmp/gpui-p2-integration-cache.log`、`/tmp/gpui-p2-integration-plan.log`。本轮不重复全量；238 passed / 4 ignored、30 个 GPUI 测试、Clippy 和 macOS bins 构建均为上一节源分支证据。既有 block 0.1.6 future-incompat 警告仍在。
+- 剩余精确 gates：Windows 编译及项目/全局缓存完整原生流程与回收站恢复、占用/权限/长路径；macOS 原生 activation 与缓存/Go 联动、大计划滚动/响应性、Direct 成功/权限恢复、隔离全局执行/中止/失败恢复、大体积缓存确认；系统 Trash 成功/恢复及只读 Go module 恢复、真实 Go/Unity；真实长任务/中止边界；完整主题/语言/最小窗口/缩放/键盘/焦点/剪贴板/OS 外观/IME/reduced motion 设计矩阵。4 个 ignored 不计通过。08 保持 ready-for-human、不 resolved；保留 egui/默认入口，不开始 09。
+- 清理候选已逐个核实：以下 10 个任务工作树均 clean，其 HEAD 及全部祖先均可达集成 HEAD，关联分支可交由父代理使用 orchestrator lifecycle 清理；本轮未删除。公共前缀 `/Users/yoyun/.t3/worktrees/DevSweep/`：
+
+| 工作树目录 | 分支 |
+| --- | --- |
+| t3-0d233a82 | t3/gpui-cache-clean |
+| t3-19c698cc | t3/gpui-project-discovery |
+| t3-1b2df80c | t3/gpui-cache-retry-virtualized-plan |
+| t3-2bcbdc36 | t3/global-cache-selection |
+| t3-59eb2508 | t3/gpui-activation-stale-refresh |
+| t3-b87ccada | t3/project-measurement |
+| t3-bc53e485 | t3/gpui-project-selection |
+| t3-d823d4c4 | t3/gpui-settings-ui |
+| t3-e44152ae | t3/gpui-cross-platform-verification |
+| t3-f0dafb3e | t3/implement-project-clean |
+
+- 上表为完整任务清单；集成 checkout 因原有 `skills-lock.json` 修改和未跟踪 `.claude/` 并非 clean，不是清理候选。`main` 虽已可达，也不是本任务清理对象。清理前父代理应再次核实 clean/可达状态，防止后续并发改动。
+- 无 children、stash/reset/rewrite、push/PR。仅按 git-commit skill 提交本集成证据，原有 skills-lock.json 与 .claude/ 不纳入提交。
