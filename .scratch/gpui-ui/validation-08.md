@@ -118,3 +118,12 @@
 本节补齐的是此前报告第 82 行所列本地实现/自动化缺口。**原生 macOS 窗口的失焦/重新激活、真实 Go 环境、Windows 编译与全流程、系统 Trash 成功/恢复以及原报告其余平台/设计矩阵接受条件仍未验证**。4 个 ignored 仍不算通过。未操控原生用户配置或真实缓存，08 保持 `ready-for-human`，不勾选平台验收项，不切换/移除 egui，不开始 09。
 
 提交前复核：`git merge integration/gpui-ui` 返回 `Already up to date.`，集成 tip 仍为指定 `9fd66c27d8b8af3db1c074b6548625623b4a6026`。最后补充释放 activation 队列时复用已排队/正在运行的手动项目 Refresh，避免清理取消时追加一次发现；最终生产代码另跑 `cargo test --locked --features gpui-tests gpui_ -- --test-threads=1`，29 passed / 0 failed，日志 `/tmp/activation-final-gpui.log`；生产严格 Clippy、bins 构建、fmt/diff 复核通过。完整 237/4/0 为上述全量运行记录，末次 GPUI 专项覆盖最终 GPUI 改动。按 git-commit skill 提交，最终 SHA 由包含本节的提交确定；无 push/PR。
+
+
+## 2026-11-05 — 激活刷新集成复核
+
+- 集成分支 `integration/gpui-ui` 核实 `9fd66c27d8b8af3db1c074b6548625623b4a6026` 为指定实施提交 `78778b9f98a7e64b81c26faa09d15fb9d9ba5749` 的祖先后，`git merge --ff-only` 成功，无冲突、无额外实现修改。源工作树及其他工作树保留。
+- 集成后 `cargo fmt --check`、`git diff --check` 通过；`CARGO_TARGET_DIR=/Users/yoyun/DevSweep/target cargo test --locked --features gpui-tests gpui_ -- --test-threads=1` 退出 0，29 个 GPUI 测试全部通过，包含前台激活时效及缓存确认延迟刷新/重建测量。日志 `/tmp/gpui-activation-integration-gpui.log`。
+- 同环境运行 `cargo test --locked --features gpui-tests --test activation_refresh --test refresh_lifecycle -- --test-threads=1` 退出 0，公开激活时效测试 2/2、刷新生命周期测试 14/14 通过。日志 `/tmp/gpui-activation-integration-refresh.log`。本轮未重复完整套件；237 passed / 4 ignored、生产严格 Clippy 和 macOS bins 构建为上节源分支证据，既有 block future-incompat 警告仍在。
+- 本地 activation 实现/自动化缺口已补齐；仍需真实 macOS 失焦/切回与 Go/缓存联动验收。Windows 编译和同等原生完整流程、系统 Trash 成功/恢复、真实 Go/Unity、原生 Direct/权限恢复、隔离全局执行/中止/失败恢复、真实长任务/大计划及完整主题/语言/缩放/焦点/剪贴板/OS 外观/IME/reduced motion 设计矩阵仍未通过；4 个 ignored 不计成功。沿用本报告逐项接受条件。
+- 08 保持 `ready-for-human`，未完成框不勾选，保留 egui 与默认入口，不开始 09。无 children、stash/reset/rewrite、push/PR；原有 `skills-lock.json` 和 `.claude/` 保持未提交。使用 git-commit skill 仅提交集成证据。
