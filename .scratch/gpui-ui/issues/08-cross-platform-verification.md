@@ -15,3 +15,12 @@
 ## 实施约定
 
 遵循已确认的 GPUI UI 迁移规格与 ADR-0003。遇到 GPUI 用法或设计疑问，查阅已安装的 gpui-kit 与 gpui-kit-design-guides skills，并核实当前版本 API。沿用领域词汇表，保持现有安全语义。
+
+
+## Comments
+
+### 2026-11-05 — 07 集成后验收准备
+
+- `integration/gpui-ui` 已 fast-forward 合入 07 实施提交 `3fd233a84881434c70049ac9b798ed2f3ad10bed`；05/07 的项目和全局缓存清理流程现已共同位于集成分支，可开始本票跨流程验收。详见 [07 集成证据](07-global-cache-clean.md)。
+- 集成后 fmt/diff 检查通过；缓存 GPUI UI integration tests 8/8、主壳/设置 GPUI UI integration tests 7/7 通过。完整套件此前记录为 230 passed、4 ignored、0 failed，末次 GPUI 回归 24/24；这些为既有实施证据，本轮仅复跑上述相关测试。
+- 本票全部验收框保持未勾选。仍需 macOS 真实窗口视觉/主题/语言/缩放/长路径/键盘与焦点/剪贴板、系统 Trash、长任务进度及中止、真实 Go 环境，以及 Windows 编译和同等完整流程与回收站/权限/占用失败验证。自动化不能代替这些接受验证；未验证场景继续阻止切换，保留 egui。

@@ -47,3 +47,12 @@
 - [ ] macOS 系统 Trash、真实长目录进度/中止及完整缓存清理原生流程。
 - [ ] Windows 编译/运行、回收站/Direct、占用/权限失败、焦点/剪贴板及同样完整流程。
 - [ ] 双平台真实 Go 安装、环境配置变化及只读 module 系统 Trash 恢复的原生接受验证。
+
+
+### 2026-11-05 — integration/gpui-ui 集成证据
+
+- 已核实 `t3/gpui-cache-clean` 指向 `3fd233a84881434c70049ac9b798ed2f3ad10bed`，原集成 HEAD `2862e55dc30dadd25f779c78c2a7d15e89b97375` 为其祖先；`git merge --ff-only 3fd233a84881434c70049ac9b798ed2f3ad10bed` 成功，无合并冲突或新 merge commit。
+- 合入后 `cargo fmt --all -- --check`、`git diff --check` 通过；`cargo test --lib --features gpui-tests --locked gpui_cache:: -- --test-threads=1` 为 8 passed、0 failed，覆盖确认取消/焦点恢复、固定缓存执行/失败复制/重试、Go 重检期间中止及重复提交保护。
+- 合入后 `cargo test --lib --features gpui-tests --locked gpui_settings:: -- --test-threads=1` 为 7 passed、0 failed，包含缓存导航状态/设置同步和清理快捷键确认入口回归。沿用上方已记录的完整套件证据，本轮不重复全套；既有 `block 0.1.6` future-incompat warning 仍存在。
+- 07 的实现和自动化证据已在集成分支，可供 08 开始跨流程及双平台验收。未修改 Status 或尚未勾选的原生验收项；macOS 原生视觉、系统 Trash、真实环境 Go 和 Windows 接受验证仍待执行，不代表通过，不允许据此移除 egui 或切换默认入口。
+- 无 push/PR、stash/reset 或历史改写；保留无关 `skills-lock.json` 修改、未跟踪 `.claude/` 及现有工作树供后续清理。
