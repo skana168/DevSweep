@@ -13,3 +13,6 @@ pub mod rules;
 pub mod scan;
 pub mod size;
 pub mod unity;
+
+#[cfg(feature = "gpui")]
+mod gpui_projects;

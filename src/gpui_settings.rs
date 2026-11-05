@@ -2,10 +2,11 @@
 use crate::{
     config::{self, Config, LanguageChoice, ThemeChoice},
     delete::DeleteMode,
+    gpui_projects::{ProjectDiscovery, RefreshProjects, RootsChanged},
     i18n::Lang,
 };
 use gpui_kit::component::{
-    ActiveTheme, IconName, Theme, ThemeMode, WindowExt,
+    ActiveTheme, IconName, Selectable, Theme, ThemeMode, WindowExt,
     button::Button,
     radio::{Radio, RadioGroup},
 };
@@ -35,6 +36,7 @@ impl AssetSource for BrandAssets {
 fn init(cx: &mut App) {
     gpui_kit::init(cx);
     cx.bind_keys([
+        KeyBinding::new("secondary-r", RefreshProjects, Some("DevSweep")),
         KeyBinding::new("secondary-,", OpenSettings, Some("DevSweep")),
         KeyBinding::new("secondary-q", Quit, None),
     ]);
@@ -102,6 +104,8 @@ struct SettingsApp {
     config: Config,
     path: Option<PathBuf>,
     focus: FocusHandle,
+    projects: Entity<ProjectDiscovery>,
+    global_caches: bool,
     _subscriptions: Vec<Subscription>,
 }
 impl SettingsApp {
@@ -123,11 +127,20 @@ impl SettingsApp {
         });
         let appearance =
             cx.observe_window_appearance(window, |this, window, cx| this.apply_theme(window, cx));
+        let projects =
+            cx.new(|cx| ProjectDiscovery::new(config.roots.clone(), config.language, window, cx));
+        let roots = cx.subscribe(&projects, |this, _, event: &RootsChanged, cx| {
+            this.config.roots = event.0.clone();
+            config::save_to(this.path.clone(), &this.config);
+            cx.notify();
+        });
         let this = Self {
             config,
             path,
             focus,
-            _subscriptions: vec![bounds, appearance],
+            projects,
+            global_caches: false,
+            _subscriptions: vec![bounds, appearance, roots],
         };
         this.apply_theme(window, cx);
         this
@@ -174,6 +187,12 @@ impl Render for SettingsApp {
             .track_focus(&self.focus)
             .key_context("DevSweep")
             .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(|this, _: &RefreshProjects, _, cx| {
+                if !this.global_caches {
+                    this.projects
+                        .update(cx, |projects, cx| projects.refresh(cx));
+                }
+            }))
             .size_full()
             .flex()
             .flex_col()
@@ -197,7 +216,61 @@ impl Render for SettingsApp {
                             })),
                     ),
             )
+            .child(
+                div()
+                    .flex()
+                    .items_stretch()
+                    .flex_1()
+                    .min_h_0()
+                    .gap_4()
+                    .child(
+                        div()
+                            .w_48()
+                            .min_w_48()
+                            .max_w_64()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                Button::new("nav-projects")
+                                    .label(strings.projects)
+                                    .selected(!self.global_caches)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.global_caches = false;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("nav-global-caches")
+                                    .label(strings.global_caches)
+                                    .selected(self.global_caches)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.global_caches = true;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .child(if self.global_caches {
+                                render_global_cache_content(strings).into_any_element()
+                            } else {
+                                self.projects.clone().into_any_element()
+                            }),
+                    ),
+            )
     }
+}
+
+// Ticket 06 replaces this content seam with its independently owned cache view.
+fn render_global_cache_content(strings: &crate::i18n::Strings) -> impl IntoElement {
+    div()
+        .id("global-cache-content")
+        .test_support()
+        .child(strings.global_caches)
 }
 struct SettingsPanel {
     owner: Entity<SettingsApp>,
@@ -231,6 +304,9 @@ impl Render for SettingsPanel {
                                 LanguageChoice::Zh,
                                 LanguageChoice::En,
                             ][*ix];
+                            owner.projects.update(cx, |projects, cx| {
+                                projects.set_language(owner.config.language, cx)
+                            });
                             config::save_to(owner.path.clone(), &owner.config);
                             cx.notify();
                         });
@@ -297,7 +373,244 @@ mod tests {
     use crate::config::{self, LanguageChoice, ThemeChoice};
     use crate::delete::DeleteMode;
     use gpui_kit::test::TestWindowExt;
-    use gpui_kit::{AppContext, TestAppContext, WindowOptions};
+    use gpui_kit::{AppContext, SharedString, TestAppContext, WindowOptions};
+
+    #[gpui_kit::test]
+    fn covered_root_survives_parent_removal_and_restart(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("parent");
+        let child = parent.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(parent.join("package.json"), "{}").unwrap();
+        std::fs::write(child.join("Cargo.toml"), "").unwrap();
+        let child = child.canonicalize().unwrap();
+        let path = Some(temp.path().join("config.toml"));
+        let config = config::Config {
+            roots: vec![child.clone()],
+            language: LanguageChoice::En,
+            ..Default::default()
+        };
+        cx.update(|cx| {
+            super::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(super::window_options(&config, cx), cx, |window, cx| {
+                cx.new(|cx| super::SettingsApp::new(config, path.clone(), window, cx))
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("discovery-status").label(), Some("Projects: 1"));
+            window.click("scan-root-path", cx);
+            window.input(parent.to_str().unwrap(), cx);
+            window.click("add-scan-root", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let parent = parent.canonicalize().unwrap();
+        assert_eq!(
+            config::load_from(path.clone()).roots,
+            vec![child.clone(), parent.clone()]
+        );
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("discovery-status").label(), Some("Projects: 2"));
+            assert!(
+                window
+                    .find(SharedString::from(format!(
+                        "covered-root:{}",
+                        child.display()
+                    )))
+                    .visible()
+            );
+            window.within("scan-roots").click(
+                SharedString::from(parent.to_string_lossy().into_owned()),
+                cx,
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let restored = config::load_from(path.clone());
+        assert_eq!(restored.roots, vec![child.clone()]);
+        let (reopened, _) = cx.update(|cx| {
+            gpui_kit::open_window(super::window_options(&restored, cx), cx, |window, cx| {
+                cx.new(|cx| super::SettingsApp::new(restored, path, window, cx))
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(reopened, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("discovery-status").label(), Some("Projects: 1"));
+            assert!(
+                window
+                    .within("project-list")
+                    .find(SharedString::from(child.to_string_lossy().into_owned()))
+                    .visible()
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn discovery_failure_can_be_copied_and_refresh_recovers_without_blocking_settings(
+        cx: &mut TestAppContext,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing");
+        let path = Some(temp.path().join("config.toml"));
+        cx.update(|cx| {
+            super::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let config = config::Config {
+            roots: vec![missing.clone()],
+            language: LanguageChoice::En,
+            ..Default::default()
+        };
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(super::window_options(&config, cx), cx, |window, cx| {
+                cx.new(|cx| super::SettingsApp::new(config, path.clone(), window, cx))
+            })
+            .unwrap()
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("settings", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("dialog").visible());
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("discovery-errors").visible());
+            assert!(window.try_find("discovery-empty").is_none());
+            window.click("copy-discovery-errors", cx);
+            assert!(
+                cx.read_from_clipboard()
+                    .unwrap()
+                    .text()
+                    .unwrap()
+                    .contains("missing")
+            );
+        })
+        .unwrap();
+        std::fs::create_dir(&missing).unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.press("secondary-r", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("discovery-errors").is_none());
+            assert!(window.find("discovery-empty").visible());
+        })
+        .unwrap();
+        std::fs::write(missing.join("package.json"), "{}").unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.click("refresh-projects", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("discovery-status").label(), Some("Projects: 1"));
+            assert!(
+                window
+                    .within("project-list")
+                    .find(SharedString::from(
+                        missing
+                            .canonicalize()
+                            .unwrap()
+                            .to_string_lossy()
+                            .into_owned()
+                    ))
+                    .visible()
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn project_roots_discover_refresh_and_persist_through_real_controls(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("中文项目");
+        std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname='demo'\n").unwrap();
+        let path = Some(temp.path().join("config.toml"));
+        cx.update(|cx| {
+            super::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    super::SettingsApp::new(config::Config::default(), path.clone(), window, cx)
+                })
+            })
+            .unwrap()
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("discovery-empty").visible());
+            window.click("scan-root-path", cx);
+            window.input(root.to_str().unwrap(), cx);
+            window.press("tab", cx);
+            assert_eq!(window.find("add-scan-root").focused(), Some(true));
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(config::load_from(path.clone()).roots, vec![root.clone()]);
+        cx.update_window(handle, |_, window, cx| {
+            window.click("add-scan-root", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(config::load_from(path.clone()).roots, vec![root.clone()]);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("duplicate-root").visible());
+        })
+        .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window
+                    .within("project-list")
+                    .find(SharedString::from(
+                        root.canonicalize().unwrap().to_string_lossy().into_owned()
+                    ))
+                    .visible()
+            );
+            window.click("nav-global-caches", cx);
+            assert!(window.find("global-cache-content").visible());
+            window.click("nav-projects", cx);
+            window.press("secondary-r", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window
+                .within("scan-roots")
+                .click(SharedString::from(root.to_string_lossy().into_owned()), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(config::load_from(path).roots.is_empty());
+    }
 
     #[gpui_kit::test]
     fn settings_changes_survive_restart_and_escape_restores_focus(cx: &mut TestAppContext) {
