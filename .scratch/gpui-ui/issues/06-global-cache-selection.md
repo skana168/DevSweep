@@ -15,3 +15,19 @@
 ## 实施约定
 
 遵循已确认的 GPUI UI 迁移规格与 ADR-0003。遇到 GPUI 用法或设计疑问，查阅已安装的 gpui-kit 与 gpui-kit-design-guides skills，并核实当前版本 API。沿用领域词汇表，保持现有安全语义。
+
+## Comments
+
+### 2026-11-05 — 独立缓存实体实现与自动化证据（待主壳集成 / 平台验收）
+
+- 开始前确认准备好的 `t3/global-cache-selection` 工作树干净，HEAD 与 `integration/gpui-ui` 均为 `1839078ddb89e7751d318e29aec41a685096b53e`。没有创建 checkout、子代理、push 或 PR。完成前执行 `git merge --no-edit integration/gpui-ui`，返回 Already up to date。
+- 按 TDD、host 路径的 gpui-kit / gpui-kit-design-guides 和当前 0.7.0 依赖源码实现。CodeGraph 首次尝试 `codegraph explore` 报告工作树没有可用索引，之后使用源码检索，未创建索引。未修改依赖版本或 Cargo.lock。
+- `src/gpui_cache.rs` 的 `GlobalCacheView` 独立持有固定清单、后台任务、逐条结果、焦点、滚动和选择草稿。静态路径复用 `cache::entries`，Go 复用 `go_cache::discover` 及扫描根 / 项目 / 其它缓存保护上下文；没有引入项目 Rule，也没有删除、计划或执行入口。普通目录复用 `size::dir_size`，未知、缺失、非目录和不可读状态不显示为零；完成计数来自真实返回结果，失败也计入已完成。
+- 按既有 Cache group 展示；普通条目成功测量后默认选择，危险 Go module / Cargo registry 必须主动选择。显示重新下载、Rust 构建影响、Go module 丢失手工修改与离线构建风险、Go build 重建代价。已选范围与字节汇总固定在底部；小于 MB 的体积使用真实 B 数，避免用破折号掩盖零或小缓存。
+- 鼠标 Checkbox、Tab/Space、上下方向键、Home/End；方向键滚动至目标行，焦点与勾选分开。长路径截断且有 Kit 图标的可聚焦“复制路径”按钮，能取得完整 Unicode 路径。语义主题和 rem 布局继承现有 Kit 配置。
+- 未修改 02 所属 SettingsApp / 共享 shell。`cargo run --bin devsweep-gpui-cache --features gpui --locked` 是独立 opt-in 演示窗口，读取相同 Config 的语言、主题、窗口尺寸和扫描根；不写配置。共享壳接入、实体保留/重建、语言更新以及 07 清理重检接口说明在 `docs/gpui-global-cache.md`。默认 egui 与现有 GPUI 设置入口保留。
+- TDD 红→绿证据：首个真实 Checkbox 流程先因缺少 GlobalCacheView 编译失败；随后缺失/非目录与加载状态测试先因缺少进度目标失败；分组/放大/路径复制先因缺少分组目标失败；空状态先因缺少空状态目标失败；Cargo 明确重新下载提示先因缺少风险目标失败，再逐片实现通过。链接兼容测试起初错误假设根链接不遍历，实查既有公开 API 后修正夹具与预期，保留原行为，未更改业务 API。
+- 最终 5 个 GPUI UI integration tests 使用生产实体、真实 Kit 组件和临时文件系统，通过正常鼠标/键盘事件验证：`real_cache_checkboxes_keep_danger_opt_in_and_report_selected_bytes`（4096 B × 2 的选择汇总、危险默认和风险文案、鼠标/上键/空格）；`pending_missing_and_invalid_paths_never_become_zero_sized_selections`（后台完成前后状态、0/2→2/2、缺失与非目录反馈、不可选）；`grouped_long_paths_remain_keyboard_accessible_at_large_text`（中文分组、640×480、基础字体 20px、End/Space、固定汇总区与完整长中文路径复制）；`empty_catalogue_explains_why_there_are_no_choices`（空状态和零选择）；Unix 上的 `linked_fixed_cache_keeps_existing_measurement_semantics`（原测量 API 的根链接行为）。测试未直接调用选择 handler，没有模拟私有业务协作者。
+- `cargo test --all-targets --features gpui-tests --locked --no-fail-fast -- --test-threads=1`：211 passed、4 ignored、0 failed，含上述 5 个 UI 测试、原设置 UI 测试、egui 与固定路径/分组、Go 发现/保护和其它业务回归。
+- `cargo build --bin devsweep-gpui-cache --features gpui --locked`：macOS aarch64 成功。`cargo clippy --lib --bins --features gpui-tests --locked -- -D warnings`、`cargo fmt --all -- --check`、`git diff --check` 通过。依赖 block 0.1.6 仍有既有 future-incompat warning。
+- 验收限制：主壳全局缓存导航由 02/合并者接入，本票提供独立演示入口；未实际进行 macOS 原生窗口目测、Windows 编译/运行、双平台字体/主题/焦点/系统缩放验收，本机仅安装 aarch64-apple-darwin target。以上自动化证据不替代平台验收，顶层清单保持未勾选且不标记 resolved，由 08 与集成补证。普通测量沿用现有 API：子目录遍历错误被跳过、体积是估算；根路径链接沿用既有 WalkDir 行为，后代链接不跟随。清理仍须 07 使用固定 ID 重新建计划与 Go snapshot/context 重检，不可直接删除视图路径。
