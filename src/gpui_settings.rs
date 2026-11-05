@@ -7,7 +7,7 @@ use crate::{
     i18n::Lang,
 };
 use gpui_kit::component::{
-    ActiveTheme, IconName, Selectable, Theme, ThemeMode, WindowExt,
+    ActiveTheme, Disableable, IconName, Selectable, Theme, ThemeMode, WindowExt,
     button::Button,
     radio::{Radio, RadioGroup},
 };
@@ -110,6 +110,8 @@ struct SettingsApp {
     global_caches: bool,
     caches: Option<Entity<GlobalCacheView>>,
     cache_projects: Vec<PathBuf>,
+    cache_invalidated: bool,
+    cache_subscription: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
 impl SettingsApp {
@@ -138,14 +140,14 @@ impl SettingsApp {
         });
         let roots = cx.subscribe(&projects, |this, _, event: &RootsChanged, cx| {
             this.config.roots = event.0.clone();
-            this.caches = None;
+            this.invalidate_caches(cx);
             config::save_to(this.path.clone(), &this.config);
             cx.notify();
         });
         let workspace = cx.observe_in(&projects, window, |this, _, window, cx| {
             let paths = this.projects.read(cx).project_paths();
             if paths != this.cache_projects {
-                this.caches = None;
+                this.invalidate_caches(cx);
                 this.cache_projects = paths;
             }
             if this.global_caches {
@@ -161,6 +163,8 @@ impl SettingsApp {
             global_caches: false,
             caches: None,
             cache_projects: vec![],
+            cache_invalidated: false,
+            cache_subscription: None,
             _subscriptions: vec![bounds, appearance, roots, workspace],
         };
         this.apply_theme(window, cx);
@@ -172,6 +176,27 @@ impl SettingsApp {
             self.caches = Some(cx.new(|cx| {
                 GlobalCacheView::new(&self.config, self.cache_projects.clone(), window, cx)
             }));
+            self.cache_invalidated = false;
+            // Retain the result until an explicit navigation/refresh; do not replace a
+            // finishing worker's view merely because its protection context changed.
+            self.cache_subscription =
+                Some(cx.observe(self.caches.as_ref().unwrap(), |_, _, cx| cx.notify()));
+        }
+    }
+    fn cache_locked(&self, cx: &App) -> bool {
+        self.caches
+            .as_ref()
+            .is_some_and(|cache| cache.read(cx).clean_locked())
+    }
+    fn invalidate_caches(&mut self, cx: &mut Context<Self>) {
+        if self.cache_locked(cx) || (self.cache_invalidated && self.caches.is_some()) {
+            self.cache_invalidated = true;
+            if let Some(cache) = &self.caches {
+                cache.update(cx, |cache, cx| cache.invalidate_clean(cx));
+            }
+        } else {
+            self.caches = None;
+            self.cache_subscription = None;
         }
     }
     fn apply_theme(&self, window: &mut Window, cx: &mut App) {
@@ -216,14 +241,18 @@ impl Render for SettingsApp {
             .track_focus(&self.focus)
             .key_context("DevSweep")
             .on_action(cx.listener(Self::open_settings))
-            .on_action(cx.listener(|this, _: &CleanProjects, _, cx| {
-                if !this.global_caches {
+            .on_action(cx.listener(|this, _: &CleanProjects, window, cx| {
+                if this.global_caches {
+                    if let Some(cache) = &this.caches {
+                        cache.update(cx, |cache, cx| cache.open_clean(window, cx));
+                    }
+                } else if !this.cache_locked(cx) {
                     this.projects
                         .update(cx, |projects, cx| projects.request_clean(cx));
                 }
             }))
             .on_action(cx.listener(|this, _: &RefreshProjects, _, cx| {
-                if !this.global_caches {
+                if !this.global_caches && !this.cache_locked(cx) {
                     this.projects
                         .update(cx, |projects, cx| projects.refresh(cx));
                 }
@@ -270,6 +299,7 @@ impl Render for SettingsApp {
                                 Button::new("nav-projects")
                                     .label(strings.projects)
                                     .selected(!self.global_caches)
+                                    .disabled(self.cache_locked(cx))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.global_caches = false;
                                         cx.notify();
@@ -279,7 +309,11 @@ impl Render for SettingsApp {
                                 Button::new("nav-global-caches")
                                     .label(strings.global_caches)
                                     .selected(self.global_caches)
+                                    .disabled(self.projects.read(cx).clean_locked())
                                     .on_click(cx.listener(|this, _, window, cx| {
+                                        if this.cache_invalidated && !this.cache_locked(cx) {
+                                            this.caches = None;
+                                        }
                                         this.ensure_caches(window, cx);
                                         this.global_caches = true;
                                         cx.notify();
@@ -394,6 +428,11 @@ impl Render for SettingsPanel {
                             owner.projects.update(cx, |projects, _| {
                                 projects.set_delete_mode(owner.config.delete_mode)
                             });
+                            if let Some(cache) = &owner.caches {
+                                cache.update(cx, |cache, _| {
+                                    cache.set_delete_mode(owner.config.delete_mode)
+                                });
+                            }
                             config::save_to(owner.path.clone(), &owner.config);
                             cx.notify();
                         });
@@ -565,6 +604,7 @@ mod tests {
             window.render_frame(cx);
             window.within("language").click(1usize, cx);
             window.within("theme").click(2usize, cx);
+            window.within("delete-mode").click(1usize, cx);
             window.press("escape", cx);
         })
         .unwrap();
@@ -577,8 +617,32 @@ mod tests {
             window.click("nav-projects", cx);
             window.click("nav-global-caches", cx);
             assert_eq!(window.find("gradle.caches").checked(), Some(false));
+            window.click("gradle.caches", cx);
+            window.press("secondary-shift-backspace", cx);
         })
         .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("cache-mode-direct").checked(), Some(true));
+            assert!(
+                window
+                    .find("cache-consequence")
+                    .label()
+                    .unwrap()
+                    .contains("不可恢复")
+            );
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("nav-projects", cx);
+            assert!(window.find("discovery-empty").visible());
+        })
+        .unwrap();
+        assert!(temp.path().join("payload").exists());
     }
 
     #[gpui_kit::test]

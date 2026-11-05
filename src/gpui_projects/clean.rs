@@ -6,7 +6,7 @@ impl ProjectDiscovery {
     pub(crate) fn set_delete_mode(&mut self, mode: DeleteMode) {
         self.default_mode = mode;
     }
-    pub(super) fn clean_locked(&self) -> bool {
+    pub(crate) fn clean_locked(&self) -> bool {
         self.clean_requested || self.clean_refresh.is_clean_locked()
     }
     pub(super) fn open_clean(&mut self, window: &mut Window, cx: &mut Context<Self>) {

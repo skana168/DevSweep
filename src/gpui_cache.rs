@@ -14,11 +14,15 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::path::PathBuf;
+mod clean;
+use crate::delete::DeleteMode;
+use clean::CacheClean;
 
 #[derive(Clone)]
 enum Measurement {
     Pending,
     Ready(u64),
+    Cleaned,
     Failed(GoCacheError),
 }
 struct Row {
@@ -28,7 +32,7 @@ struct Row {
     focus: FocusHandle,
 }
 
-/// A selection draft only. Ticket 07 must construct and recheck a delete plan.
+/// A selection draft; it is never deletion authorization.
 #[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CacheSelection {
@@ -37,13 +41,17 @@ pub struct CacheSelection {
 }
 
 /// Fixed cache catalogue, background measurements and a transient selection draft.
-/// Mount once in the shell, retain its Entity, and read `selection()` for ticket 07.
+/// Mount once in the shell and retain its Entity through confirmation and execution.
 pub struct GlobalCacheView {
     rows: Vec<Row>,
     language: LanguageChoice,
     scroll: ScrollHandle,
     _tasks: Vec<Task<()>>,
     go_snapshot: Option<GoCacheSnapshot>,
+    context: Option<GoCacheContext>,
+    default_mode: DeleteMode,
+    clean: CacheClean,
+    context_invalidated: bool,
 }
 impl GlobalCacheView {
     /// `projects` supplies the same Go path protections as the project workspace.
@@ -68,7 +76,9 @@ impl GlobalCacheView {
                     .filter_map(|entry| entry.path.clone())
                     .collect(),
             });
-        Self::from_entries(entries, context, config.language, window, cx)
+        let mut view = Self::from_entries(entries, context, config.language, window, cx);
+        view.default_mode = config.delete_mode;
+        view
     }
     pub(crate) fn from_entries(
         entries: Vec<CacheEntry>,
@@ -95,6 +105,10 @@ impl GlobalCacheView {
             scroll: ScrollHandle::new(),
             _tasks: vec![],
             go_snapshot: None,
+            context: context.clone(),
+            default_mode: DeleteMode::Trash,
+            clean: CacheClean::default(),
+            context_invalidated: false,
         };
         for ix in 0..this.rows.len() {
             if go_cache::is_go_cache(this.rows[ix].entry.rule.id) {
@@ -168,7 +182,7 @@ impl GlobalCacheView {
         };
         row.selected = result.is_ok() && !row.entry.rule.dangerous;
     }
-    /// A later clean flow must retain this snapshot and use existing Go recheck APIs.
+    /// The measured Go snapshot; execution always uses the existing recheck API.
     pub fn go_snapshot(&self) -> Option<&GoCacheSnapshot> {
         self.go_snapshot.as_ref()
     }
@@ -193,7 +207,7 @@ impl GlobalCacheView {
         }
     }
     fn toggle(&mut self, ix: usize, selected: bool, cx: &mut Context<Self>) {
-        if matches!(self.rows[ix].measurement, Measurement::Ready(_)) {
+        if !self.clean_locked() && matches!(self.rows[ix].measurement, Measurement::Ready(_)) {
             self.rows[ix].selected = selected;
             cx.notify();
         }
@@ -238,6 +252,11 @@ impl GlobalCacheView {
         let state = match row.measurement {
             Measurement::Pending => strings.measuring.to_string(),
             Measurement::Ready(bytes) => bytes_label(bytes),
+            Measurement::Cleaned => match Lang::from_choice(self.language) {
+                Lang::En => "Cleaned · 0 B",
+                Lang::Zh => "已清理 · 0 B",
+            }
+            .into(),
             Measurement::Failed(error) => strings.go_cache_error(error).to_string(),
         };
         let note = match row.entry.rule.id {
@@ -303,7 +322,10 @@ impl GlobalCacheView {
                         Checkbox::new(row.entry.rule.id)
                             .label(title)
                             .checked(row.selected)
-                            .disabled(!matches!(row.measurement, Measurement::Ready(_)))
+                            .disabled(
+                                self.clean_locked()
+                                    || !matches!(row.measurement, Measurement::Ready(_)),
+                            )
                             .on_click(cx.listener(move |view, selected, _, cx| {
                                 view.toggle(ix, *selected, cx)
                             })),
@@ -430,6 +452,13 @@ impl Render for GlobalCacheView {
                     .flex_col()
                     .gap_2()
                     .child(strings.global_caches)
+                    .when(self.context_invalidated, |header| {
+                        header.child(if lang == Lang::En {
+                            "Protected locations changed. Reopen Global caches to measure again."
+                        } else {
+                            "保护路径已变更。请重新打开全局缓存以更新测量。"
+                        })
+                    })
                     .child(
                         div()
                             .id("cache-progress")
@@ -471,8 +500,27 @@ impl Render for GlobalCacheView {
                     .p_4()
                     .border_t_1()
                     .border_color(cx.theme().border)
-                    .child(summary),
+                    .child(summary)
+                    .child(
+                        Button::new("cache-clean")
+                            .danger()
+                            .label(if lang == Lang::En {
+                                "Clean selected caches…"
+                            } else {
+                                "清理所选缓存…"
+                            })
+                            .disabled(
+                                self.context_invalidated
+                                    || self.clean_locked()
+                                    || selected.ids.is_empty()
+                                    || done != self.rows.len(),
+                            )
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_clean(window, cx)),
+                            ),
+                    ),
             )
+            .child(self.render_clean(cx))
     }
 }
 
@@ -480,8 +528,570 @@ impl Render for GlobalCacheView {
 mod tests {
     use super::GlobalCacheView;
     use crate::{cache, config::LanguageChoice};
-    use gpui_kit::test::TestWindowExt;
+    use gpui_kit::test::{TestAppContextExt, TestWindowExt};
     use gpui_kit::{AppContext, TestAppContext, WindowOptions};
+
+    #[gpui_kit::test]
+    fn cache_confirmation_cancel_keeps_selection_and_restores_focus(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("payload"), [0; 4096]).unwrap();
+        let entry = cache::CacheEntry {
+            rule: cache::builtin_caches()
+                .iter()
+                .find(|r| r.id == "gradle.caches")
+                .unwrap(),
+            path: Some(temp.path().to_path_buf()),
+        };
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let ((handle, _), view) = cx.update(|cx| {
+            let mut view = None;
+            let handle = gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                let entity = cx.new(|cx| {
+                    GlobalCacheView::from_entries(vec![entry], None, LanguageChoice::En, window, cx)
+                });
+                view = Some(entity.clone());
+                entity
+            })
+            .unwrap();
+            (handle, view.unwrap())
+        });
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            for _ in 0..10 {
+                window.press("tab", cx);
+                if window.find("cache-clean").focused() == Some(true) {
+                    break;
+                }
+            }
+            assert_eq!(window.find("cache-clean").focused(), Some(true));
+            window.press("space", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("cache-mode-trash").is_some());
+            assert!(
+                window
+                    .find("cache-plan-feedback")
+                    .label()
+                    .unwrap()
+                    .contains("Skip: gradle.caches")
+            );
+            window.click("cache-execute", cx);
+            assert!(window.try_find("cache-mode-trash").is_some());
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("cache-mode-trash").is_none());
+            assert_eq!(view.read(cx).selection().ids, vec!["gradle.caches"]);
+            assert_eq!(window.find("cache-clean").focused(), Some(true));
+        })
+        .unwrap();
+        assert!(temp.path().join("payload").exists());
+    }
+
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    async fn go_cache_abort_waits_for_real_recheck_and_blocks_duplicate_submit(
+        cx: &mut TestAppContext,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(home) = std::env::var_os("DEVSWEEP_GO_TEST_HOME") else {
+            let fixture = tempfile::tempdir().unwrap();
+            std::fs::create_dir(fixture.path().join("bin")).unwrap();
+            let fixture_home = fixture.path().canonicalize().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "gpui_cache::tests::go_cache_abort_waits_for_real_recheck_and_blocks_duplicate_submit", "--nocapture", "--test-threads=1"])
+                .env("DEVSWEEP_GO_TEST_HOME", &fixture_home).env("HOME", &fixture_home)
+                .env("USERPROFILE", &fixture_home).env("PATH", fixture_home.join("bin"))
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
+        let home = std::path::PathBuf::from(home);
+        assert_eq!(std::env::var_os("HOME").unwrap(), home.as_os_str());
+        let build = home.join("go-build");
+        let module = home.join("go-module");
+        for path in [&build, &module] {
+            std::fs::create_dir(path).unwrap();
+            std::fs::write(path.join("payload"), [0; 1024]).unwrap();
+        }
+        let script = home.join("bin/go");
+        let output = format!(
+            "printf '%s\\n' '{}' '{}'\n",
+            build.display(),
+            module.display()
+        );
+        std::fs::write(&script, format!("#!/bin/sh\n{output}")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let context = crate::go_cache::GoCacheContext {
+            home: home.clone(),
+            scan_roots: vec![],
+            projects: vec![],
+            other_caches: vec![],
+        };
+        let entry = cache::CacheEntry {
+            rule: cache::builtin_caches()
+                .iter()
+                .find(|r| r.id == "go.build")
+                .unwrap(),
+            path: None,
+        };
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let ((handle, _), view) = cx.update(|cx| {
+            let mut view = None;
+            let handle = gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                let entity = cx.new(|cx| {
+                    GlobalCacheView::from_entries(
+                        vec![
+                            entry,
+                            cache::CacheEntry {
+                                rule: cache::builtin_caches()
+                                    .iter()
+                                    .find(|r| r.id == "go.module")
+                                    .unwrap(),
+                                path: None,
+                            },
+                        ],
+                        Some(context),
+                        LanguageChoice::En,
+                        window,
+                        cx,
+                    )
+                });
+                view = Some(entity.clone());
+                entity
+            })
+            .unwrap();
+            (handle, view.unwrap())
+        });
+        cx.run_until_parked();
+        cx.wait_for(
+            handle.into(),
+            std::time::Duration::from_secs(3),
+            |window, _| {
+                window
+                    .try_find("cache-state-go.build")
+                    .is_some_and(|r| r.label() == Some("1024 B"))
+            },
+        )
+        .await;
+        let started = home.join("recheck-started");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n: > '{}'\n/bin/sleep 0.3\n{output}",
+                started.display()
+            ),
+        )
+        .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("go.module").checked(), Some(false));
+            window.click("go.module", cx);
+            window.click("cache-clean", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("cache-mode-direct", cx);
+            window.click("cache-execute", cx);
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), std::time::Duration::from_secs(3), |_, _| {
+            started.exists()
+        })
+        .await;
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("cache-abort", cx);
+            assert!(
+                window
+                    .find("cache-clean-result")
+                    .label()
+                    .unwrap()
+                    .contains("Abort requested")
+            );
+            window.click("go.build", cx);
+            window.click("cache-clean", cx);
+            assert!(window.try_find("cache-execute").is_none());
+            assert_eq!(view.read(cx).selection().ids, vec!["go.build", "go.module"]);
+        })
+        .unwrap();
+        cx.wait_for(
+            handle.into(),
+            std::time::Duration::from_secs(3),
+            |window, _| {
+                window
+                    .try_find("cache-clean-result")
+                    .is_some_and(|r| r.label().is_some_and(|s| s.contains("Stopped")))
+            },
+        )
+        .await;
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let result = window.find("cache-clean-result");
+            assert!(result.label().unwrap().contains("0/2 cache entries"));
+            assert!(
+                result
+                    .label()
+                    .unwrap()
+                    .contains("Freed bytes (estimate): 0 B")
+            );
+            assert!(window.try_find("cache-abort").is_none());
+        })
+        .unwrap();
+        assert!(build.join("payload").exists());
+        assert!(module.join("payload").exists());
+
+        // A new Go location discovered after confirmation must never inherit deletion consent.
+        let changed = home.join("changed-go-build");
+        std::fs::create_dir(&changed).unwrap();
+        std::fs::write(changed.join("payload"), [0; 2048]).unwrap();
+        std::fs::set_permissions(
+            module.join("payload"),
+            std::fs::Permissions::from_mode(0o444),
+        )
+        .unwrap();
+        std::fs::set_permissions(&module, std::fs::Permissions::from_mode(0o555)).unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("cache-clean", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{}' '{}'\n",
+                changed.display(),
+                module.display()
+            ),
+        )
+        .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("cache-mode-direct", cx);
+            window.click("cache-execute", cx);
+        })
+        .unwrap();
+        cx.wait_for(
+            handle.into(),
+            std::time::Duration::from_secs(3),
+            |window, _| {
+                window.try_find("cache-clean-result").is_some_and(|r| {
+                    r.label()
+                        .is_some_and(|s| s.contains("Cache clean finished"))
+                })
+            },
+        )
+        .await;
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window
+                    .find("cache-clean-result")
+                    .label()
+                    .unwrap()
+                    .contains("Failure: 1")
+            );
+            assert_eq!(
+                window.find("cache-state-go.module").label(),
+                Some("Cleaned · 0 B")
+            );
+            window.click("cache-failures", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window
+                    .find("cache-failure-details")
+                    .label()
+                    .unwrap()
+                    .contains("Cache location changed")
+            );
+            window.press("escape", cx);
+            assert_eq!(window.find("cache-state-go.build").label(), Some("2048 B"));
+        })
+        .unwrap();
+        assert!(build.join("payload").exists());
+        assert!(changed.join("payload").exists());
+        assert!(!module.exists());
+    }
+
+    // Isolate environment resolution in a subprocess; never mutate this test process's HOME.
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    async fn fixed_cache_execution_failure_copy_and_retry(cx: &mut TestAppContext) {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(home) = std::env::var_os("DEVSWEEP_CACHE_TEST_HOME") else {
+            let fixture = tempfile::tempdir().unwrap();
+            std::fs::write(fixture.path().join("isolated-test-home"), "ticket07").unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "gpui_cache::tests::fixed_cache_execution_failure_copy_and_retry",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("DEVSWEEP_CACHE_TEST_HOME", fixture.path())
+                .env("HOME", fixture.path())
+                .env("USERPROFILE", fixture.path())
+                .env("LOCALAPPDATA", fixture.path().join("LocalAppData"))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
+        let home = std::path::PathBuf::from(home);
+        assert_eq!(std::env::var_os("HOME").unwrap(), home.as_os_str());
+        assert_eq!(
+            std::fs::read_to_string(home.join("isolated-test-home")).unwrap(),
+            "ticket07"
+        );
+        let entries = cache::entries()
+            .into_iter()
+            .filter(|r| matches!(r.rule.id, "gradle.caches" | "npm.cacache"))
+            .collect::<Vec<_>>();
+        for entry in &entries {
+            let path = entry.path.as_ref().unwrap();
+            assert!(path.starts_with(&home));
+            std::fs::create_dir_all(path).unwrap();
+            std::fs::write(path.join("payload"), [0; 1024]).unwrap();
+        }
+        let npm = entries
+            .iter()
+            .find(|r| r.rule.id == "npm.cacache")
+            .unwrap()
+            .path
+            .clone()
+            .unwrap();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let ((handle, _), view) = cx.update(|cx| {
+            let mut view = None;
+            let handle = gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                let entity = cx.new(|cx| {
+                    GlobalCacheView::from_entries(entries, None, LanguageChoice::En, window, cx)
+                });
+                view = Some(entity.clone());
+                entity
+            })
+            .unwrap();
+            (handle, view.unwrap())
+        });
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("cache-clean", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        std::fs::set_permissions(
+            npm.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("cache-mode-direct", cx);
+            assert!(
+                window
+                    .find("cache-consequence")
+                    .label()
+                    .unwrap()
+                    .contains("permanent")
+            );
+            window.press("enter", cx); // unfocused Enter cannot authorize deletion
+            assert!(window.try_find("cache-execute").is_some());
+            window.click("cache-execute", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.wait_for(
+            handle.into(),
+            std::time::Duration::from_secs(3),
+            |window, _| window.try_find("cache-failures").is_some(),
+        )
+        .await;
+        std::fs::set_permissions(
+            npm.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let result = window
+                .find("cache-clean-result")
+                .label()
+                .unwrap()
+                .to_string();
+            assert!(result.contains("Cache clean finished"), "{result}");
+            assert!(
+                result.contains("Freed bytes (estimate): 1024 B"),
+                "{result}"
+            );
+            assert!(result.contains("Failure: 1"), "{result}");
+            assert_eq!(view.read(cx).selection().ids, vec!["npm.cacache"]);
+            assert_eq!(
+                window.find("cache-state-gradle.caches").label(),
+                Some("Cleaned · 0 B")
+            );
+            for _ in 0..20 {
+                window.press("tab", cx);
+                if window.find("cache-failures").focused() == Some(true) {
+                    break;
+                }
+            }
+            window.press("space", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window
+                    .find("cache-failure-details")
+                    .label()
+                    .unwrap()
+                    .contains("npm.cacache")
+            );
+            window.click("cache-copy-failures", cx);
+            assert!(
+                cx.read_from_clipboard()
+                    .unwrap()
+                    .text()
+                    .unwrap()
+                    .contains("npm.cacache")
+            );
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        // Retry through the same live production view after repairing the isolated fixture.
+        std::fs::create_dir_all(&npm).unwrap();
+        std::fs::write(npm.join("payload"), [0; 1024]).unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("cache-failures").focused(), Some(true));
+            window.click("cache-clean", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("cache-mode-direct", cx);
+            window.click("cache-execute", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.wait_for(
+            handle.into(),
+            std::time::Duration::from_secs(3),
+            |window, _| {
+                window
+                    .try_find("cache-clean-result")
+                    .and_then(|r| r.label().map(|s| s.contains("Cache clean finished")))
+                    .unwrap_or(false)
+            },
+        )
+        .await;
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let result = window
+                .find("cache-clean-result")
+                .label()
+                .unwrap()
+                .to_string();
+            assert!(result.contains("Failure: 0"), "{result}");
+            assert!(view.read(cx).selection().ids.is_empty());
+        })
+        .unwrap();
+        assert!(!npm.exists());
+
+        // Static catalogue paths are rechecked after confirmation as well.
+        std::fs::create_dir_all(&npm).unwrap();
+        std::fs::write(npm.join("payload"), [0; 512]).unwrap();
+        let entries = cache::entries()
+            .into_iter()
+            .filter(|e| e.rule.id == "npm.cacache")
+            .collect();
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    GlobalCacheView::from_entries(entries, None, LanguageChoice::En, window, cx)
+                })
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("cache-clean", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        std::fs::remove_dir_all(&npm).unwrap();
+        std::fs::write(&npm, "replaced by a file after confirmation").unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("cache-mode-direct", cx);
+            window.click("cache-execute", cx);
+        })
+        .unwrap();
+        cx.wait_for(
+            handle.into(),
+            std::time::Duration::from_secs(3),
+            |window, _| {
+                window.try_find("cache-clean-result").is_some_and(|r| {
+                    r.label()
+                        .is_some_and(|s| s.contains("Cache clean finished"))
+                })
+            },
+        )
+        .await;
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window
+                    .find("cache-clean-result")
+                    .label()
+                    .unwrap()
+                    .contains("Skip: 1 · Failure: 0")
+            );
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&npm).unwrap(),
+            "replaced by a file after confirmation"
+        );
+    }
 
     #[gpui_kit::test]
     fn real_cache_checkboxes_keep_danger_opt_in_and_report_selected_bytes(cx: &mut TestAppContext) {
