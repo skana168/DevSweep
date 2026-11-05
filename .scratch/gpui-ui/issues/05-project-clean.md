@@ -44,3 +44,10 @@
 - [ ] macOS 原生窗口人工验证主题、中文字体、大字体/窗口缩放、长计划滚动、键盘焦点环、系统 Trash、真实长目录进度和中止边界。
 - [ ] Windows 构建、原生窗口、回收站/直接删除、占用失败、剪贴板和同样完整流程。
 - [ ] 双平台真实 Unity Editor 保护及大目录完整流程；本票自动化不替代 08 的平台验收。
+
+### 2026-11-05 — merger 集成验证
+
+- 在共享 `/Users/yoyun/DevSweep` 的 `integration/gpui-ui` 核实当前 `b140f7e494018eb1ac3822dd2ea28d76d990b152` 是实施提交 `654f3a5c8a017147dc460a77581f8f6733ac5ab6` 的祖先，执行 `git merge --ff-only 654f3a5c8a017147dc460a77581f8f6733ac5ab6` 成功，无冲突、无合并提交。
+- 集成后 `cargo fmt --all -- --check`、`git diff --check` 通过；`cargo test --lib --features gpui-tests --locked clean -- --test-threads=1` 14 passed；独立 `gpui_projects::tests::abort_request` 1 passed；`gpui_projects::tests` 9 passed，均 0 failed。覆盖确认取消/焦点恢复、执行前重检、成功/失败详情及复制、快捷键不绕过确认、中止锁/断连与排队刷新，以及项目视图既有交互。完整套件沿用上方实施证据，本次未重复执行。
+- 现存 `block 0.1.6` future-incompat warning 未解决。以上为自动化集成证据，不是原生平台验收；上方 macOS 原生、Windows 和双平台 Unity/大目录三个待验项保持未勾选，票据保持 unresolved（Status 不变）。
+- `skills-lock.json` 的既有修改及未跟踪 `.claude/` 保留，不 stash/reset/改写历史；未 push、未创建 PR，保留工作树供之后清理。
