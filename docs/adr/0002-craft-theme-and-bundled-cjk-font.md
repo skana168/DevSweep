@@ -1,5 +1,7 @@
 # 主题照搬 craft-launcher，中文用内置 Maple Mono 子集
 
+> 主题与字体策略已由 [ADR-0003](0003-migrate-ui-to-gpui-kit.md) 替代；以下保留原决策背景，现有 egui 前端在迁移期间仍作为功能对照。
+
 视觉语言整套取自 Craft Launcher 的 ArtCraft 设计（storytold/craft-launcher，Apache-2.0）：暖黑/米白底色、1px hairline 分隔、零圆角、Archivo 标题 + Inter 正文 + Geist Mono 标签。`src/theme.rs` 从它的 `crates/ui-egui/src/theme.rs` 改写而来；面板、栏宽、布局与交互是 DevSweep 自己的，不随主题变化。
 
 中文字形单独解决：Inter、Archivo、Geist Mono 都没有 CJK，而界面默认中文。二进制内嵌 Maple Mono CN v7.9 的 **GB2312 子集**（`scripts/subset-maple.sh` 生成，5.2 MB），作为每个字体族的兜底；拉丁与等宽仍用 craft 的三款字体。
