@@ -78,3 +78,13 @@
 
 
 集成同步：末次 `git merge integration/gpui-ui` 返回 Already up to date；本地 tip 仍为 `dbbf56c9bc0e9080a05ffc322bb1a7df1c870e37`。远端无同名 ref，不创建远程资源；父集成者负责后续合入。
+
+## 2026-11-05 — 集成分支复核
+
+- `integration/gpui-ui` 从 `dbbf56c9bc0e9080a05ffc322bb1a7df1c870e37` fast-forward 到实施 HEAD `123b58715fdcad1d070e2999694d300fd6459d79`。本节随后的文档提交记录集成证据，不改变实现；最终分支 HEAD 可由包含本节的提交确定。
+- 集成后 `cargo fmt --check`、`git diff --check` 通过；`cargo test --locked --features gpui-tests gpui_ -- --test-threads=1` 退出 0，27 个 GPUI 测试全部通过。未重跑完整套件；上文 233 passed / 4 ignored 是源分支既有证据。既有 `block 0.1.6` future-incompat 警告仍在。
+- 自动刷新是**可在本地修复的功能及覆盖缺口**，不只是等待原生证据：`src/gpui_settings.rs::SettingsApp::new` 仅订阅窗口 bounds/appearance、roots/workspace，没有 activation 订阅、最近扫描时间或 30 秒门槛；`Render::render` 的 `RefreshProjects` 仅显式刷新项目。因此缺失失焦→重新激活且距上次扫描至少 30 秒的自动项目扫描，以及同次自动刷新触发 Go 重查、已清理但重新创建缓存的失效/重新测量。旧实现参照 `src/app.rs::DevSweepApp::logic`、`rescan`、`refresh_go_caches`。
+- 相应 GPUI 迁移测试还需覆盖：30 秒前不触发、过期切回触发项目与缓存联动、手动刷新后重置时效、已有扫描时不重复启动、清理锁定时安全排队/失效且保留选择与视图。旧保护见 `src/app.rs::tests::sidebar_refresh_click_discovers_projects_without_touching_caches_or_view`、`focus_does_not_start_a_second_scan_while_manual_refresh_is_running`。现有 GPUI 显式刷新/排队测试不能替代 activation 测试。
+- 已存在的联动不应误报为全部缺失：`SettingsApp::new` 的 RootsChanged/workspace observer 会在根或项目路径集合变化时调用 `invalidate_caches`；`ensure_caches` 重建视图时，`src/gpui_cache.rs::GlobalCacheView::from_entries` 会重新查询 Go 和测量固定缓存。但路径集合未变化的旧缓存视图不会因前台切回而更新。
+- **外部平台/原生证据缺口**另计：Windows 构建和全流程、真实 Go/Unity、系统 Trash 成功与恢复，以及上文未通过的原生 Direct/权限、隔离全局完整流程、长任务、OS 外观/IME/reduced motion/设计矩阵。可在本地增加隔离 fixture/GPUI 自动化，但不能据此声称这些平台/系统集成已验收。补完自动刷新后仍须真实窗口 activation 验收。
+- 08 保持 `ready-for-human` 且未完成验收项不勾选；未移除 egui、未开始 09。未 reset/stash/rewrite、push 或创建 PR；保留工作树，原有 `skills-lock.json` 修改及未跟踪 `.claude/` 未纳入提交。
