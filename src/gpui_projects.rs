@@ -14,7 +14,7 @@ use crate::{
     size,
 };
 use gpui_kit::component::{
-    ActiveTheme, Disableable, IconName, Selectable, ThemeStyled, WindowExt,
+    ActiveTheme, Disableable, IconName, Selectable, Sizable, ThemeStyled, WindowExt,
     button::Button,
     button::ButtonVariants,
     checkbox::Checkbox,
@@ -561,7 +561,11 @@ impl ProjectDiscovery {
                         Button::new("copy-project-path")
                             .ghost()
                             .icon(IconName::Copy)
-                            .label(match Lang::from_choice(self.language) {
+                            .tooltip(match Lang::from_choice(self.language) {
+                                Lang::En => "Copy path",
+                                Lang::Zh => "复制路径",
+                            })
+                            .accessibility_label(match Lang::from_choice(self.language) {
                                 Lang::En => "Copy path",
                                 Lang::Zh => "复制路径",
                             })
@@ -698,6 +702,22 @@ impl ProjectDiscovery {
                     .flex_wrap()
                     .gap_3()
                     .items_center()
+                    .child({
+                        let count = self.selected.len();
+                        let summary = if en {
+                            format!(
+                                "{count} project{} selected",
+                                if count == 1 { "" } else { "s" }
+                            )
+                        } else {
+                            format!("已选 {count} 个项目")
+                        };
+                        div()
+                            .id("project-selection")
+                            .test_support()
+                            .aria_label(summary.clone())
+                            .child(summary)
+                    })
                     .child(
                         div()
                             .id("selection-scope")
@@ -883,6 +903,27 @@ impl Render for ProjectDiscovery {
                 strings.no_projects_title, strings.no_projects_body
             )
         };
+        let project_size = if self.model.entries().len() == self.projects.len() {
+            self.model.entries().iter().try_fold(0u64, |sum, entry| {
+                size::total_size(&entry.targets).map(|bytes| sum.saturating_add(bytes))
+            })
+        } else {
+            None
+        };
+        let project_size_label = match Lang::from_choice(self.language) {
+            Lang::En => format!(
+                "Project size: {}",
+                project_size
+                    .map(format_bytes)
+                    .unwrap_or_else(|| "Unknown".into())
+            ),
+            Lang::Zh => format!(
+                "项目大小：{}",
+                project_size
+                    .map(format_bytes)
+                    .unwrap_or_else(|| "未知".into())
+            ),
+        };
         div()
             .flex()
             .flex_col()
@@ -906,12 +947,16 @@ impl Render for ProjectDiscovery {
                     .max_h(relative(0.5))
                     .min_h_0()
                     .overflow_y_scroll()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .p_3()
                     .child(
                         div()
                             .flex()
                             .items_center()
+                            .justify_between()
                             .gap_3()
-                            .child(strings.projects)
+                            .child(div().text_lg().child(strings.projects))
                             .child(
                                 Button::new("refresh-projects")
                                     .label(strings.refresh_projects)
@@ -1004,52 +1049,6 @@ impl Render for ProjectDiscovery {
                                     )
                             })),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .gap_1()
-                            .flex_shrink_0()
-                            .child(
-                                Button::new("filter-all")
-                                    .label(match Lang::from_choice(self.language) {
-                                        Lang::En => "All types",
-                                        Lang::Zh => "全部类型",
-                                    })
-                                    .selected(self.filter.is_none())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.filter = None;
-                                        this.rebuild_visible();
-                                        this.scroll.scroll_to_item(0, ScrollStrategy::Top);
-                                        cx.notify();
-                                    })),
-                            )
-                            .children(
-                                [
-                                    Stack::Unity,
-                                    Stack::Flutter,
-                                    Stack::Ios,
-                                    Stack::Android,
-                                    Stack::Java,
-                                    Stack::Node,
-                                    Stack::Python,
-                                    Stack::Rust,
-                                    Stack::Dotnet,
-                                ]
-                                .into_iter()
-                                .map(|stack| {
-                                    Button::new(SharedString::from(format!("filter-{stack:?}")))
-                                        .label(strings.stack(stack))
-                                        .selected(self.filter == Some(stack))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.filter = Some(stack);
-                                            this.rebuild_visible();
-                                            this.scroll.scroll_to_item(0, ScrollStrategy::Top);
-                                            cx.notify();
-                                        }))
-                                }),
-                            ),
-                    )
                     .child({
                         let label = match Lang::from_choice(self.language) {
                             Lang::En => {
@@ -1064,10 +1063,24 @@ impl Render for ProjectDiscovery {
                             }
                         };
                         div()
-                            .id("project-results")
-                            .test_support()
-                            .aria_label(label.clone())
-                            .child(label)
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .id("project-results")
+                                    .test_support()
+                                    .aria_label(label.clone())
+                                    .child(label),
+                            )
+                            .child(
+                                div()
+                                    .id("project-size-total")
+                                    .test_support()
+                                    .aria_label(project_size_label.clone())
+                                    .child(project_size_label),
+                            )
                     })
                     .children(
                         (self.visible.is_empty() && !self.projects.is_empty()).then(|| {
@@ -1158,7 +1171,68 @@ impl Render for ProjectDiscovery {
             .child(
                 // Keep a navigable row visible when controls and execution feedback grow.
                 // The controls scroll and shrink before the primary workspace does.
-                div().flex_1().min_h_24().min_w_0().child(
+                // 252px fits the ten Small type rows at the 560px window.
+                div().flex().flex_1().min_h(px(252.)).min_w_0().child(
+                    div()
+                        .id("stack-filters")
+                        .w(px(132.))
+                        .flex_shrink_0()
+                        .h_full()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .py_1()
+                        .px_1()
+                        .overflow_y_scroll()
+                        .border_r_1()
+                        .border_color(cx.theme().border)
+                        .child(
+                            Button::new("filter-all")
+                                .ghost()
+                                .small()
+                                .w_full()
+                                .label(match Lang::from_choice(self.language) {
+                                    Lang::En => "All types",
+                                    Lang::Zh => "全部类型",
+                                })
+                                .selected(self.filter.is_none())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.filter = None;
+                                    this.rebuild_visible();
+                                    this.scroll.scroll_to_item(0, ScrollStrategy::Top);
+                                    cx.notify();
+                                })),
+                        )
+                        .children(
+                            [
+                                Stack::Unity,
+                                Stack::Flutter,
+                                Stack::Ios,
+                                Stack::Android,
+                                Stack::Java,
+                                Stack::Node,
+                                Stack::Python,
+                                Stack::Rust,
+                                Stack::Dotnet,
+                            ]
+                            .into_iter()
+                            .map(|stack| {
+                                Button::new(SharedString::from(format!("filter-{stack:?}")))
+                                    .ghost()
+                                    .small()
+                                    .w_full()
+                                    .label(strings.stack(stack))
+                                    .selected(self.filter == Some(stack))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.filter = Some(stack);
+                                        this.rebuild_visible();
+                                        this.scroll.scroll_to_item(0, ScrollStrategy::Top);
+                                        cx.notify();
+                                    }))
+                            }),
+                        ),
+                ).child(
+                    div().flex_1().min_w_0().min_h_0().child(
                     h_resizable("project-split")
                         .with_state(&self.split)
                         .child(
@@ -1207,26 +1281,11 @@ impl Render for ProjectDiscovery {
                                 .size_range(window.rem_size() * 16.0..Pixels::MAX)
                                 .child(self.render_targets(cx)),
                         ),
+                    ),
                 ),
             )
             .child(self.render_selection(cx))
             .children(self.execution.as_ref().map(|_| self.render_execution(cx)))
-            .child({
-                let count = self.selected.len();
-                let summary = match Lang::from_choice(self.language) {
-                    Lang::En => format!(
-                        "{count} project{} selected",
-                        if count == 1 { "" } else { "s" }
-                    ),
-                    Lang::Zh => format!("已选 {count} 个项目"),
-                };
-                div()
-                    .id("project-selection")
-                    .test_support()
-                    .aria_label(summary.clone())
-                    .flex_shrink_0()
-                    .child(summary)
-            })
     }
 }
 

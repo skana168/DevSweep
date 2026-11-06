@@ -7,7 +7,9 @@ cargo run --bin devsweep-gpui --features gpui --locked
 cargo test --lib --features gpui-tests --locked
 ```
 
-点击「设置…」或按 Command+,（macOS）/ Control+,（Windows）打开独立模态对话框。Tab / Shift+Tab 移动焦点，Space / Enter 选择选项，Escape 关闭并恢复原焦点。语言、主题和默认删除方式即时保存；窗口尺寸在调整时保存。两个入口沿用 `config.toml`、字段和配置目录，不需要迁移文件；扫描根不被设置界面改写。配置读取或保存失败继续沿用既有的默认值 / best-effort 语义。
+主窗口按已确认的工作区骨架组成。`TitleBar` 只保留窗口装饰。`Sidebar` 的 header 放品牌，菜单只有项目和全局缓存，footer 放设置和收起侧栏。项目页顶栏是标题、扫描根和刷新；摘要是项目数量和项目大小；类型筛选是项目列表左侧的竖向列表，右列是清理项；底栏是已选数量、已选体积和清理。全局缓存左列是依赖与工具链，右列是所选分组的条目，底栏是已选体积和清理。刷新不重算已有体积，清理仍进入计划确认。
+
+点击侧栏「设置…」或按 Command+,（macOS）/ Control+,（Windows）打开独立模态对话框。Tab / Shift+Tab 移动焦点，Space / Enter 选择选项，Escape 关闭并恢复原焦点。语言、主题和默认删除方式即时保存；窗口尺寸在调整时保存。两个入口沿用 `config.toml`、字段和配置目录，不需要迁移文件；扫描根不被设置界面改写。配置读取或保存失败继续沿用既有的默认值 / best-effort 语义。
 
 GPUI 仅依赖 facade `gpui-kit = "=0.7.0"`；内部配套版本由 Kit 和 Cargo.lock 管理，不直接添加 GPUI / Base / Component 依赖。2026-11-05 实查 crates.io 最新 0.9.0 的 Fast 可选依赖经 gpui-fast-web 锁定 `unicode-properties = 0.1.3`，与保留的 egui 0.37 所需 `^0.1.4` 无法解析。0.8.0 也引入 Fast 依赖系列，因此本票使用成功解析、构建和测试的 0.7.0。升级应重新验证双前端依赖解析。
 

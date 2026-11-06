@@ -55,3 +55,9 @@
 - 最终全量串行 238 passed / 4 ignored / 0 failed，GPUI 专项 30/0；生产严格 Clippy、普通 all-targets Clippy、macOS bins 构建、fmt/diff 通过。all-targets 既有测试 lint 与 block future-incompat 警告保留，不称严格 all-targets 通过。
 - 指定基线 `86d8a9c7501bbabb853861ea831369e335b97a10` ancestry 已确认；提交前合并本地 `integration/gpui-ui` 返回 Already up to date（tip 同基线）。分支 `t3/gpui-cache-retry-virtualized-plan`，无 children、checkout 创建、PR/push；用户配置/无关文件/egui/默认入口不变。最终 SHA 为包含本条记录的提交。
 - 两项本地缺口已解决，**Windows 与 macOS 原生、系统集成及既有设计矩阵验收缺口仍未通过**，状态继续 ready-for-human，不勾选验收框，不开始 09。
+
+### 2026-11-05 — 主窗口骨架改用 GPUI Kit 控件
+
+- 按用户要求抛弃自定义顶栏 + 按钮导航壳，主窗口改为 `TitleBar` + `Sidebar`（稳定 `nav-projects` / `nav-global-caches` ElementId）+ `h_resizable("shell-split")` + `StatusBar`；`window_options` 改用 `TitleBar::window_options()`。业务导航/清理锁/设置对话框语义不变。
+- `cargo test --lib --features gpui-tests --locked`：77 passed / 0 failed。
+- macOS 实际启动 `cargo run --bin devsweep-gpui --features gpui --locked`：进程常驻，CGWindowList 可见内容窗口约 1100×818；本环境无 Screen Recording 权限，未能写出窗口截图。完整原生视觉/交互与 Windows 验收仍未通过，状态保持 ready-for-human。

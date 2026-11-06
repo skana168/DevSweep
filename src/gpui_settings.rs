@@ -7,9 +7,11 @@ use crate::{
     i18n::Lang,
 };
 use gpui_kit::component::{
-    ActiveTheme, Disableable, IconName, Selectable, Theme, ThemeMode, WindowExt,
-    button::Button,
+    ActiveTheme, Collapsible, IconName, Theme, ThemeMode, TitleBar, WindowExt,
+    button::{Button, ButtonVariants},
     radio::{Radio, RadioGroup},
+    sidebar::{Sidebar, SidebarFooter, SidebarHeader, SidebarItem, SidebarMenuItem},
+    v_flex,
 };
 use gpui_kit::*;
 use std::{borrow::Cow, path::PathBuf};
@@ -94,11 +96,42 @@ fn window_options(config: &Config, cx: &App) -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size, cx))),
         window_min_size: Some(gpui_kit::size(px(880.), px(560.))),
-        titlebar: Some(TitlebarOptions {
-            title: Some("DevSweep".into()),
-            ..Default::default()
-        }),
-        ..Default::default()
+        ..TitleBar::window_options()
+    }
+}
+
+/// Sidebar menu that keeps stable ElementIds for navigation tests and actions.
+#[derive(Clone)]
+struct AppNavMenu {
+    collapsed: bool,
+    items: Vec<(SharedString, SidebarMenuItem)>,
+}
+
+impl Collapsible for AppNavMenu {
+    fn is_collapsed(&self) -> bool {
+        self.collapsed
+    }
+
+    fn collapsed(mut self, collapsed: bool) -> Self {
+        self.collapsed = collapsed;
+        self
+    }
+}
+
+impl SidebarItem for AppNavMenu {
+    fn render(
+        self,
+        _: impl Into<ElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> impl IntoElement {
+        v_flex()
+            .gap_2()
+            .children(self.items.into_iter().map(|(id, item)| {
+                item.collapsed(self.collapsed)
+                    .render(id, window, cx)
+                    .into_any_element()
+            }))
     }
 }
 
@@ -107,6 +140,7 @@ struct SettingsApp {
     path: Option<PathBuf>,
     focus: FocusHandle,
     projects: Entity<ProjectDiscovery>,
+    nav_collapsed: bool,
     global_caches: bool,
     caches: Option<Entity<GlobalCacheView>>,
     cache_projects: Vec<PathBuf>,
@@ -171,6 +205,7 @@ impl SettingsApp {
             path,
             focus,
             projects,
+            nav_collapsed: false,
             global_caches: false,
             caches: None,
             cache_projects: vec![],
@@ -264,6 +299,88 @@ impl SettingsApp {
 impl Render for SettingsApp {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let strings = Lang::from_choice(self.config.language).strings();
+        let owner = cx.entity();
+        let cache_locked = self.cache_locked(cx);
+        let clean_locked = self.projects.read(cx).clean_locked();
+        let collapsed = self.nav_collapsed;
+        let nav = AppNavMenu {
+            collapsed,
+            items: vec![
+                (
+                    "nav-projects".into(),
+                    SidebarMenuItem::new(strings.projects)
+                        .icon(IconName::Folder)
+                        .active(!self.global_caches)
+                        .disable(cache_locked)
+                        .on_click({
+                            let owner = owner.clone();
+                            move |_, _, cx| {
+                                owner.update(cx, |this, cx| {
+                                    this.global_caches = false;
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                ),
+                (
+                    "nav-global-caches".into(),
+                    SidebarMenuItem::new(strings.global_caches)
+                        .icon(IconName::HardDrive)
+                        .active(self.global_caches)
+                        .disable(clean_locked)
+                        .on_click({
+                            let owner = owner.clone();
+                            move |_, window, cx| {
+                                owner.update(cx, |this, cx| {
+                                    if this.cache_invalidated && !this.cache_locked(cx) {
+                                        this.caches = None;
+                                    }
+                                    this.ensure_caches(window, cx);
+                                    this.global_caches = true;
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                ),
+            ],
+        };
+        let mut brand = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(img("brand.png").size_6());
+        if !collapsed {
+            brand = brand.child("DevSweep");
+        }
+        let mut settings = Button::new("settings")
+            .ghost()
+            .icon(IconName::Settings)
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.open_settings(&OpenSettings, window, cx);
+            }));
+        if !collapsed {
+            settings = settings.label(format!("{}…", strings.settings));
+        }
+        let toggle_label = match (Lang::from_choice(self.config.language), collapsed) {
+            (Lang::Zh, true) => "展开侧边栏",
+            (Lang::Zh, false) => "收起侧边栏",
+            (Lang::En, true) => "Expand sidebar",
+            (Lang::En, false) => "Collapse sidebar",
+        };
+        let mut collapse = Button::new("collapse-nav")
+            .ghost()
+            .icon(if collapsed {
+                IconName::PanelLeftOpen
+            } else {
+                IconName::PanelLeftClose
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.nav_collapsed = !this.nav_collapsed;
+                cx.notify();
+            }));
+        if !collapsed {
+            collapse = collapse.label(toggle_label);
+        }
         div()
             .id("workspace")
             .test_support()
@@ -289,65 +406,26 @@ impl Render for SettingsApp {
             .size_full()
             .flex()
             .flex_col()
-            .p_4()
-            .gap_4()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            .child(TitleBar::new())
             .child(
                 div()
                     .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(img("brand.png").size_10())
-                    .child("DevSweep")
-                    .child(
-                        Button::new("settings")
-                            .icon(IconName::Settings)
-                            .label(format!("{}…", strings.settings))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_settings(&OpenSettings, window, cx);
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_stretch()
                     .flex_1()
                     .min_h_0()
-                    .gap_4()
+                    .min_w_0()
                     .child(
-                        div()
-                            .w_48()
-                            .min_w_48()
-                            .max_w_64()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(
-                                Button::new("nav-projects")
-                                    .label(strings.projects)
-                                    .selected(!self.global_caches)
-                                    .disabled(self.cache_locked(cx))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.global_caches = false;
-                                        cx.notify();
-                                    })),
+                        Sidebar::new("app-nav")
+                            .collapsed(collapsed)
+                            .h_full()
+                            .header(SidebarHeader::new().child(brand))
+                            .footer(
+                                SidebarFooter::new().child(
+                                    v_flex().w_full().gap_1().child(settings).child(collapse),
+                                ),
                             )
-                            .child(
-                                Button::new("nav-global-caches")
-                                    .label(strings.global_caches)
-                                    .selected(self.global_caches)
-                                    .disabled(self.projects.read(cx).clean_locked())
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        if this.cache_invalidated && !this.cache_locked(cx) {
-                                            this.caches = None;
-                                        }
-                                        this.ensure_caches(window, cx);
-                                        this.global_caches = true;
-                                        cx.notify();
-                                    })),
-                            ),
+                            .child(nav),
                     )
                     .child(
                         div()
@@ -477,6 +555,104 @@ impl Render for SettingsPanel {
     }
 }
 
+#[cfg(feature = "gpui-tests")]
+pub fn capture_preview(path: &std::path::Path) {
+    use gpui_kit::test::TestWindowExt;
+    use std::sync::Arc;
+    let loaded = config::load();
+    let dark = match loaded.theme {
+        ThemeChoice::Dark => true,
+        ThemeChoice::Light => false,
+        ThemeChoice::System => std::process::Command::new("defaults")
+            .args(["read", "-g", "AppleInterfaceStyle"])
+            .output()
+            .ok()
+            .is_some_and(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .to_ascii_lowercase()
+                    .contains("dark")
+            }),
+    };
+    let temp = std::env::temp_dir().join(format!("devsweep-preview-{}", std::process::id()));
+    std::fs::create_dir_all(&temp).expect("preview directory");
+    let root = temp.canonicalize().expect("preview root");
+    for (name, marker, target) in [
+        ("web", "package.json", "node_modules"),
+        ("api", "Cargo.toml", "target"),
+        ("mobile", "pubspec.yaml", "build"),
+        ("notes", "requirements.txt", "__pycache__"),
+    ] {
+        let project = root.join(name);
+        std::fs::create_dir_all(project.join(target)).expect("preview project");
+        std::fs::write(project.join(marker), "{}\n").expect("preview marker");
+        std::fs::write(project.join(target).join("payload"), [0; 4096]).expect("preview payload");
+    }
+    let config = config::Config {
+        roots: vec![root.clone()],
+        language: loaded.language,
+        theme: if dark { ThemeChoice::Dark } else { loaded.theme },
+        delete_mode: loaded.delete_mode,
+        window: Some(config::Window {
+            width: 1100.,
+            height: 720.,
+        }),
+    };
+    let mut cx = gpui_kit::HeadlessAppContext::with_platform(
+        gpui_kit::platform::current_platform(true).text_system(),
+        Arc::new(BrandAssets),
+        gpui_kit::platform::current_headless_renderer,
+    );
+    cx.update(|cx| {
+        init(cx);
+        cx.set_reduce_motion(true);
+    });
+    let mut options = TitleBar::window_options();
+    options.show = false;
+    options.focus = false;
+    options.window_bounds = Some(WindowBounds::Windowed(Bounds::new(
+        point(px(0.), px(0.)),
+        size(px(1100.), px(720.)),
+    )));
+    let (handle, _) = cx
+        .update(|cx| {
+            gpui_kit::open_window(options, cx, |window, cx| {
+                cx.new(|cx| {
+                    SettingsApp::new(config, Some(temp.join("config.toml")), window, cx)
+                })
+            })
+        })
+        .expect("open preview window");
+    let project = SharedString::from(root.join("web").to_string_lossy().into_owned());
+    for _ in 0..40 {
+        cx.run_until_parked();
+        let found = cx
+            .update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                window.try_find(project.clone()).is_some()
+            })
+            .expect("render preview");
+        if found {
+            break;
+        }
+    }
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        if window.try_find(project.clone()).is_some() {
+            window.click(project, cx);
+        }
+        window.render_frame(cx);
+    })
+    .expect("select preview project");
+    cx.run_until_parked();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("preview output directory");
+    }
+    cx.capture_screenshot(handle)
+        .expect("render preview image")
+        .save(path)
+        .expect("write preview image");
+}
+
 #[cfg(all(test, feature = "gpui-tests"))]
 mod tests {
     use crate::config::{self, LanguageChoice, ThemeChoice};
@@ -592,7 +768,19 @@ while IFS= read -r line; do printf '%s\n' "$line"; done < "$HOME/go-output"
                 window.find("cache-state-bun.cache").label(),
                 Some("Cannot read the cache path or measure its size")
             );
+            window.click("cache-group-toolchain", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
             assert_eq!(window.find("cache-state-go.build").label(), Some("64 B"));
+            window.click("cache-group-dependency", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
             window.press("end", cx);
             window.press("up", cx);
             window.press("space", cx);
@@ -662,6 +850,12 @@ while IFS= read -r line; do printf '%s\n' "$line"; done < "$HOME/go-output"
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
             window.click("npm.cacache", cx);
+            window.click("cache-group-toolchain", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
             window.click("cache-clean", cx);
         })
         .unwrap();
@@ -688,10 +882,6 @@ while IFS= read -r line; do printf '%s\n' "$line"; done < "$HOME/go-output"
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
             assert_eq!(window.find("cache-state-go.build").label(), Some("64 B"));
-            assert_eq!(
-                window.find("cache-state-gradle.caches").label(),
-                Some("Cleaned · 0 B")
-            );
             window.click("cache-cancel", cx);
         })
         .unwrap();
@@ -700,6 +890,12 @@ while IFS= read -r line; do printf '%s\n' "$line"; done < "$HOME/go-output"
             window.render_frame(cx);
             assert_eq!(window.find("cache-state-go.build").label(), Some("512 B"));
             assert_eq!(window.find("go.build").checked(), Some(false));
+            window.click("cache-group-dependency", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
             assert_eq!(window.find("gradle.caches").checked(), Some(false));
             assert_eq!(
                 window.find("cache-state-gradle.caches").label(),
@@ -730,6 +926,12 @@ while IFS= read -r line; do printf '%s\n' "$line"; done < "$HOME/go-output"
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
             window.click("nav-global-caches", cx);
+            window.click("cache-group-toolchain", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
             assert_eq!(window.find("cache-state-go.build").label(), Some("512 B"));
         })
         .unwrap();
@@ -1698,7 +1900,13 @@ while IFS= read -r line; do printf '%s\n' "$line"; done < "$HOME/go-output"
                 gpui_kit::size(gpui_kit::px(1150.), gpui_kit::px(760.))
             );
             window.render_frame(cx);
-            window.press("tab", cx);
+            // Title-bar sidebar toggle is the first stop; settings lives in the sidebar footer.
+            for _ in 0..8 {
+                if window.find("settings").focused() == Some(true) {
+                    break;
+                }
+                window.press("tab", cx);
+            }
             assert_eq!(window.find("settings").focused(), Some(true));
             window.press("enter", cx);
         })

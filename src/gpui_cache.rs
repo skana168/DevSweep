@@ -7,7 +7,7 @@ use crate::{
     size,
 };
 use gpui_kit::component::{
-    ActiveTheme, Disableable, IconName,
+    ActiveTheme, Disableable, IconName, Selectable,
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
 };
@@ -55,6 +55,7 @@ pub struct GlobalCacheView {
     default_mode: DeleteMode,
     clean: CacheClean,
     context_invalidated: bool,
+    group: CacheGroup,
 }
 impl GlobalCacheView {
     /// `projects` supplies the same Go path protections as the project workspace.
@@ -105,6 +106,10 @@ impl GlobalCacheView {
         if let Some(row) = rows.first() {
             row.focus.focus(window, cx);
         }
+        let group = rows
+            .first()
+            .map(|row| row.entry.rule.group)
+            .unwrap_or(CacheGroup::Dependency);
         let mut this = Self {
             rows,
             language,
@@ -115,6 +120,7 @@ impl GlobalCacheView {
             default_mode: DeleteMode::Trash,
             clean: CacheClean::default(),
             context_invalidated: false,
+            group,
         };
         this.measure_pending(cx);
         this
@@ -291,8 +297,16 @@ impl GlobalCacheView {
             }
             _ => return,
         };
+        self.group = self.rows[next].entry.rule.group;
         self.rows[next].focus.focus(window, cx);
-        self.scroll.scroll_to_item(next);
+        let visible_ix = self
+            .rows
+            .iter()
+            .take(next + 1)
+            .filter(|row| row.entry.rule.group == self.group)
+            .count()
+            .saturating_sub(1);
+        self.scroll.scroll_to_item(visible_ix);
         cx.stop_propagation();
         cx.notify();
     }
@@ -354,24 +368,6 @@ impl GlobalCacheView {
             .border_b_1()
             .border_color(cx.theme().border)
             .focus_visible(|style| style.bg(cx.theme().muted))
-            .when(
-                ix == 0 || self.rows[ix - 1].entry.rule.group != row.entry.rule.group,
-                |element| {
-                    let id = match row.entry.rule.group {
-                        CacheGroup::Dependency => "cache-group-dependency",
-                        CacheGroup::Toolchain => "cache-group-toolchain",
-                    };
-                    element.child(
-                        div()
-                            .id(id)
-                            .test_support()
-                            .aria_label(strings.cache_group(row.entry.rule.group))
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(strings.cache_group(row.entry.rule.group)),
-                    )
-                },
-            )
             .child(
                 div()
                     .flex()
@@ -510,7 +506,9 @@ impl Render for GlobalCacheView {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child(strings.global_caches)
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(div().text_lg().child(strings.global_caches))
                     .when(self.context_invalidated, |header| {
                         header.child(if lang == Lang::En {
                             "Protected locations changed. Reopen Global caches to measure again."
@@ -528,34 +526,87 @@ impl Render for GlobalCacheView {
                             .child(progress),
                     ),
             )
-            .child(
+            .child({
+                let visible = self
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, row)| row.entry.rule.group == self.group)
+                    .map(|(ix, _)| ix)
+                    .collect::<Vec<_>>();
+                let empty_message = match lang {
+                    Lang::Zh => "当前平台没有可用的全局缓存条目",
+                    Lang::En => "No global cache entries on this platform",
+                };
                 div()
-                    .id("cache-list")
+                    .flex()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .children((0..self.rows.len()).map(|ix| self.render_row(ix, strings, cx)))
-                    .when(self.rows.is_empty(), |list| {
-                        let message = match lang {
-                            Lang::Zh => "当前平台没有可用的全局缓存条目",
-                            Lang::En => "No global cache entries on this platform",
-                        };
-                        list.child(
-                            div()
-                                .id("cache-empty")
-                                .test_support()
-                                .aria_label(message)
-                                .p_4()
-                                .child(message),
-                        )
-                    }),
-            )
+                    .min_w_0()
+                    .child(
+                        div()
+                            .w_56()
+                            .flex_shrink_0()
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .p_2()
+                            .border_r_1()
+                            .border_color(cx.theme().border)
+                            .children([CacheGroup::Dependency, CacheGroup::Toolchain].map(
+                                |group| {
+                                    let id = match group {
+                                        CacheGroup::Dependency => "cache-group-dependency",
+                                        CacheGroup::Toolchain => "cache-group-toolchain",
+                                    };
+                                    Button::new(id)
+                                        .label(strings.cache_group(group))
+                                        .selected(self.group == group)
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.group = group;
+                                            if let Some(row) = this
+                                                .rows
+                                                .iter()
+                                                .find(|row| row.entry.rule.group == group)
+                                            {
+                                                row.focus.focus(window, cx);
+                                            }
+                                            cx.notify();
+                                        }))
+                                },
+                            )),
+                    )
+                    .child(
+                        div()
+                            .id("cache-list")
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
+                            .children(visible.iter().map(|ix| self.render_row(*ix, strings, cx)))
+                            .when(self.rows.is_empty(), |list| {
+                                list.child(
+                                    div()
+                                        .id("cache-empty")
+                                        .test_support()
+                                        .aria_label(empty_message)
+                                        .p_4()
+                                        .child(empty_message),
+                                )
+                            }),
+                    )
+            })
             .child(
                 div()
                     .id("cache-selection-summary")
                     .test_support()
                     .aria_label(summary.clone())
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
                     .p_4()
                     .border_t_1()
                     .border_color(cx.theme().border)
@@ -762,6 +813,12 @@ mod tests {
         .unwrap();
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
+            window.click("cache-group-dependency", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
             assert_eq!(window.find("go.module").checked(), Some(false));
             window.click("go.module", cx);
             window.click("cache-clean", cx);
@@ -788,6 +845,12 @@ mod tests {
                     .unwrap()
                     .contains("Abort requested")
             );
+            window.click("cache-group-toolchain", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
             window.click("go.build", cx);
             window.click("cache-clean", cx);
             assert!(window.try_find("cache-execute").is_none());
@@ -864,6 +927,12 @@ mod tests {
         .await;
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
+            window.click("cache-group-dependency", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
             assert!(
                 window
                     .find("cache-clean-result")
@@ -889,6 +958,12 @@ mod tests {
                     .contains("Cache location changed")
             );
             window.press("escape", cx);
+            window.click("cache-group-toolchain", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
             assert_eq!(window.find("cache-state-go.build").label(), Some("2048 B"));
         })
         .unwrap();
@@ -1237,6 +1312,12 @@ mod tests {
             .unwrap();
             (handle, view.unwrap())
         });
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("cache-group-toolchain", cx);
+        })
+        .unwrap();
         cx.run_until_parked();
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
