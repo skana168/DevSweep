@@ -1,0 +1,1928 @@
+//! GPUI settings entry point; the egui executable remains the default during migration.
+use crate::{
+    config::{self, Config, LanguageChoice, ThemeChoice},
+    delete::DeleteMode,
+    gpui_cache::GlobalCacheView,
+    gpui_projects::{CleanProjects, ProjectDiscovery, RefreshProjects, RootsChanged},
+    i18n::Lang,
+};
+use gpui_kit::component::{
+    ActiveTheme, Collapsible, IconName, Theme, ThemeMode, TitleBar, WindowExt,
+    button::{Button, ButtonVariants},
+    radio::{Radio, RadioGroup},
+    sidebar::{Sidebar, SidebarFooter, SidebarHeader, SidebarItem, SidebarMenuItem},
+    v_flex,
+};
+use gpui_kit::*;
+use std::{borrow::Cow, path::PathBuf};
+
+actions!(settings, [OpenSettings, Quit]);
+
+struct BrandAssets;
+impl AssetSource for BrandAssets {
+    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if path == "brand.png" {
+            #[cfg(target_os = "macos")]
+            let bytes = include_bytes!("../assets/icon-macos.png").as_slice();
+            #[cfg(not(target_os = "macos"))]
+            let bytes = include_bytes!("../assets/icon.png").as_slice();
+            Ok(Some(Cow::Borrowed(bytes)))
+        } else {
+            gpui_kit::assets::Assets.load(path)
+        }
+    }
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        gpui_kit::assets::Assets.list(path)
+    }
+}
+
+fn init(cx: &mut App) {
+    gpui_kit::init(cx);
+    cx.bind_keys([
+        KeyBinding::new("secondary-shift-backspace", CleanProjects, Some("DevSweep")),
+        KeyBinding::new("secondary-r", RefreshProjects, Some("DevSweep")),
+        KeyBinding::new("secondary-,", OpenSettings, Some("DevSweep")),
+        KeyBinding::new("secondary-q", Quit, None),
+    ]);
+    cx.on_action(|_: &Quit, cx| cx.quit());
+    Theme::update(cx, |theme| {
+        // Native font families include the OS CJK fallback; paths use the same readable UI font.
+        theme.font_family = if cfg!(target_os = "windows") {
+            "Segoe UI"
+        } else {
+            ".SystemUIFont"
+        }
+        .into();
+    });
+}
+
+/// Start the opt-in GPUI frontend with the existing configuration file.
+pub fn run() {
+    let config = config::load();
+    gpui_kit::application()
+        .with_assets(BrandAssets)
+        .run(move |cx| {
+            init(cx);
+            gpui_kit::open_window(window_options(&config, cx), cx, |window, cx| {
+                cx.new(|cx| SettingsApp::new(config, config::config_path(), window, cx))
+            })
+            .expect("open DevSweep window");
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+            cx.activate(true);
+        });
+}
+
+fn window_options(config: &Config, cx: &App) -> WindowOptions {
+    // Window geometry is a physical platform boundary, stored in logical pixels by both frontends.
+    let size = config.window.map_or(size(px(1100.), px(720.)), |w| {
+        size(
+            px(if w.width.is_finite() {
+                w.width.max(880.)
+            } else {
+                1100.
+            }),
+            px(if w.height.is_finite() {
+                w.height.max(560.)
+            } else {
+                720.
+            }),
+        )
+    });
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size, cx))),
+        window_min_size: Some(gpui_kit::size(px(880.), px(560.))),
+        ..TitleBar::window_options()
+    }
+}
+
+/// Sidebar menu that keeps stable ElementIds for navigation tests and actions.
+#[derive(Clone)]
+struct AppNavMenu {
+    collapsed: bool,
+    items: Vec<(SharedString, SidebarMenuItem)>,
+}
+
+impl Collapsible for AppNavMenu {
+    fn is_collapsed(&self) -> bool {
+        self.collapsed
+    }
+
+    fn collapsed(mut self, collapsed: bool) -> Self {
+        self.collapsed = collapsed;
+        self
+    }
+}
+
+impl SidebarItem for AppNavMenu {
+    fn render(
+        self,
+        _: impl Into<ElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> impl IntoElement {
+        v_flex()
+            .gap_2()
+            .children(self.items.into_iter().map(|(id, item)| {
+                item.collapsed(self.collapsed)
+                    .render(id, window, cx)
+                    .into_any_element()
+            }))
+    }
+}
+
+struct SettingsApp {
+    config: Config,
+    path: Option<PathBuf>,
+    focus: FocusHandle,
+    projects: Entity<ProjectDiscovery>,
+    nav_collapsed: bool,
+    global_caches: bool,
+    caches: Option<Entity<GlobalCacheView>>,
+    cache_projects: Vec<PathBuf>,
+    cache_invalidated: bool,
+    auto_refresh_pending: bool,
+    cache_subscription: Option<Subscription>,
+    _subscriptions: Vec<Subscription>,
+}
+impl SettingsApp {
+    fn new(
+        config: Config,
+        path: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let focus = cx.focus_handle();
+        focus.focus(window, cx);
+        let bounds = cx.observe_window_bounds(window, |this, window, _| {
+            // WindowOptions restores content dimensions; native bounds include the title bar.
+            // Persisting the outer frame makes macOS grow by a title-bar height each launch.
+            let size = window.viewport_size();
+            this.config.window = Some(config::Window {
+                width: size.width.into(),
+                height: size.height.into(),
+            });
+            config::save_to(this.path.clone(), &this.config);
+        });
+        let appearance =
+            cx.observe_window_appearance(window, |this, window, cx| this.apply_theme(window, cx));
+        let projects =
+            cx.new(|cx| ProjectDiscovery::new(config.roots.clone(), config.language, window, cx));
+        projects.update(cx, |projects, _| {
+            projects.set_delete_mode(config.delete_mode)
+        });
+        let roots = cx.subscribe(&projects, |this, _, event: &RootsChanged, cx| {
+            this.config.roots = event.0.clone();
+            this.invalidate_caches(cx);
+            config::save_to(this.path.clone(), &this.config);
+            cx.notify();
+        });
+        let workspace = cx.observe_in(&projects, window, |this, _, window, cx| {
+            let paths = this.projects.read(cx).project_paths();
+            if paths != this.cache_projects {
+                this.invalidate_caches(cx);
+                this.cache_projects = paths;
+            }
+            this.run_auto_refresh(cx);
+            if this.global_caches {
+                this.ensure_caches(window, cx);
+            }
+            cx.notify();
+        });
+        let activation = cx.observe_window_activation(window, |this, window, cx| {
+            let due = this.projects.update(cx, |projects, _| {
+                projects.activate(window.is_window_active())
+            });
+            this.auto_refresh_pending |= due;
+            this.run_auto_refresh(cx);
+        });
+        let this = Self {
+            config,
+            path,
+            focus,
+            projects,
+            nav_collapsed: false,
+            global_caches: false,
+            caches: None,
+            cache_projects: vec![],
+            cache_invalidated: false,
+            auto_refresh_pending: false,
+            cache_subscription: None,
+            _subscriptions: vec![bounds, appearance, roots, workspace, activation],
+        };
+        this.apply_theme(window, cx);
+        this
+    }
+    fn ensure_caches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.caches.is_none() {
+            self.cache_projects = self.projects.read(cx).project_paths();
+            self.caches = Some(cx.new(|cx| {
+                GlobalCacheView::new(&self.config, self.cache_projects.clone(), window, cx)
+            }));
+            self.cache_invalidated = false;
+            // Retain the result until an explicit navigation/refresh; do not replace a
+            // finishing worker's view merely because its protection context changed.
+            self.cache_subscription =
+                Some(cx.observe(self.caches.as_ref().unwrap(), |this, _, cx| {
+                    this.run_auto_refresh(cx);
+                    cx.notify();
+                }));
+        }
+    }
+    fn run_auto_refresh(&mut self, cx: &mut Context<Self>) {
+        if !self.auto_refresh_pending
+            || self.cache_locked(cx)
+            || self.projects.read(cx).clean_locked()
+        {
+            return;
+        }
+        self.auto_refresh_pending = false;
+        self.projects
+            .update(cx, |projects, cx| projects.refresh_from_activation(cx));
+        if let Some(cache) = &self.caches {
+            cache.update(cx, |cache, cx| cache.refresh_stale(cx));
+        }
+    }
+    fn cache_locked(&self, cx: &App) -> bool {
+        self.caches
+            .as_ref()
+            .is_some_and(|cache| cache.read(cx).clean_locked())
+    }
+    fn invalidate_caches(&mut self, cx: &mut Context<Self>) {
+        if self.cache_locked(cx) || (self.cache_invalidated && self.caches.is_some()) {
+            self.cache_invalidated = true;
+            if let Some(cache) = &self.caches {
+                cache.update(cx, |cache, cx| cache.invalidate_clean(cx));
+            }
+        } else {
+            self.caches = None;
+            self.cache_subscription = None;
+        }
+    }
+    fn apply_theme(&self, window: &mut Window, cx: &mut App) {
+        let dark = match self.config.theme {
+            ThemeChoice::Dark => true,
+            ThemeChoice::Light => false,
+            ThemeChoice::System => matches!(
+                window.appearance(),
+                WindowAppearance::Dark | WindowAppearance::VibrantDark
+            ),
+        };
+        Theme::change(
+            if dark {
+                ThemeMode::Dark
+            } else {
+                ThemeMode::Light
+            },
+            Some(window),
+            cx,
+        );
+    }
+    fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let owner = cx.entity();
+        let panel = cx.new(|_| SettingsPanel {
+            owner: owner.clone(),
+        });
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let strings = Lang::from_choice(owner.read(cx).config.language).strings();
+            dialog.title(strings.settings).child(panel.clone())
+        });
+    }
+}
+impl Render for SettingsApp {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let strings = Lang::from_choice(self.config.language).strings();
+        let owner = cx.entity();
+        let cache_locked = self.cache_locked(cx);
+        let clean_locked = self.projects.read(cx).clean_locked();
+        let collapsed = self.nav_collapsed;
+        let nav = AppNavMenu {
+            collapsed,
+            items: vec![
+                (
+                    "nav-projects".into(),
+                    SidebarMenuItem::new(strings.projects)
+                        .icon(IconName::Folder)
+                        .active(!self.global_caches)
+                        .disable(cache_locked)
+                        .on_click({
+                            let owner = owner.clone();
+                            move |_, _, cx| {
+                                owner.update(cx, |this, cx| {
+                                    this.global_caches = false;
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                ),
+                (
+                    "nav-global-caches".into(),
+                    SidebarMenuItem::new(strings.global_caches)
+                        .icon(IconName::HardDrive)
+                        .active(self.global_caches)
+                        .disable(clean_locked)
+                        .on_click({
+                            let owner = owner.clone();
+                            move |_, window, cx| {
+                                owner.update(cx, |this, cx| {
+                                    if this.cache_invalidated && !this.cache_locked(cx) {
+                                        this.caches = None;
+                                    }
+                                    this.ensure_caches(window, cx);
+                                    this.global_caches = true;
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                ),
+            ],
+        };
+        let mut brand = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(img("brand.png").size_6());
+        if !collapsed {
+            brand = brand.child("DevSweep");
+        }
+        let mut settings = Button::new("settings")
+            .ghost()
+            .icon(IconName::Settings)
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.open_settings(&OpenSettings, window, cx);
+            }));
+        if !collapsed {
+            settings = settings.label(format!("{}…", strings.settings));
+        }
+        let toggle_label = match (Lang::from_choice(self.config.language), collapsed) {
+            (Lang::Zh, true) => "展开侧边栏",
+            (Lang::Zh, false) => "收起侧边栏",
+            (Lang::En, true) => "Expand sidebar",
+            (Lang::En, false) => "Collapse sidebar",
+        };
+        let mut collapse = Button::new("collapse-nav")
+            .ghost()
+            .icon(if collapsed {
+                IconName::PanelLeftOpen
+            } else {
+                IconName::PanelLeftClose
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.nav_collapsed = !this.nav_collapsed;
+                cx.notify();
+            }));
+        if !collapsed {
+            collapse = collapse.label(toggle_label);
+        }
+        div()
+            .id("workspace")
+            .test_support()
+            .track_focus(&self.focus)
+            .key_context("DevSweep")
+            .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(|this, _: &CleanProjects, window, cx| {
+                if this.global_caches {
+                    if let Some(cache) = &this.caches {
+                        cache.update(cx, |cache, cx| cache.open_clean(window, cx));
+                    }
+                } else if !this.cache_locked(cx) {
+                    this.projects
+                        .update(cx, |projects, cx| projects.request_clean(cx));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &RefreshProjects, _, cx| {
+                if !this.global_caches && !this.cache_locked(cx) {
+                    this.projects
+                        .update(cx, |projects, cx| projects.refresh(cx));
+                }
+            }))
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .child(TitleBar::new())
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .child(
+                        Sidebar::new("app-nav")
+                            .collapsed(collapsed)
+                            .h_full()
+                            .header(SidebarHeader::new().child(brand))
+                            .footer(
+                                SidebarFooter::new().child(
+                                    v_flex().w_full().gap_1().child(settings).child(collapse),
+                                ),
+                            )
+                            .child(nav),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .child(if self.global_caches {
+                                self.caches
+                                    .as_ref()
+                                    .expect("cache navigation initializes view")
+                                    .clone()
+                                    .into_any_element()
+                            } else {
+                                self.projects.clone().into_any_element()
+                            }),
+                    ),
+            )
+    }
+}
+
+struct SettingsPanel {
+    owner: Entity<SettingsApp>,
+}
+impl Render for SettingsPanel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let config = self.owner.read(cx).config.clone();
+        let strings = Lang::from_choice(config.language).strings();
+        let language_owner = self.owner.clone();
+        let theme_owner = self.owner.clone();
+        let delete_owner = self.owner.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(strings.language)
+            .child(
+                RadioGroup::new("language")
+                    .child(Radio::new("language-system").label(strings.system))
+                    .child(Radio::new("language-zh").label(strings.lang_zh))
+                    .child(Radio::new("language-en").label(strings.lang_en))
+                    .selected_index(Some(match config.language {
+                        LanguageChoice::System => 0,
+                        LanguageChoice::Zh => 1,
+                        LanguageChoice::En => 2,
+                    }))
+                    .on_change(cx.listener(move |_, ix, window, cx| {
+                        language_owner.update(cx, |owner, cx| {
+                            owner.config.language = [
+                                LanguageChoice::System,
+                                LanguageChoice::Zh,
+                                LanguageChoice::En,
+                            ][*ix];
+                            owner.projects.update(cx, |projects, cx| {
+                                projects.set_language(owner.config.language, cx)
+                            });
+                            if let Some(caches) = &owner.caches {
+                                caches.update(cx, |caches, cx| {
+                                    caches.set_language(owner.config.language, cx)
+                                });
+                            }
+                            config::save_to(owner.path.clone(), &owner.config);
+                            cx.notify();
+                        });
+                        window.refresh();
+                        cx.notify();
+                    })),
+            )
+            .child(strings.theme)
+            .child(
+                RadioGroup::new("theme")
+                    .child(Radio::new("theme-system").label(strings.system))
+                    .child(Radio::new("theme-light").label(strings.light))
+                    .child(Radio::new("theme-dark").label(strings.dark))
+                    .selected_index(Some(match config.theme {
+                        ThemeChoice::System => 0,
+                        ThemeChoice::Light => 1,
+                        ThemeChoice::Dark => 2,
+                    }))
+                    .on_change(cx.listener(move |_, ix, window, cx| {
+                        theme_owner.update(cx, |owner, cx| {
+                            owner.config.theme =
+                                [ThemeChoice::System, ThemeChoice::Light, ThemeChoice::Dark][*ix];
+                            owner.apply_theme(window, cx);
+                            config::save_to(owner.path.clone(), &owner.config);
+                            cx.notify();
+                        });
+                        cx.notify();
+                    })),
+            )
+            .child(strings.delete_mode)
+            .child(
+                RadioGroup::vertical("delete-mode")
+                    .child(Radio::new("delete-trash").label(strings.delete_trash))
+                    .child(Radio::new("delete-direct").label(strings.delete_direct))
+                    .selected_index(Some(if config.delete_mode == DeleteMode::Trash {
+                        0
+                    } else {
+                        1
+                    }))
+                    .on_change(cx.listener(move |_, ix, _, cx| {
+                        delete_owner.update(cx, |owner, cx| {
+                            owner.config.delete_mode = if *ix == 0 {
+                                DeleteMode::Trash
+                            } else {
+                                DeleteMode::Direct
+                            };
+                            owner.projects.update(cx, |projects, _| {
+                                projects.set_delete_mode(owner.config.delete_mode)
+                            });
+                            if let Some(cache) = &owner.caches {
+                                cache.update(cx, |cache, _| {
+                                    cache.set_delete_mode(owner.config.delete_mode)
+                                });
+                            }
+                            config::save_to(owner.path.clone(), &owner.config);
+                            cx.notify();
+                        });
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(strings.delete_note),
+            )
+    }
+}
+
+#[cfg(feature = "gpui-tests")]
+pub fn capture_preview(path: &std::path::Path) {
+    use gpui_kit::test::TestWindowExt;
+    use std::sync::Arc;
+    let loaded = config::load();
+    let dark = match loaded.theme {
+        ThemeChoice::Dark => true,
+        ThemeChoice::Light => false,
+        ThemeChoice::System => std::process::Command::new("defaults")
+            .args(["read", "-g", "AppleInterfaceStyle"])
+            .output()
+            .ok()
+            .is_some_and(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .to_ascii_lowercase()
+                    .contains("dark")
+            }),
+    };
+    let temp = std::env::temp_dir().join(format!("devsweep-preview-{}", std::process::id()));
+    std::fs::create_dir_all(&temp).expect("preview directory");
+    let root = temp.canonicalize().expect("preview root");
+    for (name, marker, target) in [
+        ("web", "package.json", "node_modules"),
+        ("api", "Cargo.toml", "target"),
+        ("mobile", "pubspec.yaml", "build"),
+        ("notes", "requirements.txt", "__pycache__"),
+    ] {
+        let project = root.join(name);
+        std::fs::create_dir_all(project.join(target)).expect("preview project");
+        std::fs::write(project.join(marker), "{}\n").expect("preview marker");
+        std::fs::write(project.join(target).join("payload"), [0; 4096]).expect("preview payload");
+    }
+    let config = config::Config {
+        roots: vec![root.clone()],
+        language: loaded.language,
+        theme: if dark { ThemeChoice::Dark } else { loaded.theme },
+        delete_mode: loaded.delete_mode,
+        window: Some(config::Window {
+            width: 1100.,
+            height: 720.,
+        }),
+    };
+    let mut cx = gpui_kit::HeadlessAppContext::with_platform(
+        gpui_kit::platform::current_platform(true).text_system(),
+        Arc::new(BrandAssets),
+        gpui_kit::platform::current_headless_renderer,
+    );
+    cx.update(|cx| {
+        init(cx);
+        cx.set_reduce_motion(true);
+    });
+    let mut options = TitleBar::window_options();
+    options.show = false;
+    options.focus = false;
+    options.window_bounds = Some(WindowBounds::Windowed(Bounds::new(
+        point(px(0.), px(0.)),
+        size(px(1100.), px(720.)),
+    )));
+    let (handle, _) = cx
+        .update(|cx| {
+            gpui_kit::open_window(options, cx, |window, cx| {
+                cx.new(|cx| {
+                    SettingsApp::new(config, Some(temp.join("config.toml")), window, cx)
+                })
+            })
+        })
+        .expect("open preview window");
+    let project = SharedString::from(root.join("web").to_string_lossy().into_owned());
+    for _ in 0..40 {
+        cx.run_until_parked();
+        let found = cx
+            .update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                window.try_find(project.clone()).is_some()
+            })
+            .expect("render preview");
+        if found {
+            break;
+        }
+    }
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        if window.try_find(project.clone()).is_some() {
+            window.click(project, cx);
+        }
+        window.render_frame(cx);
+    })
+    .expect("select preview project");
+    cx.run_until_parked();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("preview output directory");
+    }
+    cx.capture_screenshot(handle)
+        .expect("render preview image")
+        .save(path)
+        .expect("write preview image");
+}
+
+#[cfg(all(test, feature = "gpui-tests"))]
+mod tests {
+    use crate::config::{self, LanguageChoice, ThemeChoice};
+    use crate::delete::DeleteMode;
+    use gpui_kit::test::{TestAppContextExt, TestWindowExt};
+    use gpui_kit::{AppContext, SharedString, TestAppContext, WindowOptions};
+
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    async fn activation_defers_cache_refresh_until_cancel_and_remeasures_recreated_cache(
+        cx: &mut TestAppContext,
+    ) {
+        use std::{os::unix::fs::PermissionsExt, time::Duration};
+        let Some(home) = std::env::var_os("DEVSWEEP_ACTIVATION_HOME") else {
+            let fixture = tempfile::tempdir().unwrap();
+            let fixture_home = fixture.path().canonicalize().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "gpui_settings::tests::activation_defers_cache_refresh_until_cancel_and_remeasures_recreated_cache", "--nocapture", "--test-threads=1"])
+                .env("DEVSWEEP_ACTIVATION_HOME", &fixture_home)
+                .env("HOME", &fixture_home).env("USERPROFILE", &fixture_home)
+                .env("LOCALAPPDATA", fixture_home.join("LocalAppData"))
+                .env("PATH", &fixture_home).output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
+        let home = std::path::PathBuf::from(home).canonicalize().unwrap();
+        let go = home.join("go");
+        std::fs::write(
+            &go,
+            r#"#!/bin/sh
+while IFS= read -r line; do printf '%s\n' "$line"; done < "$HOME/go-output"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&go, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let build = home.join("go-build");
+        let module = home.join("go-module");
+        std::fs::write(
+            home.join("go-output"),
+            format!("{}\n{}\n", build.display(), module.display()),
+        )
+        .unwrap();
+        for path in [&build, &module] {
+            std::fs::create_dir(path).unwrap();
+            std::fs::write(path.join("payload"), [0; 64]).unwrap();
+        }
+        let gradle = home.join(".gradle/caches");
+        let npm = crate::cache::entries()
+            .into_iter()
+            .find(|e| e.rule.id == "npm.cacache")
+            .unwrap()
+            .path
+            .unwrap();
+        for path in [&gradle, &npm] {
+            assert!(path.starts_with(&home));
+            std::fs::create_dir_all(path).unwrap();
+            std::fs::write(path.join("payload"), [0; 128]).unwrap();
+        }
+        let recovered_missing = home.join(".gradle/wrapper/dists");
+        let recovered_unreadable = home.join(".bun/install/cache");
+        std::fs::create_dir_all(&recovered_unreadable).unwrap();
+        std::fs::write(recovered_unreadable.join("payload"), [0; 48]).unwrap();
+        std::fs::set_permissions(
+            &recovered_unreadable,
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+        let projects = home.join("projects");
+        std::fs::create_dir(&projects).unwrap();
+        let new = projects.join("known");
+        std::fs::create_dir(&new).unwrap();
+        std::fs::write(new.join("package.json"), "{}").unwrap();
+        cx.update(|cx| {
+            super::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    super::SettingsApp::new(
+                        config::Config {
+                            roots: vec![projects.clone()],
+                            language: LanguageChoice::En,
+                            ..Default::default()
+                        },
+                        Some(home.join("config.toml")),
+                        window,
+                        cx,
+                    )
+                })
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("nav-global-caches", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("cache-state-gradle.dists").label(),
+                Some("Cache directory does not exist")
+            );
+            assert_eq!(
+                window.find("cache-state-bun.cache").label(),
+                Some("Cannot read the cache path or measure its size")
+            );
+            window.click("cache-group-toolchain", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("cache-state-go.build").label(), Some("64 B"));
+            window.click("cache-group-dependency", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("end", cx);
+            window.press("up", cx);
+            window.press("space", cx);
+            window.press("home", cx);
+            window.click("npm.cacache", cx);
+            window.click("cache-clean", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("cache-mode-direct", cx);
+            window.click("cache-execute", cx);
+        })
+        .unwrap();
+        cx.wait_for(handle, Duration::from_secs(3), |window, _| {
+            window.try_find("cache-clean-result").is_some_and(|r| {
+                r.label()
+                    .is_some_and(|s| s.contains("Cache clean finished"))
+            })
+        })
+        .await;
+        assert!(!gradle.exists());
+        std::fs::create_dir_all(&recovered_missing).unwrap();
+        std::fs::write(recovered_missing.join("payload"), [0; 24]).unwrap();
+        std::fs::set_permissions(
+            &recovered_unreadable,
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+
+        // Refreshing a still-absent cache must keep the successful Clean state.
+        let first_return = cx.update(|cx| {
+            cx.open_window(WindowOptions::default(), |_, cx| {
+                cx.new(|_| gpui_kit::Empty)
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(*first_return, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.background_executor
+            .advance_clock(Duration::from_secs(30));
+        cx.update_window(handle, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("cache-state-gradle.dists").label(),
+                Some("24 B")
+            );
+            assert_eq!(window.find("cache-state-bun.cache").label(), Some("48 B"));
+            assert_eq!(window.find("gradle.dists").checked(), Some(true));
+            assert_eq!(window.find("bun.cache").checked(), Some(true));
+            assert_eq!(
+                window.find("cache-state-gradle.caches").label(),
+                Some("Cleaned · 0 B")
+            );
+        })
+        .unwrap();
+        std::fs::create_dir_all(&gradle).unwrap();
+        std::fs::write(gradle.join("rebuilt"), [0; 256]).unwrap();
+        std::fs::write(build.join("payload"), [0; 512]).unwrap();
+        std::fs::write(npm.join("payload"), [0; 1024]).unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("npm.cacache", cx);
+            window.click("cache-group-toolchain", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("cache-clean", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let other = cx.update(|cx| {
+            cx.open_window(WindowOptions::default(), |_, cx| {
+                cx.new(|_| gpui_kit::Empty)
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(*other, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.background_executor
+            .advance_clock(Duration::from_secs(30));
+        std::fs::remove_file(new.join("package.json")).unwrap();
+        std::fs::write(new.join("Cargo.toml"), "[package]").unwrap();
+        std::fs::create_dir(new.join("target")).unwrap();
+        std::fs::write(new.join("target/payload"), [0; 32]).unwrap();
+        cx.update_window(handle, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("cache-state-go.build").label(), Some("64 B"));
+            window.click("cache-cancel", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("cache-state-go.build").label(), Some("512 B"));
+            assert_eq!(window.find("go.build").checked(), Some(false));
+            window.click("cache-group-dependency", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("gradle.caches").checked(), Some(false));
+            assert_eq!(
+                window.find("cache-state-gradle.caches").label(),
+                Some("256 B")
+            );
+            assert_eq!(
+                window.find("cache-state-npm.cacache").label(),
+                Some("128 B")
+            );
+            assert_eq!(window.find("npm.cacache").checked(), Some(true));
+            assert!(window.find("cache-clean").visible());
+            window.click("nav-projects", cx);
+            window
+                .within("project-list")
+                .within(SharedString::from(new.to_string_lossy().into_owned()))
+                .click("project-check", cx);
+            window.render_frame(cx);
+            assert_eq!(window.find("target-rust.target").checked(), Some(false));
+        })
+        .unwrap();
+        cx.update_window(*other, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        std::fs::write(build.join("payload"), [0; 1024]).unwrap();
+        cx.update_window(handle, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("nav-global-caches", cx);
+            window.click("cache-group-toolchain", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("cache-state-go.build").label(), Some("512 B"));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn foreground_activation_refreshes_only_after_grace_period(cx: &mut TestAppContext) {
+        use std::time::Duration;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        cx.update(|cx| {
+            super::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    super::SettingsApp::new(
+                        config::Config {
+                            roots: vec![root.clone()],
+                            language: LanguageChoice::En,
+                            ..Default::default()
+                        },
+                        Some(root.join("config.toml")),
+                        window,
+                        cx,
+                    )
+                })
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        let other = cx.update(|cx| {
+            cx.open_window(WindowOptions::default(), |_, cx| {
+                cx.new(|_| gpui_kit::Empty)
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(*other, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        let project = root.join("new-project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(project.join("package.json"), "{}").unwrap();
+        for (target, bytes) in [("node_modules", 16), ("dist", 8)] {
+            std::fs::create_dir(project.join(target)).unwrap();
+            std::fs::write(project.join(target).join("payload"), vec![0; bytes]).unwrap();
+        }
+        cx.background_executor
+            .advance_clock(Duration::from_secs(29));
+        cx.update_window(handle, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("discovery-empty").visible());
+        })
+        .unwrap();
+        cx.update_window(*other, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.background_executor.advance_clock(Duration::from_secs(1));
+        cx.update_window(handle, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window
+                .within("project-list")
+                .within(SharedString::from(project.to_string_lossy().into_owned()))
+                .click("project-check", cx);
+            window.render_frame(cx);
+            window.click("target-node.dist", cx);
+            window.click("target-node.node_modules", cx);
+            window.click("filter-Node", cx);
+        })
+        .unwrap();
+        cx.background_executor
+            .advance_clock(Duration::from_secs(29));
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("refresh-projects", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let later = root.join("later");
+        std::fs::create_dir(&later).unwrap();
+        std::fs::write(later.join("package.json"), "{}").unwrap();
+        cx.update_window(*other, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.background_executor.advance_clock(Duration::from_secs(1));
+        cx.update_window(handle, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window
+                    .within("project-list")
+                    .try_find(SharedString::from(later.to_string_lossy().into_owned()))
+                    .is_none()
+            );
+        })
+        .unwrap();
+        cx.update_window(*other, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.background_executor
+            .advance_clock(Duration::from_secs(29));
+        cx.update_window(handle, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window
+                    .within("project-list")
+                    .find(SharedString::from(later.to_string_lossy().into_owned()))
+                    .visible()
+            );
+            assert_eq!(window.find("target-node.dist").checked(), Some(true));
+            assert_eq!(
+                window.find("target-node.node_modules").checked(),
+                Some(false)
+            );
+            assert_eq!(
+                window
+                    .within("project-list")
+                    .within(SharedString::from(project.to_string_lossy().into_owned()))
+                    .find("project-size")
+                    .label(),
+                Some("Project size: 24 B")
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn settings_choices_remain_accessible_at_minimum_window_and_large_text(
+        cx: &mut TestAppContext,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let config = config::Config {
+            language: LanguageChoice::En,
+            window: Some(config::Window {
+                width: 880.,
+                height: 560.,
+            }),
+            ..Default::default()
+        };
+        cx.update(|cx| {
+            super::init(cx);
+            cx.set_reduce_motion(true);
+            gpui_kit::component::Theme::update(cx, |theme| theme.font_size = gpui_kit::px(20.));
+        });
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(super::window_options(&config, cx), cx, |window, cx| {
+                cx.new(|cx| {
+                    super::SettingsApp::new(
+                        config,
+                        Some(temp.path().join("config.toml")),
+                        window,
+                        cx,
+                    )
+                })
+            })
+            .unwrap()
+        });
+        cx.simulate_window_scale_factor_change(handle, 1.5);
+        for language in [1usize, 2usize] {
+            cx.update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                let projects = window.find("nav-projects").bounds();
+                let caches = window.find("nav-global-caches").bounds();
+                assert_eq!(projects.left(), caches.left());
+                assert_eq!(projects.right(), caches.right());
+                for _ in 0..12 {
+                    if window.find("settings").focused() == Some(true) {
+                        break;
+                    }
+                    window.press("tab", cx);
+                }
+                assert_eq!(window.find("settings").focused(), Some(true));
+                window.press("space", cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.update_window(handle, |_, window, cx| {
+                window.within("language").click(language, cx);
+                for group in ["language", "theme", "delete-mode"] {
+                    for choice in 0..if group == "delete-mode" { 2 } else { 3 } {
+                        let control = window.within(group).find(choice);
+                        assert!(control.visible(), "{group}/{choice} must remain visible");
+                        assert!(control.bounds().right() <= window.viewport_size().width);
+                        assert!(control.bounds().bottom() <= window.viewport_size().height);
+                    }
+                }
+                window.within("theme").click(2usize, cx);
+                window.within("theme").click(1usize, cx);
+                window.within("theme").click(0usize, cx);
+                window.press("escape", cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                assert!(window.try_find("dialog").is_none());
+                assert_eq!(window.find("settings").focused(), Some(true));
+                window.press("space", cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.update_window(handle, |_, window, cx| {
+                assert_eq!(
+                    window.within("language").find(language).checked(),
+                    Some(true)
+                );
+                window.press("escape", cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+        }
+    }
+
+    #[gpui_kit::test]
+    async fn confirmation_preserves_filtered_selection_and_failure_keeps_list_usable_at_minimum_size(
+        cx: &mut TestAppContext,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for (name, marker, target) in [
+            ("alpha", "package.json", "node_modules"),
+            ("beta", "Cargo.toml", "target"),
+        ] {
+            let project = root.join(name);
+            std::fs::create_dir_all(project.join(target)).unwrap();
+            std::fs::write(project.join(marker), "{}").unwrap();
+            std::fs::write(project.join(target).join("payload"), [0; 512]).unwrap();
+        }
+        let config = config::Config {
+            roots: vec![root.clone()],
+            language: LanguageChoice::En,
+            window: Some(config::Window {
+                width: 880.,
+                height: 560.,
+            }),
+            ..Default::default()
+        };
+        cx.update(|cx| {
+            super::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(super::window_options(&config, cx), cx, |window, cx| {
+                cx.new(|cx| {
+                    super::SettingsApp::new(config, Some(root.join("config.toml")), window, cx)
+                })
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window
+                .within("project-list")
+                .within(SharedString::from(
+                    root.join("alpha").to_string_lossy().into_owned(),
+                ))
+                .click("project-check", cx);
+            window.click("filter-Rust", cx);
+            window
+                .within("project-list")
+                .within(SharedString::from(
+                    root.join("beta").to_string_lossy().into_owned(),
+                ))
+                .click("project-check", cx);
+            window.within("project-list").click(
+                SharedString::from(root.join("beta").to_string_lossy().into_owned()),
+                cx,
+            );
+            window.click("target-rust.target", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("project-selection").label(),
+                Some("2 projects selected")
+            );
+            let clean = window.find("clean-projects");
+            assert!(clean.visible());
+            assert!(clean.bounds().right() <= window.viewport_size().width);
+            assert!(clean.bounds().bottom() <= window.viewport_size().height);
+            window.click("clean-projects", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        // A new Project must not change the reviewed plan or its filtered selection.
+        std::fs::create_dir(root.join("gamma")).unwrap();
+        std::fs::write(root.join("gamma/Cargo.toml"), "{}").unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("execute-clean").visible());
+            window.click("nav-global-caches", cx);
+            assert!(window.try_find("cache-selection").is_none());
+            window.press("secondary-r", cx);
+            window.press("secondary-,", cx);
+            assert!(window.try_find("language").is_none());
+            assert!(window.find("execute-clean").visible());
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("execute-clean").is_none());
+            assert_eq!(window.find("project-list-region").focused(), Some(true));
+            assert_eq!(
+                window.find("project-results").label(),
+                Some("1 of 2 projects")
+            );
+            window.press("secondary-r", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("project-results").label(),
+                Some("2 of 3 projects")
+            );
+            assert_eq!(
+                window.find("project-selection").label(),
+                Some("2 projects selected")
+            );
+            window.click("filter-all", cx);
+            assert_eq!(
+                window.find("project-results").label(),
+                Some("3 of 3 projects")
+            );
+        })
+        .unwrap();
+        assert!(root.join("alpha/node_modules/payload").exists());
+        assert!(root.join("beta/target/payload").exists());
+        // POSIX permissions provide the deterministic execution Failure fixture on Unix.
+        #[cfg(unix)]
+        {
+            cx.update_window(handle, |_, window, cx| window.click("clean-projects", cx))
+                .unwrap();
+            cx.run_until_parked();
+            use std::os::unix::fs::PermissionsExt;
+            let locked = root.join("beta/target");
+            cx.update_window(handle, |_, window, cx| {
+                window.click("clean-mode-direct", cx);
+                std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+                window.click("execute-clean", cx);
+            })
+            .unwrap();
+            use gpui_kit::test::TestAppContextExt;
+            cx.wait_for(handle, std::time::Duration::from_secs(2), |window, _| {
+                window.try_find("show-clean-failures").is_some()
+            })
+            .await;
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+            cx.update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                assert!(
+                    window
+                        .find("clean-result")
+                        .label()
+                        .unwrap()
+                        .contains("Failure: 1")
+                );
+                assert!(
+                    window.find("project-list-region").bounds().size.height
+                        >= window.rem_size() * 6.,
+                    "the result and controls must leave room to navigate Project rows"
+                );
+                window.within("project-list").click(
+                    SharedString::from(root.join("alpha").to_string_lossy().into_owned()),
+                    cx,
+                );
+                window.press("down", cx);
+                assert!(
+                    window
+                        .within("project-list")
+                        .find(SharedString::from(
+                            root.join("beta").to_string_lossy().into_owned()
+                        ))
+                        .visible()
+                );
+                window.press("space", cx);
+                assert_eq!(
+                    window.find("project-selection").label(),
+                    Some("1 project selected")
+                );
+            })
+            .unwrap();
+        }
+    }
+
+    #[gpui_kit::test]
+    fn clean_shortcut_reviews_saved_mode_and_never_executes(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let project = root.join("web");
+        std::fs::create_dir_all(project.join("node_modules")).unwrap();
+        std::fs::write(project.join("package.json"), "{}").unwrap();
+        std::fs::write(project.join("node_modules/payload"), [0; 512]).unwrap();
+        let path = Some(root.join("config.toml"));
+        config::save_to(
+            path.clone(),
+            &config::Config {
+                roots: vec![root.clone()],
+                language: LanguageChoice::En,
+                delete_mode: DeleteMode::Direct,
+                ..Default::default()
+            },
+        );
+        let config = config::load_from(path.clone());
+        cx.update(|cx| {
+            super::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(super::window_options(&config, cx), cx, |window, cx| {
+                cx.new(|cx| super::SettingsApp::new(config, path.clone(), window, cx))
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window
+                .within("project-list")
+                .within(SharedString::from(project.to_string_lossy().into_owned()))
+                .click("project-check", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.press("secondary-shift-backspace", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("clean-mode-direct").checked(), Some(true));
+            assert!(
+                window
+                    .find("clean-consequence")
+                    .label()
+                    .unwrap()
+                    .contains("cannot be recovered")
+            );
+            window.press("secondary-shift-backspace", cx);
+            window.press("enter", cx);
+            assert!(project.join("node_modules/payload").exists());
+            window.click("cancel-clean", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("execute-clean").is_none());
+            window.press("secondary-,", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.within("delete-mode").click(0usize, cx);
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.press("secondary-shift-backspace", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("clean-mode-trash").checked(), Some(true));
+            window.press("escape", cx);
+        })
+        .unwrap();
+        assert!(project.join("node_modules/payload").exists());
+        assert_eq!(config::load_from(path).delete_mode, DeleteMode::Trash);
+    }
+    #[gpui_kit::test]
+    fn main_navigation_retains_cache_selection_and_updates_settings(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("payload"), [0; 4096]).unwrap();
+        cx.update(|cx| {
+            super::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    let mut app = super::SettingsApp::new(
+                        config::Config {
+                            language: LanguageChoice::En,
+                            ..Default::default()
+                        },
+                        Some(temp.path().join("config.toml")),
+                        window,
+                        cx,
+                    );
+                    // Real catalogue entry and filesystem measurement, without depending on host caches.
+                    app.caches = Some(cx.new(|cx| {
+                        crate::gpui_cache::GlobalCacheView::from_entries(
+                            vec![crate::cache::CacheEntry {
+                                rule: crate::cache::builtin_caches()
+                                    .iter()
+                                    .find(|rule| rule.id == "gradle.caches")
+                                    .unwrap(),
+                                path: Some(temp.path().to_path_buf()),
+                            }],
+                            None,
+                            LanguageChoice::En,
+                            window,
+                            cx,
+                        )
+                    }));
+                    app
+                })
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("nav-global-caches", cx);
+            assert_eq!(window.find("gradle.caches").checked(), Some(true));
+            window.click("gradle.caches", cx);
+            assert_eq!(window.find("gradle.caches").checked(), Some(false));
+            window.click("nav-projects", cx);
+            assert!(window.find("discovery-empty").visible());
+            window.click("nav-global-caches", cx);
+            assert_eq!(window.find("gradle.caches").checked(), Some(false));
+            window.click("settings", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.within("language").click(1usize, cx);
+            window.within("theme").click(2usize, cx);
+            window.within("delete-mode").click(1usize, cx);
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("cache-group-dependency").label(), Some("依赖"));
+            assert_eq!(window.find("gradle.caches").checked(), Some(false));
+            assert!(gpui_kit::component::Theme::global(cx).mode.is_dark());
+            window.click("nav-projects", cx);
+            window.click("nav-global-caches", cx);
+            assert_eq!(window.find("gradle.caches").checked(), Some(false));
+            window.click("gradle.caches", cx);
+            window.press("secondary-shift-backspace", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("cache-mode-direct").checked(), Some(true));
+            assert!(
+                window
+                    .find("cache-consequence")
+                    .label()
+                    .unwrap()
+                    .contains("不可恢复")
+            );
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("nav-projects", cx);
+            assert!(window.find("discovery-empty").visible());
+        })
+        .unwrap();
+        assert!(temp.path().join("payload").exists());
+    }
+
+    #[gpui_kit::test]
+    fn covered_root_survives_parent_removal_and_restart(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("parent");
+        let child = parent.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(parent.join("package.json"), "{}").unwrap();
+        std::fs::write(child.join("Cargo.toml"), "").unwrap();
+        let child = child.canonicalize().unwrap();
+        let path = Some(temp.path().join("config.toml"));
+        let config = config::Config {
+            roots: vec![child.clone()],
+            language: LanguageChoice::En,
+            ..Default::default()
+        };
+        cx.update(|cx| {
+            super::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(super::window_options(&config, cx), cx, |window, cx| {
+                cx.new(|cx| super::SettingsApp::new(config, path.clone(), window, cx))
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("discovery-status").label(), Some("Projects: 1"));
+            window.click("scan-root-path", cx);
+            window.input(parent.to_str().unwrap(), cx);
+            window.click("add-scan-root", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let parent = parent.canonicalize().unwrap();
+        assert_eq!(
+            config::load_from(path.clone()).roots,
+            vec![child.clone(), parent.clone()]
+        );
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("discovery-status").label(), Some("Projects: 2"));
+            assert!(
+                window
+                    .find(SharedString::from(format!(
+                        "covered-root:{}",
+                        child.display()
+                    )))
+                    .visible()
+            );
+            window.within("scan-roots").click(
+                SharedString::from(parent.to_string_lossy().into_owned()),
+                cx,
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let restored = config::load_from(path.clone());
+        assert_eq!(restored.roots, vec![child.clone()]);
+        let (reopened, _) = cx.update(|cx| {
+            gpui_kit::open_window(super::window_options(&restored, cx), cx, |window, cx| {
+                cx.new(|cx| super::SettingsApp::new(restored, path, window, cx))
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        cx.update_window(reopened, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("discovery-status").label(), Some("Projects: 1"));
+            assert!(
+                window
+                    .within("project-list")
+                    .find(SharedString::from(child.to_string_lossy().into_owned()))
+                    .visible()
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn discovery_failure_can_be_copied_and_refresh_recovers_without_blocking_settings(
+        cx: &mut TestAppContext,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing");
+        let path = Some(temp.path().join("config.toml"));
+        cx.update(|cx| {
+            super::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let config = config::Config {
+            roots: vec![missing.clone()],
+            language: LanguageChoice::En,
+            ..Default::default()
+        };
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(super::window_options(&config, cx), cx, |window, cx| {
+                cx.new(|cx| super::SettingsApp::new(config, path.clone(), window, cx))
+            })
+            .unwrap()
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("settings", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("dialog").visible());
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("discovery-errors").visible());
+            assert!(window.try_find("discovery-empty").is_none());
+            window.click("copy-discovery-errors", cx);
+            assert!(
+                cx.read_from_clipboard()
+                    .unwrap()
+                    .text()
+                    .unwrap()
+                    .contains("missing")
+            );
+        })
+        .unwrap();
+        std::fs::create_dir(&missing).unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.press("secondary-r", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("discovery-errors").is_none());
+            assert!(window.find("discovery-empty").visible());
+        })
+        .unwrap();
+        std::fs::write(missing.join("package.json"), "{}").unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.click("refresh-projects", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("discovery-status").label(), Some("Projects: 1"));
+            assert!(
+                window
+                    .within("project-list")
+                    .find(SharedString::from(
+                        missing
+                            .canonicalize()
+                            .unwrap()
+                            .to_string_lossy()
+                            .into_owned()
+                    ))
+                    .visible()
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn project_roots_discover_refresh_and_persist_through_real_controls(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("中文项目");
+        std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname='demo'\n").unwrap();
+        let path = Some(temp.path().join("config.toml"));
+        cx.update(|cx| {
+            super::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    super::SettingsApp::new(config::Config::default(), path.clone(), window, cx)
+                })
+            })
+            .unwrap()
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("discovery-empty").visible());
+            window.click("scan-root-path", cx);
+            window.input(root.to_str().unwrap(), cx);
+            window.press("tab", cx);
+            assert_eq!(window.find("add-scan-root").focused(), Some(true));
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(config::load_from(path.clone()).roots, vec![root.clone()]);
+        cx.update_window(handle, |_, window, cx| {
+            window.click("add-scan-root", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(config::load_from(path.clone()).roots, vec![root.clone()]);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("duplicate-root").visible());
+        })
+        .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window
+                    .within("project-list")
+                    .find(SharedString::from(
+                        root.canonicalize().unwrap().to_string_lossy().into_owned()
+                    ))
+                    .visible()
+            );
+            window.click("nav-global-caches", cx);
+            assert!(window.find("cache-progress").visible());
+            window.click("nav-projects", cx);
+            window.press("secondary-r", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window
+                .within("scan-roots")
+                .click(SharedString::from(root.to_string_lossy().into_owned()), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(config::load_from(path).roots.is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn settings_changes_survive_restart_and_escape_restores_focus(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let path = Some(temp.path().join("config.toml"));
+        std::fs::write(path.as_ref().unwrap(), "roots = ['/work/中文项目']\n").unwrap();
+        cx.update(|cx| {
+            super::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    super::SettingsApp::new(
+                        config::load_from(path.clone()),
+                        path.clone(),
+                        window,
+                        cx,
+                    )
+                })
+            })
+            .unwrap()
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("secondary-,", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.within("language").click(2usize, cx);
+            window.within("theme").click(2usize, cx);
+            window.within("delete-mode").click(1usize, cx);
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("dialog").is_none());
+            assert_eq!(window.find("workspace").focused(), Some(true));
+        })
+        .unwrap();
+        let restored = config::load_from(path.clone());
+        assert_eq!(restored.language, LanguageChoice::En);
+        assert_eq!(restored.theme, ThemeChoice::Dark);
+        assert_eq!(restored.delete_mode, DeleteMode::Direct);
+        assert_eq!(
+            restored.roots,
+            vec![std::path::PathBuf::from("/work/中文项目")]
+        );
+        let (reopened, _) = cx.update(|cx| {
+            gpui_kit::open_window(super::window_options(&restored, cx), cx, |window, cx| {
+                cx.new(|cx| super::SettingsApp::new(restored, path.clone(), window, cx))
+            })
+            .unwrap()
+        });
+        cx.update_window(reopened, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("settings", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(reopened, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.within("language").find(2usize).checked(), Some(true));
+            assert_eq!(window.within("theme").find(2usize).checked(), Some(true));
+            assert_eq!(
+                window.within("delete-mode").find(1usize).checked(),
+                Some(true)
+            );
+            window.within("delete-mode").click(0usize, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            config::load_from(path.clone()).delete_mode,
+            DeleteMode::Trash
+        );
+        cx.update_window(reopened, |_, window, cx| {
+            // Kit radios are individual Tab stops; reach the choice through real keyboard navigation.
+            for _ in 0..12 {
+                if window.within("delete-mode").find(1usize).focused() == Some(true) {
+                    break;
+                }
+                window.press("tab", cx);
+            }
+            assert_eq!(
+                window.within("delete-mode").find(1usize).focused(),
+                Some(true)
+            );
+            window.press("space", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(config::load_from(path).delete_mode, DeleteMode::Direct);
+    }
+    #[gpui_kit::test]
+    fn resized_window_and_saved_settings_are_restored_in_a_new_window(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let path = Some(temp.path().join("config.toml"));
+        cx.update(|cx| {
+            super::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| {
+                    super::SettingsApp::new(config::Config::default(), path.clone(), window, cx)
+                })
+            })
+            .unwrap()
+        });
+        cx.simulate_window_resize(
+            handle,
+            gpui_kit::size(gpui_kit::px(1150.), gpui_kit::px(760.)),
+        );
+        cx.run_until_parked();
+        let restored = config::load_from(path.clone());
+        assert_eq!(
+            restored.window,
+            Some(config::Window {
+                width: 1150.,
+                height: 760.
+            })
+        );
+        let (reopened, _) = cx.update(|cx| {
+            gpui_kit::open_window(super::window_options(&restored, cx), cx, |window, cx| {
+                cx.new(|cx| super::SettingsApp::new(restored.clone(), path.clone(), window, cx))
+            })
+            .unwrap()
+        });
+        cx.update_window(reopened, |_, window, cx| {
+            assert_eq!(
+                window.viewport_size(),
+                gpui_kit::size(gpui_kit::px(1150.), gpui_kit::px(760.))
+            );
+            window.render_frame(cx);
+            // Title-bar sidebar toggle is the first stop; settings lives in the sidebar footer.
+            for _ in 0..8 {
+                if window.find("settings").focused() == Some(true) {
+                    break;
+                }
+                window.press("tab", cx);
+            }
+            assert_eq!(window.find("settings").focused(), Some(true));
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(reopened, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("dialog").is_some());
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(reopened, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("settings").focused(), Some(true));
+        })
+        .unwrap();
+    }
+}

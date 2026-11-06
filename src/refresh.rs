@@ -104,6 +104,11 @@ impl Refresh {
             || execution.is_some_and(|execution| execution.running());
     }
 
+    /// Whether a confirmed Clean or active Execute currently defers discovery.
+    pub fn is_clean_locked(&self) -> bool {
+        self.clean_locked
+    }
+
     /// Start measurements, including independent cache requests supplied by the adapter.
     pub fn measure(&mut self, requests: Vec<SizeRequest>, executor: &mut impl RefreshExecutor) {
         if requests.is_empty() {
@@ -227,5 +232,31 @@ impl Refresh {
             self.request(projects, roots, rules, executor);
         }
         changed
+    }
+}
+
+/// Foreground refresh policy. `now` is monotonic time supplied by the adapter.
+/// Discovery start (including manual/root discovery) resets the grace period.
+pub struct ActivationRefresh {
+    last_scan: std::time::Duration,
+    active: bool,
+}
+impl ActivationRefresh {
+    pub fn new(now: std::time::Duration, active: bool) -> Self {
+        Self {
+            last_scan: now,
+            active,
+        }
+    }
+    pub fn scanned(&mut self, now: std::time::Duration) {
+        self.last_scan = now;
+    }
+    /// Running discovery satisfies activation; it must not enqueue a second scan.
+    pub fn activate(&mut self, active: bool, now: std::time::Duration, scanning: bool) -> bool {
+        let returned = active && !self.active;
+        self.active = active;
+        returned
+            && !scanning
+            && now.saturating_sub(self.last_scan) >= std::time::Duration::from_secs(30)
     }
 }

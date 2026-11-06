@@ -1,9 +1,9 @@
-use devsweep::cache::CacheGroup;
-use devsweep::config::LanguageChoice;
-use devsweep::delete::FailureReason;
-use devsweep::go_cache::GoCacheError;
-use devsweep::plan::SkipReason;
-use devsweep::scan::Stack;
+use crate::cache::CacheGroup;
+use crate::config::LanguageChoice;
+use crate::delete::FailureReason;
+use crate::go_cache::GoCacheError;
+use crate::plan::SkipReason;
+use crate::scan::Stack;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lang {
@@ -39,6 +39,7 @@ impl Lang {
 
 pub struct Strings {
     pub roots: &'static str,
+    pub discovery_copy_errors: &'static str,
     pub refresh_projects: &'static str,
     pub refresh_scanning: &'static str,
     pub clean_execution_interrupted: &'static str,
@@ -166,8 +167,8 @@ pub struct Strings {
 }
 
 impl Strings {
-    pub fn unity_block(&self, reason: devsweep::unity::BlockReason) -> &'static str {
-        use devsweep::unity::BlockReason;
+    pub fn unity_block(&self, reason: crate::unity::BlockReason) -> &'static str {
+        use crate::unity::BlockReason;
         match reason {
             BlockReason::Version => self.unity_version_block,
             BlockReason::Busy => self.unity_busy,
@@ -176,8 +177,8 @@ impl Strings {
         }
     }
 
-    pub fn unity_note(&self, version: &devsweep::scan::UnityVersion) -> String {
-        use devsweep::scan::UnityVersion;
+    pub fn unity_note(&self, version: &crate::scan::UnityVersion) -> String {
+        use crate::scan::UnityVersion;
         let qualification = match version {
             UnityVersion::Supported(version) => format!("{version}: {}", self.unity_supported),
             UnityVersion::Unsupported(version) => format!("{version}: {}", self.unity_unsupported),
@@ -253,6 +254,7 @@ impl Strings {
 
 static ZH: Strings = Strings {
     roots: "扫描根",
+    discovery_copy_errors: "复制扫描错误",
     refresh_projects: "刷新项目列表",
     refresh_scanning: "正在刷新项目列表",
     clean_execution_interrupted: "清理未正常完成；其余清理项需重新检查",
@@ -266,9 +268,9 @@ static ZH: Strings = Strings {
     remove: "移除",
     projects: "项目",
     empty_title: "还没有扫描根",
-    empty_body: "添加一个目录，DevSweep 会找出其中的 Flutter、Android、iOS、Java 和 Node 项目。",
+    empty_body: "添加扫描根，DevSweep 会根据项目标记发现其中的项目。",
     no_projects_title: "没有找到项目",
-    no_projects_body: "这个目录下没有识别到 Flutter、Android、iOS、Java 或 Node 项目。",
+    no_projects_body: "扫描根下没有识别到项目。请添加其他扫描根，或在项目标记可用后刷新。",
     measuring: "体积计算中",
     project_column: "项目",
     stack_column: "类型",
@@ -381,6 +383,7 @@ static ZH: Strings = Strings {
 
 static EN: Strings = Strings {
     roots: "Scan roots",
+    discovery_copy_errors: "Copy scan errors",
     refresh_projects: "Refresh project list",
     refresh_scanning: "Refreshing project list",
     clean_execution_interrupted: "Cleanup did not finish. Remaining targets need to be checked again.",
@@ -394,9 +397,9 @@ static EN: Strings = Strings {
     remove: "Remove",
     projects: "Projects",
     empty_title: "No scan roots yet",
-    empty_body: "Add a directory and DevSweep will find the Flutter, Android, iOS, Java and Node projects inside it.",
+    empty_body: "Add a scan root to discover projects by their markers.",
     no_projects_title: "No projects found",
-    no_projects_body: "No Flutter, Android, iOS, Java or Node projects were found in this directory.",
+    no_projects_body: "No projects were found under these scan roots. Add another scan root, or refresh after project markers become available.",
     measuring: "Measuring sizes",
     project_column: "Project",
     stack_column: "Type",
@@ -510,7 +513,7 @@ static EN: Strings = Strings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use devsweep::scan::UnityVersion;
+    use crate::scan::UnityVersion;
 
     #[test]
     fn unity_messages_explain_guards_and_version_qualification_in_both_languages() {
@@ -519,10 +522,10 @@ mod tests {
         assert!(zh.unity_notice.contains("废纸篓"));
         assert!(en.unity_notice.contains("Trash"));
         for reason in [
-            devsweep::unity::BlockReason::Busy,
-            devsweep::unity::BlockReason::Unknown,
-            devsweep::unity::BlockReason::Version,
-            devsweep::unity::BlockReason::Path,
+            crate::unity::BlockReason::Busy,
+            crate::unity::BlockReason::Unknown,
+            crate::unity::BlockReason::Version,
+            crate::unity::BlockReason::Path,
         ] {
             assert_ne!(zh.unity_block(reason), en.unity_block(reason));
         }

@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
-mod i18n;
+use devsweep::i18n;
 mod terminal;
 mod theme;
 

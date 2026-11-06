@@ -92,13 +92,48 @@ const PRUNED: [&str; 11] = [
 
 const PLATFORM_DIRS: [&str; 6] = ["android", "ios", "macos", "windows", "linux", "web"];
 
-/// Discover projects under `roots`, sorted by name.
-pub fn scan(roots: &[PathBuf]) -> Vec<Project> {
-    let mut projects = Vec::new();
-    for root in roots {
-        merge_scan(&mut projects, scan_root(root));
+/// Discovered Projects and traversal errors. A partial result is never presented as complete.
+#[derive(Default)]
+pub struct DiscoveryReport {
+    projects: Vec<Project>,
+    errors: Vec<DiscoveryError>,
+}
+impl DiscoveryReport {
+    pub fn projects(&self) -> &[Project] {
+        &self.projects
     }
-    projects
+    pub fn errors(&self) -> &[DiscoveryError] {
+        &self.errors
+    }
+}
+
+/// A directory that discovery could not traverse, with the operating system's reason.
+pub struct DiscoveryError {
+    path: PathBuf,
+    message: String,
+}
+impl DiscoveryError {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+/// Discover projects under `roots`, sorted by name. Retains the legacy best-effort API.
+pub fn scan(roots: &[PathBuf]) -> Vec<Project> {
+    scan_with_errors(roots).projects
+}
+
+/// Discover using the same Marker, Stack and pruning rules, retaining traversal failures.
+/// Callers use `active_roots` to avoid separately walking Covered roots.
+pub fn scan_with_errors(roots: &[PathBuf]) -> DiscoveryReport {
+    let mut report = DiscoveryReport::default();
+    for root in roots {
+        merge_scan(&mut report.projects, scan_root(root, &mut report.errors));
+    }
+    report
 }
 
 /// For each root, the other root that already covers it, if any.
@@ -154,7 +189,14 @@ pub fn retain_scanned<T>(tracked: &mut HashMap<PathBuf, T>, projects: &[Project]
     tracked.retain(|path, _| projects.iter().any(|project| &project.path == path));
 }
 
-fn scan_root(root: &Path) -> Vec<Project> {
+fn scan_root(root: &Path, errors: &mut Vec<DiscoveryError>) -> Vec<Project> {
+    if root.is_file() {
+        errors.push(DiscoveryError {
+            path: root.to_path_buf(),
+            message: "Not a directory".to_owned(),
+        });
+        return Vec::new();
+    }
     let mut projects = Vec::new();
     let walker = WalkDir::new(root)
         .max_depth(MAX_DEPTH)
@@ -165,7 +207,17 @@ fn scan_root(root: &Path) -> Vec<Project> {
                 && !entry.path().parent().is_some_and(inside_unity)
         });
 
-    for entry in walker.filter_map(Result::ok) {
+    for entry in walker {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                errors.push(DiscoveryError {
+                    path: error.path().unwrap_or(root).to_path_buf(),
+                    message: error.to_string(),
+                });
+                continue;
+            }
+        };
         if !entry.file_type().is_dir() {
             continue;
         }

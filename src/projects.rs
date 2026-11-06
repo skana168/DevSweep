@@ -19,6 +19,14 @@ pub struct ProjectRefresh {
 }
 
 impl ProjectRefresh {
+    /// Expand a completed discovery report on the background worker. Applying it with
+    /// `apply_refresh` preserves current Target sizes and drafts for surviving Projects.
+    pub fn from_discovered(projects: Vec<Project>, rules: &[Rule]) -> Self {
+        let mut found = Self::default();
+        found.reconcile(projects, rules);
+        found
+    }
+
     pub fn entries(&self) -> &[ProjectEntry] {
         &self.entries
     }

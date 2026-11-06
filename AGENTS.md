@@ -22,7 +22,7 @@ Single-context: `GLOSSARY.md` + `docs/adr/` at the repo root. See `docs/agents/d
 
 ## UI icons
 
-Use `egui_icons` as the first choice for new or changed UI icons. Use another source only when no suitable icon exists, and document the reason. This applies to custom UI icons; retain the app brand assets, native macOS window controls, and egui built-in widget drawing.
+Use GPUI Kit's bundled icons for the GPUI frontend, and `egui_icons` for the egui frontend retained during migration. Use another source only when the frontend's icon family has no suitable icon, and document the reason. Retain the app brand assets, native window controls, and framework built-in widget drawing.
 
 ## Root README scope
 

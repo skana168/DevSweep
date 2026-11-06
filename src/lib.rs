@@ -2,6 +2,11 @@ pub mod cache;
 pub mod config;
 pub mod delete;
 pub mod go_cache;
+#[cfg(feature = "gpui")]
+pub mod gpui_cache;
+#[cfg(feature = "gpui")]
+pub mod gpui_settings;
+pub mod i18n;
 pub mod plan;
 pub mod project_clean;
 pub mod projects;
@@ -10,3 +15,6 @@ pub mod rules;
 pub mod scan;
 pub mod size;
 pub mod unity;
+
+#[cfg(feature = "gpui")]
+mod gpui_projects;

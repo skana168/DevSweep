@@ -15,6 +15,7 @@ pub struct ProjectClean {
     pub plan: DeletePlan,
     pub query: Option<Receiver<DeletePlan>>,
     targets: Vec<Target>,
+    batch: Option<Vec<crate::projects::ProjectEntry>>,
     confirmed: bool,
     failed: bool,
 }
@@ -29,9 +30,20 @@ impl ProjectClean {
             targets,
             plan: empty(),
             query: None,
+            batch: None,
             confirmed: false,
             failed: false,
         }
+    }
+    /// Capture a cross-project draft without resetting explicit Target choices.
+    pub fn batch(entries: Vec<crate::projects::ProjectEntry>) -> Self {
+        let mut clean = Self::new(PathBuf::new(), vec![]);
+        clean.targets = entries
+            .iter()
+            .flat_map(|entry| entry.targets.clone())
+            .collect();
+        clean.batch = Some(entries);
+        clean
     }
     /// The adapter launches filesystem/process work; the lifecycle owns invalidation.
     pub fn refresh(
@@ -101,6 +113,20 @@ impl ProjectClean {
         if self.confirmed {
             return false;
         }
+        if let Some(entries) = &mut self.batch {
+            for entry in entries {
+                entry.targets = targets
+                    .iter()
+                    .filter(|target| {
+                        entry
+                            .targets
+                            .iter()
+                            .any(|old| old.path == target.path && old.rule_id == target.rule_id)
+                    })
+                    .cloned()
+                    .collect();
+            }
+        }
         self.targets = targets;
         self.plan = empty();
         self.query = None;
@@ -129,18 +155,26 @@ impl ProjectClean {
         roots: Vec<PathBuf>,
         rules: Vec<Rule>,
     ) -> impl FnOnce() -> DeletePlan + Send + 'static {
-        let path = self.project.clone();
-        let targets = self.targets.clone();
-        move || {
-            plan::plan(
-                &[PlanProject {
-                    path: &path,
+        let entries = self.batch.clone().unwrap_or_else(|| {
+            vec![crate::projects::ProjectEntry {
+                project: crate::scan::Project {
+                    path: self.project.clone(),
                     stack,
-                    targets: &targets,
-                }],
-                &roots,
-                &rules,
-            )
+                    name: String::new(),
+                },
+                targets: self.targets.clone(),
+            }]
+        });
+        move || {
+            let projects: Vec<_> = entries
+                .iter()
+                .map(|entry| PlanProject {
+                    path: &entry.project.path,
+                    stack: entry.project.stack,
+                    targets: &entry.targets,
+                })
+                .collect();
+            plan::plan(&projects, &roots, &rules)
         }
     }
     /// Recheck only the confirmed preview's items, then retain the final Unity
@@ -158,34 +192,43 @@ impl ProjectClean {
         if !self.confirmed {
             return None;
         }
-        let mut selected = self.targets.clone();
-        for target in &mut selected {
-            target.checked = self
-                .plan
-                .items
-                .iter()
-                .any(|item| item.target_path == target.path);
-        }
-        let path = self.project.clone();
         let items = self.plan.items.clone();
+        let mut entries = self.batch.clone().unwrap_or_else(|| {
+            vec![crate::projects::ProjectEntry {
+                project: crate::scan::Project {
+                    path: self.project.clone(),
+                    stack,
+                    name: String::new(),
+                },
+                targets: self.targets.clone(),
+            }]
+        });
+        for entry in &mut entries {
+            for target in &mut entry.targets {
+                target.checked = items.iter().any(|item| {
+                    item.project_path == entry.project.path && item.target_path == target.path
+                });
+            }
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         let (check_tx, check_rx) = std::sync::mpsc::channel();
         let abort = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&abort);
         launch(Box::new(move || {
-            let plan = plan::plan(
-                &[PlanProject {
-                    path: &path,
-                    stack,
-                    targets: &selected,
-                }],
-                &roots,
-                &rules,
-            );
+            let projects: Vec<_> = entries
+                .iter()
+                .map(|entry| PlanProject {
+                    path: &entry.project.path,
+                    stack: entry.project.stack,
+                    targets: &entry.targets,
+                })
+                .collect();
+            let plan = plan::plan(&projects, &roots, &rules);
             let _ = check_tx.send(plan.skipped.clone());
             delete::execute(plan, mode, &flag, tx);
         }));
         let mut execution = ProjectExecution::new(rx, items, abort);
+        execution.skipped = self.plan.skipped;
         execution.check = Some(check_rx);
         Some(execution)
     }
@@ -294,7 +337,11 @@ impl ProjectExecution {
         if let Some(rx) = &self.check {
             match rx.try_recv() {
                 Ok(skipped) => {
-                    self.skipped = skipped;
+                    for skip in skipped {
+                        if !self.skipped.contains(&skip) {
+                            self.skipped.push(skip);
+                        }
+                    }
                     self.check = None;
                 }
                 Err(TryRecvError::Disconnected) => {
@@ -334,6 +381,46 @@ mod tests {
             dangerous: false,
             label: None,
         }
+    }
+    #[test]
+    fn batch_confirmation_rechecks_only_reviewed_targets_and_unlocks_after_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        for name in ["alpha", "beta"] {
+            std::fs::create_dir_all(root.join(name).join("node_modules")).unwrap();
+            std::fs::write(root.join(name).join("package.json"), "{}").unwrap();
+        }
+        let rules = crate::rules::builtin_rules();
+        let mut projects = crate::projects::ProjectRefresh::from_discovered(
+            crate::scan::scan(&[root.clone()]),
+            &rules,
+        );
+        for name in ["alpha", "beta"] {
+            for target in projects.targets_mut(&root.join(name)).unwrap() {
+                target.size = Some(42);
+            }
+        }
+        let mut clean = ProjectClean::batch(projects.entries().to_vec());
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(clean.task(Stack::Node, vec![root.clone()], rules.clone())())
+            .unwrap();
+        clean.preview(rx);
+        clean.poll();
+        assert_eq!(clean.plan.total_bytes, 84);
+        assert!(clean.confirm());
+        assert!(!clean.edit(vec![]));
+        std::fs::remove_dir_all(root.join("beta/node_modules")).unwrap();
+        let mut execution = clean
+            .execute(Stack::Node, vec![root], rules, DeleteMode::Direct, |work| {
+                work()
+            })
+            .unwrap();
+        execution.poll_projects(&mut projects);
+        assert!(!execution.running());
+        assert_eq!(execution.report.as_ref().unwrap().freed_bytes, 42);
+        assert!(execution.report.as_ref().unwrap().failures.is_empty());
+        assert_eq!(execution.skipped.len(), 1);
+        assert!(projects.entries()[0].targets.is_empty());
     }
     #[test]
     fn execution_disconnect_retains_deleted_bytes_and_abort_lock_until_end() {

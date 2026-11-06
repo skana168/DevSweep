@@ -636,3 +636,16 @@ fn unity_requires_each_marker_with_the_right_filesystem_kind() {
     fs::create_dir(game.join("ProjectSettings/ProjectVersion.txt")).unwrap();
     assert!(scan(&[game]).is_empty());
 }
+
+#[test]
+fn discovery_reports_unreadable_roots_without_losing_readable_projects() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("Cargo.toml"), "[package]\nname='demo'\n").unwrap();
+    let missing = temp.path().join("missing");
+    let report = devsweep::scan::scan_with_errors(&[temp.path().to_path_buf(), missing.clone()]);
+    assert_eq!(report.projects().len(), 1);
+    assert_eq!(report.projects()[0].stack, devsweep::scan::Stack::Rust);
+    assert_eq!(report.errors().len(), 1);
+    assert_eq!(report.errors()[0].path(), missing);
+    assert!(!report.errors()[0].message().is_empty());
+}
