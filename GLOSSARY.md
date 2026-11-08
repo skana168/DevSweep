@@ -72,6 +72,10 @@ _Avoid_: 可回收体积、项目大小
 
 ## 清理
 
+**Cleanup selection（清理选择）**：
+用户在各清理分类中勾选的 Target 与 Cache entry 的集合；切换分类不改变这份选择。Clean 作用于整个集合，通过 Delete plan 排除不符合规则或重叠的路径。
+_Avoid_: 当前页选择、当前分类清理（指整个 Clean 范围时）
+
 **Clean（清理）**：
 用户发起的一次操作：先把勾选的 Target 变成 Delete plan，再执行删除。
 _Avoid_: 删除（指整个流程时）、清空
