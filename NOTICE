@@ -24,3 +24,32 @@ Icon font
 Material Symbols Rounded (Filled), Copyright 2026 Google LLC. All Rights Reserved.
 Provided by egui_icons (https://github.com/Jayuda/egui_icons), with the font under
 the Apache License 2.0 (docs/third-party/LICENSE-APACHE.txt).
+
+GPUI screenshot theme
+---------------------
+The GPUI frontend uses the user-supplied reference image (ADR 0003).
+assets/ui-icons.ttf is Material Symbols Rounded (outlined), from egui_icons,
+under Apache License 2.0. The brand SVG outlines in assets/brands (except Godot, Gradle, OpenAI, NuGet and npm-square)
+are exported from egui_icons' bundled Material Design Icons font, Copyright
+Pictogrammers, under the Apache License 2.0.
+Godot's logo is from devicons/devicon (MIT), originally the Godot Engine logo
+(Copyright Juan Linietsky, Ariel Manzur and contributors, CC BY 4.0).
+Source: https://github.com/devicons/devicon/blob/master/icons/godot/godot-original.svg
+It is used because egui_icons has no suitable Godot brand glyph.
+
+Licenses: docs/third-party/LICENSE-PICTOGRAMMERS.txt and
+docs/third-party/LICENSE-DEVICON.txt.
+Godot logo license: https://creativecommons.org/licenses/by/4.0/
+Godot press kit: https://godotengine.org/press/
+
+Developer-tools icon exceptions
+------------------------------
+Gradle uses devicons/devicon's actual Gradle elephant (MIT); egui_icons' generic
+elephant does not match the reference brand silhouette. OpenAI and NuGet use
+Simple Icons v15.0.0 SVGs (CC0), as egui_icons has no matching brand glyphs.
+Sources: https://github.com/simple-icons/simple-icons/tree/15.0.0/icons
+The npm-square vector follows the reference image's compact logomark; the
+egui_icons npm glyph is a wide wordmark and does not fit that reference slot.
+Brand marks are used to identify their respective tools.
+
+Simple Icons license: docs/third-party/LICENSE-SIMPLE-ICONS.txt.
